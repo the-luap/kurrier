@@ -33,6 +33,7 @@ export default function WebmailListItemMobile({
 	labelsByThreadId,
 }: Props) {
 	const router = useRouter();
+	const [isDeleting, setIsDeleting] = React.useState(false);
 
 	const formatDateLabel = () => {
 		const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -111,6 +112,8 @@ export default function WebmailListItemMobile({
 	const { state, setState } = useDynamicContext<{
 		selectedThreadIds: Set<string>;
 	}>();
+
+	if (isDeleting) return null;
 
 	return (
 		<li
@@ -240,16 +243,27 @@ export default function WebmailListItemMobile({
 					</button>
 				)}
 				<button
-					onClick={async () => {
-						await moveToTrash(
-							mailboxThreadItem.threadId,
-							activeMailbox.id,
-							!!mailboxSync,
-							true,
-						);
-						toast.success("Messages moved to Trash", {
-							position: "bottom-left",
-						});
+					onClick={async (e) => {
+						e.preventDefault();
+						e.stopPropagation();
+						setIsDeleting(true);
+						try {
+							await moveToTrash(
+								mailboxThreadItem.threadId,
+								activeMailbox.id,
+								!!mailboxSync,
+								true,
+							);
+							toast.success("Messages moved to Trash", {
+								position: "bottom-left",
+							});
+							router.refresh();
+						} catch (error) {
+							setIsDeleting(false);
+							toast.error(error instanceof Error ? error.message : "Delete failed", {
+								position: "bottom-left",
+							});
+						}
 					}}
 					className="rounded p-1 hover:bg-muted"
 					title="Delete"
