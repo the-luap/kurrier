@@ -830,6 +830,57 @@ export const moveToTrash = async (
 	}
 };
 
+export const moveToSpam = async (
+	threadIds: string | string[],
+	mailboxId: string,
+	moveImap: boolean,
+	refresh: boolean,
+	messageId?: string,
+) => {
+	const ids = (Array.isArray(threadIds) ? threadIds : [threadIds])
+		.map(String)
+		.filter(Boolean);
+
+	if (!ids.length || !mailboxId) return;
+
+	const { smtpQueue, searchIngestQueue } = await getRedis();
+
+	await Promise.all(
+		ids.map((threadId) =>
+			smtpQueue.add(
+				"mail:move",
+				{ threadId, mailboxId, op: "spam", messageId, moveImap },
+				{
+					attempts: 3,
+					backoff: { type: "exponential", delay: 1500 },
+					removeOnComplete: true,
+					removeOnFail: false,
+				},
+			),
+		),
+	);
+
+	await Promise.all(
+		ids.map((threadId) =>
+			searchIngestQueue.add(
+				"refresh-thread",
+				{ threadId },
+				{
+					jobId: `refresh-${threadId}`,
+					removeOnComplete: true,
+					removeOnFail: false,
+					attempts: 3,
+					backoff: { type: "exponential", delay: 1500 },
+				},
+			),
+		),
+	);
+
+	if (refresh) {
+		revalidatePath("/mail");
+	}
+};
+
 export const toggleStar = async (
 	threadId: string,
 	mailboxId: string,

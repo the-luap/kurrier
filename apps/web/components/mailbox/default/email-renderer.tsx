@@ -4,7 +4,17 @@ import React, { useEffect, useRef, useState } from "react";
 import { MessageAttachmentEntity, MessageEntity } from "@db";
 import { getMessageAddress, getMessageName } from "@common/mail-client";
 import slugify from "@sindresorhus/slugify";
-import { Code, Download, EllipsisVertical, Forward, Reply } from "lucide-react";
+import {
+	Ban,
+	Code,
+	Download,
+	EllipsisVertical,
+	Forward,
+	Mail,
+	MailOpen,
+	Reply,
+	Trash2,
+} from "lucide-react";
 import { Temporal } from "@js-temporal/polyfill";
 import dynamic from "next/dynamic";
 import { ActionIcon, Button, Menu, Modal } from "@mantine/core";
@@ -15,11 +25,15 @@ import {
 	fetchMailbox,
 	FetchThreadMailSubsResult,
 	markAsRead,
+	markAsUnread,
+	moveToSpam,
+	moveToTrash,
 } from "@/lib/actions/mailbox";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { useDisclosure } from "@mantine/hooks";
 import MailUnsubscriber from "@/components/mailbox/default/mail-unsubscriber";
+import { toast } from "sonner";
 const EmailEditor = dynamic(
 	() => import("@/components/mailbox/default/editor/email-editor"),
 	{
@@ -113,6 +127,9 @@ function EmailRenderer({
 	const [showEditorMode, setShowEditorMode] = useState<string>("reply");
 	const editorRef = useRef<EmailEditorHandle>(null);
 	const seenRef = useRef(false);
+	const router = useRouter();
+	const [isRead, setIsRead] = useState(Boolean(message.seen));
+	const [isMutating, setIsMutating] = useState(false);
 
 	const [sentMailboxId, setSentMailboxId] = useState<string | undefined>(
 		undefined,
@@ -132,9 +149,57 @@ function EmailRenderer({
 	useEffect(() => {
 		if (activeMailboxId && threadIndex === 0 && !seenRef.current) {
 			seenRef.current = true;
+			setIsRead(true);
 			void markAsRead(threadId, activeMailboxId, markSmtp, false);
 		}
 	}, [activeMailboxId, markSmtp, threadId, threadIndex]);
+
+	const mailboxHref = `/dashboard/mail/${String(params.identityPublicId)}/${String(params.mailboxSlug)}`;
+
+	const markThreadReadState = async (read: boolean) => {
+		if (!activeMailboxId || isMutating) return;
+		const previous = isRead;
+		setIsRead(read);
+		setIsMutating(true);
+		try {
+			if (read) {
+				await markAsRead(threadId, activeMailboxId, markSmtp, true);
+				toast.success("Marked as read", { position: "bottom-left" });
+			} else {
+				await markAsUnread(threadId, activeMailboxId, markSmtp, true);
+				toast.success("Marked as unread", { position: "bottom-left" });
+			}
+			router.refresh();
+		} catch (error) {
+			setIsRead(previous);
+			toast.error(error instanceof Error ? error.message : "Action failed", {
+				position: "bottom-left",
+			});
+		} finally {
+			setIsMutating(false);
+		}
+	};
+
+	const moveThreadOut = async (target: "trash" | "spam") => {
+		if (!activeMailboxId || isMutating) return;
+		setIsMutating(true);
+		try {
+			if (target === "trash") {
+				await moveToTrash(threadId, activeMailboxId, markSmtp, true);
+				toast.success("Message moved to Trash", { position: "bottom-left" });
+			} else {
+				await moveToSpam(threadId, activeMailboxId, markSmtp, true);
+				toast.success("Message marked as spam", { position: "bottom-left" });
+			}
+			router.push(mailboxHref);
+			router.refresh();
+		} catch (error) {
+			setIsMutating(false);
+			toast.error(error instanceof Error ? error.message : "Action failed", {
+				position: "bottom-left",
+			});
+		}
+	};
 
 	const downloadEml = async () => {
 		const supabase = createClient(publicConfig);
@@ -360,6 +425,30 @@ function EmailRenderer({
 					<div className={"flex gap-1 justify-end items-center"}>
 						<ActionIcon
 							variant={"transparent"}
+							disabled={isMutating}
+							onClick={() => markThreadReadState(!isRead)}
+							title={isRead ? "Mark as unread" : "Mark as read"}
+						>
+							{isRead ? <Mail size={18} /> : <MailOpen size={18} />}
+						</ActionIcon>
+						<ActionIcon
+							variant={"transparent"}
+							disabled={isMutating}
+							onClick={() => moveThreadOut("spam")}
+							title="Mark as spam"
+						>
+							<Ban size={18} />
+						</ActionIcon>
+						<ActionIcon
+							variant={"transparent"}
+							disabled={isMutating}
+							onClick={() => moveThreadOut("trash")}
+							title="Delete"
+						>
+							<Trash2 size={18} />
+						</ActionIcon>
+						<ActionIcon
+							variant={"transparent"}
 							onClick={() => {
 								setShowEditor(!showEditor);
 							}}
@@ -374,6 +463,29 @@ function EmailRenderer({
 								</Menu.Target>
 
 								<Menu.Dropdown>
+									<Menu.Item
+										leftSection={isRead ? <Mail size={14} /> : <MailOpen size={14} />}
+										onClick={() => markThreadReadState(!isRead)}
+										disabled={isMutating}
+									>
+										{isRead ? "Mark as unread" : "Mark as read"}
+									</Menu.Item>
+									<Menu.Item
+										leftSection={<Ban size={14} />}
+										onClick={() => moveThreadOut("spam")}
+										disabled={isMutating}
+									>
+										Mark as spam
+									</Menu.Item>
+									<Menu.Item
+										leftSection={<Trash2 size={14} />}
+										onClick={() => moveThreadOut("trash")}
+										disabled={isMutating}
+										color="red"
+									>
+										Delete
+									</Menu.Item>
+									<Menu.Divider />
 									<Menu.Item
 										leftSection={<Reply size={14} />}
 										onClick={() => {
