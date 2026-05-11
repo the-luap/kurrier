@@ -184,6 +184,7 @@ export default function IdentityMailboxesList({
 					<div className="flex w-full items-start">
 						<Link
 							href={href}
+							prefetch={false}
 							onClick={onComplete ? () => onComplete() : undefined}
 							aria-disabled={!m.selectable}
 							className={cn(
@@ -280,6 +281,7 @@ export default function IdentityMailboxesList({
 						{scheduledCounts > 0 && (
 							<Link
 								href={`/dashboard/mail/${params.identityPublicId}/scheduled`}
+								prefetch={false}
 								className={`my-2 rounded hover:dark:bg-neutral-800 ${currentSlug === "scheduled" ? "dark:bg-neutral-800 dark:text-brand-foreground bg-brand-200 text-brand" : ""} flex justify-start gap-1 w-full p-1.5`}
 							>
 								<IconMailFast size={22} />
@@ -292,6 +294,7 @@ export default function IdentityMailboxesList({
 						{snoozedCounts > 0 && (
 							<Link
 								href={`/dashboard/mail/${params.identityPublicId}/snoozed`}
+								prefetch={false}
 								className={`my-2 rounded hover:dark:bg-neutral-800 ${currentSlug === "snoozed" ? "dark:bg-neutral-800 dark:text-brand-foreground bg-brand-200 text-brand" : ""} flex justify-start gap-1 w-full p-1.5 items-center`}
 							>
 								<Clock4 size={16} />

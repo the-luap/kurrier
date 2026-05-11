@@ -96,6 +96,7 @@ export function UnifiedMailboxNav({
 		return (
 			<Link
 				href={href}
+				prefetch={false}
 				className={cn(
 					"group flex items-center gap-2 rounded-md px-2 py-1.5 text-sm",
 					"hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
