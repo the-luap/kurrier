@@ -16,6 +16,7 @@ import { sendMail } from "@/lib/actions/mailbox";
 import type { FormState, PublicConfig } from "@schema";
 import { DynamicContextProvider } from "@/hooks/use-dynamic-context";
 import { toast } from "sonner";
+import { Select } from "@mantine/core";
 
 export type EmailEditorHandle = {
 	focus: () => void;
@@ -28,6 +29,8 @@ type Props = {
 	publicConfig: PublicConfig;
 	showEditorMode: string;
 	sentMailboxId: string;
+	senderOptions?: { value: string; label: string; email: string }[];
+	onSentMailboxChange?: (sentMailboxId: string) => void;
 	handleClose: () => void;
 };
 
@@ -39,6 +42,8 @@ const EmailEditor = forwardRef<EmailEditorHandle, Props>(
 			publicConfig,
 			showEditorMode,
 			sentMailboxId,
+			senderOptions = [],
+			onSentMailboxChange,
 			handleClose,
 		},
 		ref,
@@ -89,6 +94,29 @@ const EmailEditor = forwardRef<EmailEditorHandle, Props>(
 								name={"messageMailboxId"}
 								value={message?.mailboxId}
 							/>
+							{!message && senderOptions.length > 0 && (
+								<div className="border-b px-3 py-2 grid items-center gap-2 sm:grid-cols-[72px,1fr]">
+									<span className="text-[13px] text-muted-foreground sm:text-right leading-6">
+										From
+									</span>
+									<Select
+										aria-label="From account"
+										data={senderOptions}
+										value={sentMailboxId || null}
+										onChange={(value) => value && onSentMailboxChange?.(value)}
+										placeholder="Select sender account"
+										variant="unstyled"
+										searchable
+										allowDeselect={false}
+										comboboxProps={{
+											withinPortal: true,
+											position: "bottom",
+											offset: 8,
+											zIndex: 2000,
+										}}
+									/>
+								</div>
+							)}
 							<input
 								type={"hidden"}
 								name={"sentMailboxId"}

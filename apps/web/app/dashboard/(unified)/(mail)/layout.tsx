@@ -42,7 +42,10 @@ export default async function DashboardLayout({
 				sidebarTopContent={
 					<div className={"-mt-1"} key={"mail-sidebar-compose"}>
 						{identityMailboxes.length > 0 && (
-							<ComposeMail publicConfig={publicConfig} />
+							<ComposeMail
+								publicConfig={publicConfig}
+								identityMailboxes={identityMailboxes}
+							/>
 						)}
 					</div>
 				}

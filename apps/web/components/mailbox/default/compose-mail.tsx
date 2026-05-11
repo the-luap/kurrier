@@ -8,7 +8,11 @@ import EmailEditor, {
 } from "@/components/mailbox/default/editor/email-editor";
 import { PublicConfig } from "@schema";
 import { Button } from "@/components/ui/button";
-import { fetchMailbox } from "@/lib/actions/mailbox";
+import {
+	fetchIdentityMailboxList,
+	fetchMailbox,
+	type FetchIdentityMailboxListResult,
+} from "@/lib/actions/mailbox";
 import { useParams } from "next/navigation";
 import { useMediaQuery } from "@mantine/hooks";
 import { ActionIcon } from "@mantine/core";
@@ -33,30 +37,80 @@ function Portal({ children }: { children: React.ReactNode }) {
 
 export default function ComposeMail({
 	publicConfig,
+	identityMailboxes: initialIdentityMailboxes,
 }: {
 	publicConfig: PublicConfig;
+	identityMailboxes?: FetchIdentityMailboxListResult;
 }) {
 	const [open, setOpen] = useState(false);
 	const [appeared, setAppeared] = useState(false);
 	const [minimized, setMinimized] = useState(false);
 	const [expanded, setExpanded] = useState(false);
 	const [sentMailboxId, setSentMailboxId] = useState<string>();
+	const [senderOptions, setSenderOptions] = useState<
+		{ value: string; label: string; email: string }[]
+	>([]);
 	const [showEditorMode, setShowEditorMode] = useState<string>("compose");
 	const editorRef = useRef<EmailEditorHandle>(null);
 	const params = useParams();
 	const isMobile = useMediaQuery("(max-width: 768px)");
 
-	const fetchSentMailbox = async () => {
-		const { activeMailbox } = await fetchMailbox(
-			String(params.identityPublicId),
-			"sent",
+	const findSentMailbox = (entry: FetchIdentityMailboxListResult[number]) => {
+		return (
+			entry.mailboxes.find((mailbox) => mailbox.kind === "sent") ??
+			entry.mailboxes.find((mailbox) => mailbox.slug === "sent") ??
+			entry.mailboxes.find((mailbox) => mailbox.slug === "gesendet") ??
+			entry.mailboxes.find((mailbox) =>
+				mailbox.name?.toLowerCase().includes("sent"),
+			) ??
+			entry.mailboxes.find((mailbox) =>
+				mailbox.name?.toLowerCase().includes("gesendet"),
+			)
 		);
-		setSentMailboxId(String(activeMailbox.id));
+	};
+
+	const loadSenders = async () => {
+		const entries = initialIdentityMailboxes?.length
+			? initialIdentityMailboxes
+			: await fetchIdentityMailboxList();
+		const options = entries
+			.map((entry) => {
+				const sentMailbox = findSentMailbox(entry);
+				if (!sentMailbox) return null;
+				const email = String(entry.identity.value ?? "");
+				return { value: String(sentMailbox.id), label: email, email };
+			})
+			.filter(Boolean) as { value: string; label: string; email: string }[];
+
+		setSenderOptions(options);
+
+		const activeIdentityPublicId = params.identityPublicId
+			? String(params.identityPublicId)
+			: null;
+		const activeEntry = activeIdentityPublicId
+			? entries.find((entry) => entry.identity.publicId === activeIdentityPublicId)
+			: null;
+		const activeSentMailbox = activeEntry ? findSentMailbox(activeEntry) : null;
+
+		if (activeSentMailbox) {
+			setSentMailboxId(String(activeSentMailbox.id));
+			return;
+		}
+
+		if (options[0]) {
+			setSentMailboxId(options[0].value);
+			return;
+		}
+
+		if (activeIdentityPublicId) {
+			const { activeMailbox } = await fetchMailbox(activeIdentityPublicId, "sent");
+			setSentMailboxId(String(activeMailbox.id));
+		}
 	};
 
 	useEffect(() => {
 		if (!open) return;
-		fetchSentMailbox();
+		loadSenders();
 
 		const t = setTimeout(() => setAppeared(true), 16);
 		const prev = document.body.style.overflow;
@@ -76,6 +130,7 @@ export default function ComposeMail({
 		setOpen(true);
 		setMinimized(false);
 		setExpanded(false);
+		setSentMailboxId(undefined);
 	};
 
 	const handleClose = () => {
@@ -134,6 +189,8 @@ export default function ComposeMail({
 							<div className="flex-1 min-h-0 overflow-auto px-0 pb-[env(safe-area-inset-bottom)]">
 								<EmailEditor
 									sentMailboxId={String(sentMailboxId)}
+									senderOptions={senderOptions}
+									onSentMailboxChange={setSentMailboxId}
 									ref={editorRef}
 									publicConfig={publicConfig}
 									message={null}
@@ -192,6 +249,8 @@ export default function ComposeMail({
 								<div className="min-h-0">
 									<EmailEditor
 										sentMailboxId={String(sentMailboxId)}
+										senderOptions={senderOptions}
+										onSentMailboxChange={setSentMailboxId}
 										ref={editorRef}
 										publicConfig={publicConfig}
 										message={null}
