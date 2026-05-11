@@ -34,7 +34,7 @@ export default function WebmailListItemMobile({
 }: Props) {
 	const router = useRouter();
 
-	const dateLabel = (() => {
+	const formatDateLabel = () => {
 		const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
 		try {
 			const zdt = Temporal.Instant.from(
@@ -61,7 +61,12 @@ export default function WebmailListItemMobile({
 		} catch {
 			return "";
 		}
-	})();
+	};
+	const [dateLabel, setDateLabel] = React.useState("");
+
+	React.useEffect(() => {
+		setDateLabel(formatDateLabel());
+	}, [mailboxThreadItem.lastActivityAt]);
 
 	const pathname = usePathname();
 
@@ -185,7 +190,10 @@ export default function WebmailListItemMobile({
 
 			{/* meta */}
 			<div className="ml-auto flex flex-col items-end justify-start gap-1 text-right">
-				<time className="whitespace-nowrap text-sm text-foreground">
+				<time
+					className="whitespace-nowrap text-sm text-foreground"
+					suppressHydrationWarning
+				>
 					{dateLabel}
 				</time>
 			</div>

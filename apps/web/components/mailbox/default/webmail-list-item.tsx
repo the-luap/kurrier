@@ -135,10 +135,19 @@ export default function WebmailListItem({
 	}
 
 	const router = useRouter();
+	const [timeLabel, setTimeLabel] = React.useState({
+		text: "",
+		className: "text-sm text-foreground",
+		title: "",
+	});
 
-	const date = new Date(mailboxThreadItem.lastActivityAt || Date.now());
-	const dateLabel = formatDateLabel(date);
-	const timeLabel = getThreadTimeLabel(mailboxThreadItem);
+	React.useEffect(() => {
+		setTimeLabel(getThreadTimeLabel(mailboxThreadItem));
+	}, [
+		mailboxThreadItem.lastActivityAt,
+		mailboxThreadItem.snoozedUntil,
+		mailboxThreadItem.unsnoozedAt,
+	]);
 
 	const pathname = usePathname();
 	const isOnSnoozedPage = pathname.split("/").includes("snoozed");
@@ -302,6 +311,7 @@ export default function WebmailListItem({
 					<time
 						className={["whitespace-nowrap", timeLabel.className].join(" ")}
 						title={timeLabel.title}
+						suppressHydrationWarning
 					>
 						{timeLabel.text}
 					</time>

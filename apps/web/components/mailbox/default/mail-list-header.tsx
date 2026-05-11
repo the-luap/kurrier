@@ -7,6 +7,7 @@ import {
 	deltaFetch,
 	FetchIdentityMailboxListResult,
 	FetchMailboxThreadsResult,
+	getDeltaFetchStatus,
 	markAsRead,
 	moveToTrash,
 	revalidateMailbox,
@@ -30,7 +31,7 @@ import { PublicConfig } from "@schema";
 import { useMediaQuery } from "@mantine/hooks";
 import { clsx } from "clsx";
 import MoveToFolder from "@/components/mailbox/default/move-to-folder";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 
 function MailListHeader({
 	mailboxThreads,
@@ -66,19 +67,67 @@ function MailListHeader({
 		selectedSize === mailboxThreads.length && mailboxThreads.length > 0;
 
 	const [reloading, setReloading] = useState(false);
+	const router = useRouter();
 	const reload = async () => {
 		if (mailboxSync) {
 			const identityId = identityIdRef.current;
 			if (!identityId) return;
+			const toastId = toast.loading("Sync wird gestartet…", {
+				position: "bottom-left",
+			});
 			try {
 				setReloading(true);
-				await deltaFetch({ identityId });
+				const result = await deltaFetch({ identityId });
+				toast.loading("Sync läuft im Hintergrund…", {
+					id: toastId,
+					position: "bottom-left",
+				});
+
+				let finalState: string = String(result.state);
+				let finalError: string | null = null;
+				for (let attempt = 0; attempt < 30; attempt++) {
+					await new Promise((resolve) => setTimeout(resolve, 2000));
+					const status = await getDeltaFetchStatus({ jobId: result.jobId });
+					finalState = status.state;
+					finalError = status.error ?? null;
+
+					if (status.state === "completed") {
+						toast.success("Sync abgeschlossen", {
+							id: toastId,
+							position: "bottom-left",
+						});
+						await revalidateMailbox("/mail");
+						router.refresh();
+						return;
+					}
+
+					if (status.state === "failed") {
+						toast.error(`Sync fehlgeschlagen${finalError ? `: ${finalError}` : ""}`, {
+							id: toastId,
+							position: "bottom-left",
+						});
+						return;
+					}
+				}
+
+				toast.info(`Sync läuft weiter im Hintergrund (${finalState})`, {
+					id: toastId,
+					position: "bottom-left",
+				});
 				await revalidateMailbox("/mail");
+				router.refresh();
+			} catch (error) {
+				toast.error(
+					`Sync konnte nicht gestartet/geprüft werden: ${error instanceof Error ? error.message : String(error)}`,
+					{ id: toastId, position: "bottom-left" },
+				);
 			} finally {
 				setReloading(false);
 			}
 		} else {
-			revalidateMailbox("/mail");
+			await revalidateMailbox("/mail");
+			router.refresh();
+			toast.success("Mailbox aktualisiert", { position: "bottom-left" });
 		}
 	};
 
@@ -163,6 +212,7 @@ function MailListHeader({
 						<ActionIcon
 							variant="subtle"
 							onClick={reload}
+							disabled={reloading}
 							title="Sync"
 							className="h-8 w-8"
 						>

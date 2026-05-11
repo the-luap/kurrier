@@ -356,17 +356,45 @@ export async function sendMail(
 }
 
 export const deltaFetch = async ({ identityId }: { identityId: string }) => {
-	const { smtpQueue, smtpEvents } = await getRedis();
+	const { smtpQueue } = await getRedis();
 	const job = await smtpQueue.add(
 		"delta-fetch",
 		{ identityId },
 		{
-			jobId: `delta-fetch-${identityId}`,
-			removeOnComplete: true,
-			removeOnFail: true,
+			jobId: `delta-fetch-${identityId}-${Date.now()}`,
+			removeOnComplete: { age: 300 },
+			removeOnFail: { age: 900 },
 		},
 	);
-	await job.waitUntilFinished(smtpEvents);
+	const state = await job.getState();
+	return {
+		success: true,
+		jobId: String(job.id),
+		state,
+	};
+};
+
+export const getDeltaFetchStatus = async ({ jobId }: { jobId: string }) => {
+	const { smtpQueue } = await getRedis();
+	const job = await smtpQueue.getJob(jobId);
+
+	if (!job) {
+		return {
+			success: false,
+			state: "missing",
+			error: "Sync job was not found. It may already have been cleaned up.",
+		};
+	}
+
+	const state = await job.getState();
+	const failedReason = job.failedReason;
+
+	return {
+		success: state !== "failed",
+		jobId: String(job.id),
+		state,
+		error: failedReason || null,
+	};
 };
 
 export const initSearch = async (

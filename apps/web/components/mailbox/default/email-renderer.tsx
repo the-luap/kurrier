@@ -1,6 +1,6 @@
 // @ts-nocheck
 "use client";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { MessageAttachmentEntity, MessageEntity } from "@db";
 import { getMessageAddress, getMessageName } from "@common/mail-client";
 import slugify from "@sindresorhus/slugify";
@@ -106,16 +106,8 @@ function EmailRenderer({
 	children?: React.ReactNode;
 }) {
 	const receivedAt = message.date ?? message.createdAt;
-	const formatted = Temporal.Instant.from(receivedAt.toISOString())
-		.toZonedDateTimeISO(Temporal.Now.timeZoneId())
-		.toLocaleString("en-US", {
-			day: "2-digit",
-			month: "short",
-			year: "numeric",
-			hour: "2-digit",
-			minute: "2-digit",
-			hour12: true,
-		});
+	const [formatted, setFormatted] = useState("");
+	const [formattedTime, setFormattedTime] = useState("");
 
 	const [showEditor, setShowEditor] = useState<boolean>(false);
 	const [showEditorMode, setShowEditorMode] = useState<string>("reply");
@@ -179,8 +171,20 @@ function EmailRenderer({
 		}
 	}, [opened]);
 
-	const formattedTime = useMemo(() => {
-		return Temporal.Instant.from(receivedAt.toISOString())
+	useEffect(() => {
+		const instant = Temporal.Instant.from(receivedAt.toISOString());
+		setFormatted(
+			instant.toZonedDateTimeISO(Temporal.Now.timeZoneId()).toLocaleString("en-US", {
+				day: "2-digit",
+				month: "short",
+				year: "numeric",
+				hour: "2-digit",
+				minute: "2-digit",
+				hour12: true,
+			}),
+		);
+		setFormattedTime(
+			instant
 			.toZonedDateTimeISO(Temporal.Now.timeZoneId())
 			.toLocaleString("en-GB", {
 				day: "numeric",
@@ -190,7 +194,8 @@ function EmailRenderer({
 				minute: "2-digit",
 				hour12: false,
 			})
-			.replace(",", " at");
+			.replace(",", " at"),
+		);
 	}, [receivedAt]);
 
 	return (
@@ -211,7 +216,9 @@ function EmailRenderer({
 						<div className="bg-muted px-3 py-2 font-medium text-muted-foreground">
 							Received
 						</div>
-						<div className="px-3 py-2">{formattedTime}</div>
+						<div className="px-3 py-2" suppressHydrationWarning>
+							{formattedTime}
+						</div>
 					</div>
 
 					<div className="grid grid-cols-[160px_1fr] border-b">
@@ -347,7 +354,9 @@ function EmailRenderer({
 						"md:col-span-6 col-span-12 my-1 flex md:justify-end justify-between items-center gap-2 "
 					}
 				>
-					<div className={"text-xs "}>{formatted}</div>
+					<div className={"text-xs "} suppressHydrationWarning>
+						{formatted}
+					</div>
 					<div className={"flex gap-1 justify-end items-center"}>
 						<ActionIcon
 							variant={"transparent"}
