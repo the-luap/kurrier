@@ -19,11 +19,11 @@ async function Page({
 	}>;
 }) {
 	const { threadId, identityPublicId, mailboxSlug } = await params;
-	const { activeMailbox, mailboxSync } = await fetchMailbox(
-		identityPublicId,
-		mailboxSlug,
-	);
-	const activeThread = await fetchWebMailThreadDetail(threadId);
+	const [mailboxResult, activeThread] = await Promise.all([
+		fetchMailbox(identityPublicId, mailboxSlug),
+		fetchWebMailThreadDetail(threadId),
+	]);
+	const { activeMailbox, mailboxSync } = mailboxResult;
 
 	if (!activeMailbox) {
 		return (
@@ -33,21 +33,20 @@ async function Page({
 		);
 	}
 
-	const { previousThreadId, nextThreadId } = await fetchAdjacentMailboxThreads(
-		identityPublicId,
-		mailboxSlug,
-		threadId,
-	);
 	const baseHref = `/dashboard/mail/${identityPublicId}/${mailboxSlug}`;
-
-	const { byMessageId } = await fetchThreadMailSubscriptions({
-		ownerId: activeMailbox.ownerId,
-		messages:
-			activeThread?.messages.map((m: MessageEntity) => ({
-				id: m.id,
-				headersJson: m.headersJson,
-			})) ?? [],
-	});
+	const [adjacentThreads, mailSubscriptions] = await Promise.all([
+		fetchAdjacentMailboxThreads(identityPublicId, mailboxSlug, threadId),
+		fetchThreadMailSubscriptions({
+			ownerId: activeMailbox.ownerId,
+			messages:
+				activeThread?.messages.map((m: MessageEntity) => ({
+					id: m.id,
+					headersJson: m.headersJson,
+				})) ?? [],
+		}),
+	]);
+	const { previousThreadId, nextThreadId } = adjacentThreads;
+	const { byMessageId } = mailSubscriptions;
 
 	return (
 		<>

@@ -120,32 +120,29 @@ function EmailRenderer({
 	const [showEditor, setShowEditor] = useState<boolean>(false);
 	const [showEditorMode, setShowEditorMode] = useState<string>("reply");
 	const editorRef = useRef<EmailEditorHandle>(null);
-	const seenRef = useRef(null);
+	const seenRef = useRef(false);
 
 	const [sentMailboxId, setSentMailboxId] = useState<string | undefined>(
 		undefined,
 	);
 	const params = useParams();
 	const fetchSentMailbox = async () => {
+		if (sentMailboxId) return sentMailboxId;
 		const { activeMailbox } = await fetchMailbox(
 			String(params.identityPublicId),
 			"sent",
 		);
-		setSentMailboxId(String(activeMailbox.id));
+		const id = activeMailbox?.id ? String(activeMailbox.id) : undefined;
+		setSentMailboxId(id);
+		return id;
 	};
 
 	useEffect(() => {
-		if (!sentMailboxId && !seenRef.current) {
+		if (activeMailboxId && threadIndex === 0 && !seenRef.current) {
 			seenRef.current = true;
-			fetchSentMailbox();
+			void markAsRead(threadId, activeMailboxId, markSmtp, false);
 		}
-	}, []);
-
-	useEffect(() => {
-		if (activeMailboxId) {
-			markAsRead(threadId, activeMailboxId, markSmtp, true);
-		}
-	}, [activeMailboxId]);
+	}, [activeMailboxId, markSmtp, threadId, threadIndex]);
 
 	const downloadEml = async () => {
 		const supabase = createClient(publicConfig);
@@ -427,9 +424,10 @@ function EmailRenderer({
 			{threadIndex === numberOfMessages - 1 && !showEditor && (
 				<div className={"flex gap-6"}>
 					<Button
-						onClick={() => {
+						onClick={async () => {
 							setShowEditor(!showEditor);
 							setShowEditorMode("reply");
+							void fetchSentMailbox();
 						}}
 						leftSection={<Reply />}
 						variant={"outline"}
@@ -438,9 +436,10 @@ function EmailRenderer({
 						Reply
 					</Button>
 					<Button
-						onClick={() => {
+						onClick={async () => {
 							setShowEditor(!showEditor);
 							setShowEditorMode("forward");
+							void fetchSentMailbox();
 						}}
 						rightSection={<Forward />}
 						variant={"outline"}
