@@ -1,8 +1,13 @@
-import React from "react";
-import {fetchMailbox, fetchThreadMailSubscriptions, fetchWebMailThreadDetail} from "@/lib/actions/mailbox";
+import {
+	fetchAdjacentMailboxThreads,
+	fetchMailbox,
+	fetchThreadMailSubscriptions,
+	fetchWebMailThreadDetail,
+} from "@/lib/actions/mailbox";
 import ThreadItem from "@/components/mailbox/default/thread-item";
+import ThreadNavigationControls from "@/components/mailbox/default/thread-navigation-controls";
 import { Divider } from "@mantine/core";
-import {MessageEntity} from "@db";
+import type { MessageEntity } from "@db";
 
 async function Page({
 	params,
@@ -20,17 +25,40 @@ async function Page({
 	);
 	const activeThread = await fetchWebMailThreadDetail(threadId);
 
-    const { byMessageId } = await fetchThreadMailSubscriptions({
-        ownerId: activeMailbox.ownerId,
-        messages:
-            activeThread?.messages.map((m: MessageEntity) => ({
-                id: m.id,
-                headersJson: m.headersJson,
-            })) ?? [],
-    });
+	if (!activeMailbox) {
+		return (
+			<div className="p-4 text-sm text-muted-foreground">
+				Mailbox is not available yet. Refresh this page in a moment.
+			</div>
+		);
+	}
+
+	const { previousThreadId, nextThreadId } = await fetchAdjacentMailboxThreads(
+		identityPublicId,
+		mailboxSlug,
+		threadId,
+	);
+	const baseHref = `/dashboard/mail/${identityPublicId}/${mailboxSlug}`;
+
+	const { byMessageId } = await fetchThreadMailSubscriptions({
+		ownerId: activeMailbox.ownerId,
+		messages:
+			activeThread?.messages.map((m: MessageEntity) => ({
+				id: m.id,
+				headersJson: m.headersJson,
+			})) ?? [],
+	});
 
 	return (
 		<>
+			<ThreadNavigationControls
+				backHref={baseHref}
+				previousHref={
+					previousThreadId ? `${baseHref}/threads/${previousThreadId}` : null
+				}
+				nextHref={nextThreadId ? `${baseHref}/threads/${nextThreadId}` : null}
+				messageCount={activeThread?.messages.length ?? 0}
+			/>
 			{activeThread?.messages.map((message, threadIndex) => {
 				return (
 					<div key={message.id}>
@@ -41,9 +69,9 @@ async function Page({
 							threadId={threadId}
 							activeMailboxId={activeMailbox.id}
 							markSmtp={!!mailboxSync}
-                            identityPublicId={identityPublicId}
-                            mailSubscription={byMessageId.get(message.id) ?? null}
-                        />
+							identityPublicId={identityPublicId}
+							mailSubscription={byMessageId.get(message.id) ?? null}
+						/>
 						<Divider className={"opacity-50 mb-6"} ml={"xl"} mr={"xl"} />
 					</div>
 				);

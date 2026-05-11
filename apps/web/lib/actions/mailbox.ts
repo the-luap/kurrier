@@ -488,6 +488,42 @@ export const fetchWebMailThreadDetail = cache(async (threadId: string) => {
 	return result;
 });
 
+export const fetchAdjacentMailboxThreads = cache(
+	async (identityPublicId: string, mailboxSlug: string, threadId: string) => {
+		const rls = await rlsClient();
+		const now = new Date();
+		const effectiveActivityAt = sql`COALESCE(${mailboxThreads.unsnoozedAt}, ${mailboxThreads.lastActivityAt})`;
+
+		const rows = await rls((tx) =>
+			tx
+				.select({ threadId: mailboxThreads.threadId })
+				.from(mailboxThreads)
+				.where(
+					and(
+						eq(mailboxThreads.identityPublicId, identityPublicId),
+						eq(mailboxThreads.mailboxSlug, mailboxSlug),
+						or(
+							isNull(mailboxThreads.snoozedUntil),
+							lte(mailboxThreads.snoozedUntil, now),
+						),
+					),
+				)
+				.orderBy(
+					desc(effectiveActivityAt),
+					desc(mailboxThreads.lastActivityAt),
+					desc(mailboxThreads.threadId),
+				),
+		);
+
+		const index = rows.findIndex((row) => row.threadId === threadId);
+		return {
+			previousThreadId: index > 0 ? rows[index - 1]?.threadId : null,
+			nextThreadId:
+				index >= 0 && index < rows.length - 1 ? rows[index + 1]?.threadId : null,
+		};
+	},
+);
+
 export const markAsRead = cache(
 	async (
 		threadIds: string | string[],

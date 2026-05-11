@@ -11,7 +11,11 @@ import { ActionIcon, Button, Menu, Modal } from "@mantine/core";
 import { EmailEditorHandle } from "@/components/mailbox/default/editor/email-editor";
 import EditorAttachmentItem from "@/components/mailbox/default/editor/editor-attachment-item";
 import { PublicConfig } from "@schema";
-import {fetchMailbox, FetchThreadMailSubsResult, markAsRead} from "@/lib/actions/mailbox";
+import {
+	fetchMailbox,
+	FetchThreadMailSubsResult,
+	markAsRead,
+} from "@/lib/actions/mailbox";
 import { useParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { useDisclosure } from "@mantine/hooks";
@@ -87,7 +91,7 @@ function EmailRenderer({
 	threadId,
 	markSmtp,
 	activeMailboxId,
-    mailSubscription,
+	mailSubscription,
 	children,
 }: {
 	threadIndex: number;
@@ -98,10 +102,11 @@ function EmailRenderer({
 	threadId: string;
 	markSmtp: boolean;
 	activeMailboxId: string;
-    mailSubscription: FetchThreadMailSubsResult["byMessageId"] | null;
+	mailSubscription: FetchThreadMailSubsResult["byMessageId"] | null;
 	children?: React.ReactNode;
 }) {
-	const formatted = Temporal.Instant.from(message.createdAt.toISOString())
+	const receivedAt = message.date ?? message.createdAt;
+	const formatted = Temporal.Instant.from(receivedAt.toISOString())
 		.toZonedDateTimeISO(Temporal.Now.timeZoneId())
 		.toLocaleString("en-US", {
 			day: "2-digit",
@@ -178,7 +183,7 @@ function EmailRenderer({
 	}, [opened]);
 
 	const formattedTime = useMemo(() => {
-		return Temporal.Instant.from(message.createdAt.toISOString())
+		return Temporal.Instant.from(receivedAt.toISOString())
 			.toZonedDateTimeISO(Temporal.Now.timeZoneId())
 			.toLocaleString("en-GB", {
 				day: "numeric",
@@ -189,7 +194,7 @@ function EmailRenderer({
 				hour12: false,
 			})
 			.replace(",", " at");
-	}, [message.createdAt]);
+	}, [receivedAt]);
 
 	return (
 		<>
@@ -207,7 +212,7 @@ function EmailRenderer({
 
 					<div className="grid grid-cols-[160px_1fr] border-b">
 						<div className="bg-muted px-3 py-2 font-medium text-muted-foreground">
-							Created on
+							Received
 						</div>
 						<div className="px-3 py-2">{formattedTime}</div>
 					</div>
@@ -303,12 +308,17 @@ function EmailRenderer({
 
 			<div className={"grid grid-cols-12"}>
 				<div className={"col-span-12"}>
-					{threadIndex === 0 && <div className={"flex gap-3 items-center"}>
-						<div className="text-xl font-base">
-							{message.subject || "No Subject"}
+					{threadIndex === 0 && (
+						<div className={"flex gap-3 items-center"}>
+							<div className="text-xl font-base">
+								{message.subject || "No Subject"}
+							</div>
+							<MailUnsubscriber
+								mailSubscription={mailSubscription}
+								message={message}
+							/>
 						</div>
-                        <MailUnsubscriber mailSubscription={mailSubscription} message={message}/>
-                    </div>}
+					)}
 				</div>
 
 				<div className={"md:col-span-6 col-span-12 flex flex-col"}>
@@ -396,21 +406,23 @@ function EmailRenderer({
 
 			{children}
 
-            {attachments?.length > 0 && (
-                <div className="border-t border-dotted py-4">
-                    <div className="font-semibold mb-4">{attachments.length} attachments</div>
+			{attachments?.length > 0 && (
+				<div className="border-t border-dotted py-4">
+					<div className="font-semibold mb-4">
+						{attachments.length} attachments
+					</div>
 
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                        {attachments.map((attachment) => (
-                            <EditorAttachmentItem
-                                key={attachment.id}
-                                attachment={attachment}
-                                publicConfig={publicConfig}
-                            />
-                        ))}
-                    </div>
-                </div>
-            )}
+					<div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+						{attachments.map((attachment) => (
+							<EditorAttachmentItem
+								key={attachment.id}
+								attachment={attachment}
+								publicConfig={publicConfig}
+							/>
+						))}
+					</div>
+				</div>
+			)}
 
 			{threadIndex === numberOfMessages - 1 && !showEditor && (
 				<div className={"flex gap-6"}>
