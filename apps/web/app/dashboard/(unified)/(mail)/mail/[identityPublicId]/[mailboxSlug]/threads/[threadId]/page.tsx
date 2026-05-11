@@ -49,7 +49,7 @@ async function Page({
 	const { byMessageId } = mailSubscriptions;
 
 	return (
-		<>
+		<div data-thread-panel>
 			<ThreadNavigationControls
 				backHref={baseHref}
 				previousHref={
@@ -75,7 +75,7 @@ async function Page({
 					</div>
 				);
 			})}
-		</>
+		</div>
 	);
 }
 

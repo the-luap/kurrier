@@ -28,6 +28,19 @@ export default function ThreadNavigationControls({
 		[isPending, router],
 	);
 
+	const closeThread = useCallback(() => {
+		if (!backHref || isPending) return;
+
+		window.dispatchEvent(new CustomEvent("kurrier:close-thread"));
+		document
+			.querySelectorAll<HTMLElement>("[data-thread-panel]")
+			.forEach((el) => {
+				el.style.display = "none";
+			});
+		window.history.replaceState(null, "", backHref);
+		startTransition(() => router.replace(backHref));
+	}, [backHref, isPending, router]);
+
 	useEffect(() => {
 		const onKeyDown = (event: KeyboardEvent) => {
 			const target = event.target as HTMLElement | null;
@@ -42,7 +55,7 @@ export default function ThreadNavigationControls({
 
 			if (event.key === "Escape") {
 				event.preventDefault();
-				navigate(backHref);
+				closeThread();
 			}
 
 			if ((event.key === "j" || event.key === "ArrowDown") && nextHref) {
@@ -58,7 +71,7 @@ export default function ThreadNavigationControls({
 
 		window.addEventListener("keydown", onKeyDown);
 		return () => window.removeEventListener("keydown", onKeyDown);
-	}, [backHref, navigate, nextHref, previousHref]);
+	}, [backHref, closeThread, navigate, nextHref, previousHref]);
 
 	const navButtonClass =
 		"inline-flex h-7 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium transition-colors disabled:pointer-events-none disabled:opacity-50";
@@ -70,7 +83,7 @@ export default function ThreadNavigationControls({
 			<div className="flex flex-wrap items-center gap-2">
 				<button
 					type="button"
-					onClick={() => navigate(backHref)}
+					onClick={closeThread}
 					disabled={isPending}
 					className={subtleClass}
 				>
@@ -79,7 +92,7 @@ export default function ThreadNavigationControls({
 				</button>
 				<button
 					type="button"
-					onClick={() => navigate(backHref)}
+					onClick={closeThread}
 					disabled={isPending}
 					className={subtleClass}
 				>

@@ -35,9 +35,20 @@ export default function WebmailList({
 }: WebListProps) {
 	const isMobile = useMediaQuery("(max-width: 768px)");
 	const params = useParams();
+	const [threadOpen, setThreadOpen] = React.useState(Boolean(params?.threadId));
+
+	React.useEffect(() => {
+		setThreadOpen(Boolean(params?.threadId));
+	}, [params?.threadId]);
+
+	React.useEffect(() => {
+		const closeThread = () => setThreadOpen(false);
+		window.addEventListener("kurrier:close-thread", closeThread);
+		return () => window.removeEventListener("kurrier:close-thread", closeThread);
+	}, []);
 
 	return (
-		<div className={params?.threadId ? "hidden" : ""}>
+		<div className={threadOpen ? "hidden" : ""}>
 			<DynamicContextProvider
 				initialState={{
 					selectedThreadIds: new Set(),
