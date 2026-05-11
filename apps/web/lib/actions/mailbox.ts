@@ -522,7 +522,16 @@ export const fetchAdjacentMailboxThreads = cache(
 			return { previousThreadId: null, nextThreadId: null };
 		}
 
-		const cursor = sql`(${current.effectiveActivityAt}, ${current.lastActivityAt}, ${current.threadId})`;
+		const cursorEffectiveActivityAt =
+			current.effectiveActivityAt instanceof Date
+				? current.effectiveActivityAt.toISOString()
+				: String(current.effectiveActivityAt);
+		const cursorLastActivityAt =
+			current.lastActivityAt instanceof Date
+				? current.lastActivityAt.toISOString()
+				: String(current.lastActivityAt);
+		const cursorThreadId = String(current.threadId);
+		const cursor = sql`(${cursorEffectiveActivityAt}::timestamptz, ${cursorLastActivityAt}::timestamptz, ${cursorThreadId}::uuid)`;
 
 		const [previous] = await rls((tx) =>
 			tx
