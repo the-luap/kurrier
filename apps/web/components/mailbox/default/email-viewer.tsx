@@ -15,8 +15,22 @@ const BASE_CSS = `
   --border: #e5e7eb;    /* gray-200 */
   --quote-bg: #f8fafc;  /* slate-50 */
   --quote-bar: #cbd5e1; /* slate-300 */
+  --link: #2563eb;
   color: var(--text);
   display: block;
+  color-scheme: light;
+}
+
+:host-context(.dark),
+:host-context([data-theme="dark"]) {
+  --bg: transparent;
+  --text: #e5e7eb;      /* neutral-200 */
+  --muted: #a1a1aa;     /* zinc-400 */
+  --border: #3f3f46;    /* zinc-700 */
+  --quote-bg: rgba(39, 39, 42, 0.72);
+  --quote-bar: #71717a;
+  --link: #93c5fd;
+  color-scheme: dark;
 }
 
 .email-root {
@@ -26,6 +40,26 @@ const BASE_CSS = `
    word-break: break-word;
    overflow-wrap: anywhere;       /* allow wrapping mid-word */
    white-space: normal !important; /* override inline nowrap */
+}
+
+:host-context(.dark) .email-root,
+:host-context([data-theme="dark"]) .email-root {
+  background: transparent !important;
+}
+
+:host-context(.dark) .email-root,
+:host-context(.dark) .email-root :where(div, p, span, section, article, table, tbody, thead, tfoot, tr, td, th, ul, ol, li, font, center),
+:host-context([data-theme="dark"]) .email-root,
+:host-context([data-theme="dark"]) .email-root :where(div, p, span, section, article, table, tbody, thead, tfoot, tr, td, th, ul, ol, li, font, center) {
+  background-color: transparent !important;
+  background: transparent !important;
+  color: var(--text) !important;
+  border-color: var(--border) !important;
+}
+
+:host-context(.dark) .email-root :where([bgcolor="#ffffff"], [bgcolor="#fff"], [bgcolor="white"]),
+:host-context([data-theme="dark"]) .email-root :where([bgcolor="#ffffff"], [bgcolor="#fff"], [bgcolor="white"]) {
+  background-color: transparent !important;
 }
 
 
@@ -48,7 +82,7 @@ const BASE_CSS = `
 .email-root ul, .email-root ol { padding-left: 1.25rem; margin: .5rem 0 .85rem; }
 .email-root li { margin: .25rem 0; }
 
-.email-root a { color: #2563eb; text-decoration: none; }
+.email-root a { color: var(--link) !important; text-decoration: none; }
 .email-root a:hover { text-decoration: underline; }
 
 .email-root img, .email-root video, .email-root canvas, .email-root svg {
@@ -63,7 +97,7 @@ const BASE_CSS = `
 .email-root pre, .email-root code, .email-root kbd, .email-root samp {
   font-family: ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
 }
-.email-root pre { padding: .75rem; background: #0f172a0d; border-radius: .375rem; overflow: auto; }
+.email-root pre { padding: .75rem; background: color-mix(in srgb, var(--text) 7%, transparent); border-radius: .375rem; overflow: auto; }
 
 /* Softer <hr>, and hide a leading one */
 .email-root hr {
