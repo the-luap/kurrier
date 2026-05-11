@@ -347,13 +347,22 @@ export async function parseAndStoreEmail(
 
 	const encoder = new TextEncoder();
 	const emailBuffer = encoder.encode(rawEmail);
+	let storedRawStorageKey: string | null = opts.rawStorageKey;
 
-	await supabase.storage
+	const { error: rawUploadError } = await supabase.storage
 		.from("attachments")
 		.upload(opts.rawStorageKey, emailBuffer, {
 			contentType: "message/rfc822",
 			upsert: true,
 		});
+	if (rawUploadError) {
+		storedRawStorageKey = null;
+		console.warn("[parseAndStoreEmail] Raw EML upload failed; continuing without raw source", {
+			mailboxId,
+			storageKey: opts.rawStorageKey,
+			message: rawUploadError.message,
+		});
+	}
 
 	const messageId =
 		parsed.messageId || String(headers.get("message-id") || "").trim();
@@ -378,7 +387,7 @@ export async function parseAndStoreEmail(
 		ownerId,
 		headersJson: Object.fromEntries(parsed.headers as Map<string, any>),
 		hasAttachments: (parsed.attachments?.length ?? 0) > 0,
-		rawStorageKey,
+		rawStorageKey: storedRawStorageKey,
 		references: Array.isArray(parsed.references)
 			? parsed.references
 			: parsed.references
@@ -452,7 +461,15 @@ export async function parseAndStoreEmail(
 				upsert: false,
 				cacheControl: "31536000",
 			});
-		if (error) throw error;
+		if (error) {
+			console.warn("[parseAndStoreEmail] Attachment upload failed; skipping attachment", {
+				messageId: message.id,
+				filename: attachment.filename,
+				path: objectPath,
+				message: error.message,
+			});
+			continue;
+		}
 
 		const candidate: MessageAttachmentCreate = {
 			ownerId,

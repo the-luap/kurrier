@@ -1,6 +1,6 @@
 FROM node:20-alpine AS build
 WORKDIR /repo
-RUN corepack enable
+RUN corepack enable && corepack prepare pnpm@10.0.0 --activate
 
 COPY pnpm-lock.yaml package.json pnpm-workspace.yaml ./
 
@@ -21,7 +21,7 @@ ENV PORT=3001
 
 COPY apps/worker/package.json ./package.json
 COPY pnpm-lock.yaml ./pnpm-lock.yaml
-RUN corepack enable && pnpm install --prod
+RUN corepack enable && corepack prepare pnpm@10.0.0 --activate && pnpm install --prod
 
 COPY --from=build /repo/apps/worker/.output ./.output
 EXPOSE 3001
