@@ -8,18 +8,20 @@ import { useDynamicContext } from "@/hooks/use-dynamic-context";
 import type { MailboxEntity } from "@db";
 import {
 	FetchIdentityMailboxListResult,
+	fetchIdentityMailboxList,
 	moveToFolder,
 } from "@/lib/actions/mailbox";
 import { toast } from "sonner";
 
 function MoveToFolder({
-	identityMailboxes,
 	activeMailbox,
 }: {
-	identityMailboxes: FetchIdentityMailboxListResult;
 	activeMailbox: MailboxEntity;
 }) {
 	const [opened, { open, close }] = useDisclosure(false);
+	const [identityMailboxes, setIdentityMailboxes] =
+		React.useState<FetchIdentityMailboxListResult>([]);
+	const [loadingFolders, setLoadingFolders] = React.useState(false);
 	const params = useParams();
 
 	const entry =
@@ -41,6 +43,19 @@ function MoveToFolder({
 
 	const [destId, setDestId] = React.useState<string | null>(null);
 	const [submitting, setSubmitting] = React.useState(false);
+
+	const openMoveDialog = async () => {
+		open();
+		if (identityMailboxes.length > 0 || loadingFolders) return;
+		try {
+			setLoadingFolders(true);
+			setIdentityMailboxes(await fetchIdentityMailboxList());
+		} catch (e: any) {
+			toast.error(e?.message ?? "Could not load folders");
+		} finally {
+			setLoadingFolders(false);
+		}
+	};
 
 	const onConfirm = async () => {
 		const active = activeMailbox;
@@ -71,10 +86,11 @@ function MoveToFolder({
 					<Select
 						data={mailboxOptions[0]?.items ?? []}
 						label="Choose folder"
-						placeholder="Select…"
+						placeholder={loadingFolders ? "Loading folders…" : "Select…"}
 						value={destId}
 						onChange={(v) => setDestId(v)}
 						searchable
+						disabled={loadingFolders}
 						nothingFoundMessage="No folders"
 					/>
 					<div className="flex gap-2 justify-end">
@@ -94,7 +110,7 @@ function MoveToFolder({
 
 			<button
 				type="button"
-				onClick={open}
+				onClick={openMoveDialog}
 				className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs hover:bg-muted"
 				title="Move to folder"
 			>

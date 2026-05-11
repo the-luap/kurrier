@@ -98,8 +98,8 @@ export const fetchMailbox = cache(
 			? await rls((tx) =>
 					tx
 						.select({ count: count() })
-						.from(messages)
-						.where(eq(messages.mailboxId, activeMailbox.id)),
+						.from(mailboxThreads)
+						.where(eq(mailboxThreads.mailboxId, activeMailbox.id)),
 				)
 			: [{ count: 0 }];
 

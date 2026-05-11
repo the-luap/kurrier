@@ -5,7 +5,6 @@ import { useDynamicContext } from "@/hooks/use-dynamic-context";
 import {
 	deleteForever,
 	deltaFetch,
-	FetchIdentityMailboxListResult,
 	FetchMailboxThreadsResult,
 	getDeltaFetchStatus,
 	markAsRead,
@@ -37,12 +36,10 @@ function MailListHeader({
 	mailboxThreads,
 	mailboxSync,
 	publicConfig,
-	identityMailboxes,
 	activeMailbox,
 }: {
 	mailboxThreads: FetchMailboxThreadsResult;
 	publicConfig: PublicConfig;
-	identityMailboxes: FetchIdentityMailboxListResult;
 	activeMailbox: MailboxEntity;
 	mailboxSync?: MailboxSyncEntity;
 }) {
@@ -229,7 +226,6 @@ function MailListHeader({
 						)}
 					>
 						<MoveToFolder
-							identityMailboxes={identityMailboxes}
 							activeMailbox={activeMailbox}
 						/>
 						<button

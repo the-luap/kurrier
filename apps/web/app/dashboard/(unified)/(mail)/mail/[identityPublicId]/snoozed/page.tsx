@@ -1,6 +1,5 @@
 import {
 	fetchMailbox,
-	fetchIdentityMailboxList,
 	fetchIdentitySnoozedThreads,
 } from "@/lib/actions/mailbox";
 import { fetchLabels, fetchMailboxThreadLabels } from "@/lib/actions/labels";
@@ -15,7 +14,6 @@ export default async function SnoozedPage({
 	const { identityPublicId } = await params;
 
 	const publicConfig = await getPublicEnv();
-	const identityMailboxes = await fetchIdentityMailboxList();
 	const globalLabels = await fetchLabels();
 
 	const { threads } = await fetchIdentitySnoozedThreads(identityPublicId);
@@ -49,7 +47,6 @@ export default async function SnoozedPage({
 					publicConfig={publicConfig}
 					activeMailbox={activeMailbox}
 					identityPublicId={identityPublicId}
-					identityMailboxes={identityMailboxes}
 					globalLabels={globalLabels}
 					labelsByThreadId={labelsByThreadId}
 				/>

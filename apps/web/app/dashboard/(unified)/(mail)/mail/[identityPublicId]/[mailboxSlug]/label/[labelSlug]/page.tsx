@@ -1,4 +1,4 @@
-import { fetchIdentityMailboxList, fetchMailbox } from "@/lib/actions/mailbox";
+import { fetchMailbox } from "@/lib/actions/mailbox";
 import {
 	fetchLabels,
 	fetchMailboxThreadLabels,
@@ -28,7 +28,6 @@ export default async function LabelPage({
 		mailboxSlug,
 	);
 	const publicConfig = await getPublicEnv();
-	const identityMailboxes = await fetchIdentityMailboxList();
 	const globalLabels = await fetchLabels();
 
 	const { threads: mailboxThreads, total } = await fetchMailboxThreadsByLabel(
@@ -67,7 +66,6 @@ export default async function LabelPage({
 				activeMailbox={activeMailbox}
 				identityPublicId={identityPublicId}
 				mailboxSync={mailboxSync ?? undefined}
-				identityMailboxes={identityMailboxes}
 				globalLabels={globalLabels}
 				labelsByThreadId={labelsByThreadId}
 			/>

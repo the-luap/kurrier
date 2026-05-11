@@ -1,8 +1,4 @@
-import {
-	fetchIdentityMailboxList,
-	fetchMailbox,
-	fetchMailboxThreads,
-} from "@/lib/actions/mailbox";
+import { fetchMailbox, fetchMailboxThreads } from "@/lib/actions/mailbox";
 import { fetchLabels, fetchMailboxThreadLabels } from "@/lib/actions/labels";
 import { getPublicEnv } from "@schema";
 import MailPagination from "@/components/mailbox/default/mail-pagination";
@@ -19,10 +15,19 @@ async function Page({
 	const { identityPublicId, mailboxSlug } = await params;
 	const publicConfig = getPublicEnv();
 	const resolvedMailboxSlug = mailboxSlug || "inbox";
-	const { activeMailbox, count, mailboxSync } = await fetchMailbox(
+	const mailboxPromise = fetchMailbox(
 		identityPublicId,
 		resolvedMailboxSlug,
 	);
+	const mailboxThreadsPromise = fetchMailboxThreads(
+		identityPublicId,
+		resolvedMailboxSlug,
+		Number(page),
+	);
+	const globalLabelsPromise = fetchLabels();
+
+	const [{ activeMailbox, count, mailboxSync }, mailboxThreads, globalLabels] =
+		await Promise.all([mailboxPromise, mailboxThreadsPromise, globalLabelsPromise]);
 
 	if (!activeMailbox) {
 		return (
@@ -38,15 +43,7 @@ async function Page({
 		);
 	}
 
-	const mailboxThreads = await fetchMailboxThreads(
-		identityPublicId,
-		resolvedMailboxSlug,
-		Number(page),
-	);
-
 	const labelsByThreadId = await fetchMailboxThreadLabels(mailboxThreads);
-	const identityMailboxes = await fetchIdentityMailboxList();
-	const globalLabels = await fetchLabels();
 
 	return (
 		<>
@@ -57,7 +54,6 @@ async function Page({
 					activeMailbox={activeMailbox}
 					identityPublicId={identityPublicId}
 					mailboxSync={mailboxSync ?? undefined}
-					identityMailboxes={identityMailboxes}
 					globalLabels={globalLabels}
 					labelsByThreadId={labelsByThreadId}
 				/>

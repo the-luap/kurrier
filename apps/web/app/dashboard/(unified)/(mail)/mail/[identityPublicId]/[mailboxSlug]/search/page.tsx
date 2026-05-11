@@ -1,5 +1,4 @@
 import {
-	fetchIdentityMailboxList,
 	fetchMailbox,
 	FetchMailboxThreadsByIdsResult,
 	fetchMailboxThreadsList,
@@ -60,8 +59,6 @@ export default async function SearchPage({
 			? await fetchMailboxThreadsList(activeMailbox.id, threadIds)
 			: { threads: [] };
 
-	const identityMailboxes = await fetchIdentityMailboxList();
-
 	const globalLabels = await fetchLabels();
 
 	const labelsByThreadId =
@@ -102,7 +99,6 @@ export default async function SearchPage({
 						publicConfig={publicConfig}
 						activeMailbox={activeMailbox}
 						identityPublicId={identityPublicId}
-						identityMailboxes={identityMailboxes}
 						globalLabels={globalLabels}
 						labelsByThreadId={labelsByThreadId}
 					/>

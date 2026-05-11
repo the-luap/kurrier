@@ -2,10 +2,7 @@
 import * as React from "react";
 import { MailboxEntity, MailboxSyncEntity } from "@db";
 import { PublicConfig } from "@schema";
-import {
-	FetchIdentityMailboxListResult,
-	FetchMailboxThreadsResult,
-} from "@/lib/actions/mailbox";
+import { FetchMailboxThreadsResult } from "@/lib/actions/mailbox";
 import {
 	FetchLabelsResult,
 	FetchMailboxThreadLabelsResult,
@@ -22,7 +19,6 @@ type WebListProps = {
 	publicConfig: PublicConfig;
 	activeMailbox: MailboxEntity;
 	identityPublicId: string;
-	identityMailboxes: FetchIdentityMailboxListResult;
 	globalLabels: FetchLabelsResult;
 	labelsByThreadId: FetchMailboxThreadLabelsResult;
 	mailboxSync?: MailboxSyncEntity;
@@ -34,7 +30,6 @@ export default function WebmailList({
 	identityPublicId,
 	mailboxSync,
 	publicConfig,
-	identityMailboxes,
 	globalLabels,
 	labelsByThreadId,
 }: WebListProps) {
@@ -61,7 +56,6 @@ export default function WebmailList({
 							mailboxThreads={mailboxThreads}
 							mailboxSync={mailboxSync}
 							publicConfig={publicConfig}
-							identityMailboxes={identityMailboxes}
 							activeMailbox={activeMailbox}
 						/>
 
