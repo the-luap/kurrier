@@ -3,7 +3,6 @@ import { AppSidebar } from "@/components/ui/dashboards/unified/default/app-sideb
 import {
 	fetchIdentityMailboxList,
 	fetchIdentitySnoozedThreads,
-	fetchMailboxUnreadCounts,
 	fetchScheduledDraftCounts,
 } from "@/lib/actions/mailbox";
 import { fetchLabelsWithCounts } from "@/lib/actions/labels";
@@ -21,10 +20,9 @@ export default async function DashboardLayout({
 	children: React.ReactNode;
 }) {
 	const publicConfig = getPublicEnv();
-	const [identityMailboxes, unreadCounts, user, globalLabels, scheduledDrafts] =
+	const [identityMailboxes, user, globalLabels, scheduledDrafts] =
 		await Promise.all([
 			fetchIdentityMailboxList(),
-			fetchMailboxUnreadCounts(),
 			isSignedIn(),
 			fetchLabelsWithCounts(),
 			fetchScheduledDraftCounts(),
@@ -53,7 +51,6 @@ export default async function DashboardLayout({
 					<>
 						<IdentityMailboxesList
 							identityMailboxes={identityMailboxes}
-							unreadCounts={unreadCounts}
 							scheduledDrafts={scheduledDrafts}
 							snoozedThreads={snoozedThreads}
 						/>

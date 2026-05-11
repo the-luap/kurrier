@@ -1436,7 +1436,9 @@ export async function snoozeThread(input: {
 	});
 }
 
-export const fetchIdentitySnoozedThreads = async (identityPublicId: string) => {
+export const fetchIdentitySnoozedThreads = async (identityPublicId?: string) => {
+	if (!identityPublicId) return { threads: [] };
+
 	const rls = await rlsClient();
 	const now = new Date();
 
@@ -1446,6 +1448,7 @@ export const fetchIdentitySnoozedThreads = async (identityPublicId: string) => {
 			.from(mailboxThreads)
 			.where(
 				and(
+					eq(mailboxThreads.identityPublicId, identityPublicId),
 					isNotNull(mailboxThreads.snoozedUntil),
 					gt(mailboxThreads.snoozedUntil, now),
 				),

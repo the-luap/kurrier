@@ -17,10 +17,7 @@ import {
 	Clock4,
 } from "lucide-react";
 import * as React from "react";
-import {
-	FetchIdentityMailboxListResult,
-	FetchMailboxUnreadCountsResult,
-} from "@/lib/actions/mailbox";
+import { FetchIdentityMailboxListResult } from "@/lib/actions/mailbox";
 import { MailboxKind } from "@schema";
 import {
 	DraftMessageEntity,
@@ -77,10 +74,7 @@ type TreeMailbox = {
 	children: TreeMailbox[];
 };
 
-function buildTree(
-	rows: MailboxEntity[],
-	unreadCounts: FetchMailboxUnreadCountsResult,
-): TreeMailbox[] {
+function buildTree(rows: MailboxEntity[]): TreeMailbox[] {
 	const byId = new Map<string, TreeMailbox>();
 	const roots: TreeMailbox[] = [];
 
@@ -92,7 +86,7 @@ function buildTree(
 			slug: r.slug ?? null,
 			parentId: (r as any).parentId ?? null,
 			selectable: (r.metaData as any)?.imap?.selectable !== false,
-			unread: unreadCounts.get(r.id)?.unreadTotal ?? 0,
+			unread: Number((r as any).unreadCount ?? 0),
 			children: [],
 		});
 	}
@@ -120,13 +114,11 @@ function buildTree(
 
 export default function IdentityMailboxesList({
 	identityMailboxes,
-	unreadCounts,
 	scheduledDrafts,
 	snoozedThreads,
 	onComplete,
 }: {
 	identityMailboxes: FetchIdentityMailboxListResult;
-	unreadCounts: FetchMailboxUnreadCountsResult;
 	scheduledDrafts: DraftMessageEntity[];
 	snoozedThreads: MailboxThreadEntity[];
 	onComplete?: () => void;
@@ -254,7 +246,7 @@ export default function IdentityMailboxesList({
 	return (
 		<div className="space-y-2 px-2">
 			{identityMailboxes.map(({ identity, mailboxes }) => {
-				const tree = buildTree(mailboxes as MailboxEntity[], unreadCounts);
+				const tree = buildTree(mailboxes as MailboxEntity[]);
 
 				const scheduledCounts = scheduledDrafts.filter(
 					(draft) => draft.identityId === identity.id,
