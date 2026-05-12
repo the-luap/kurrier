@@ -274,6 +274,115 @@ export const revalidateMailbox = async (path: string) => {
 	revalidatePath(path);
 };
 
+type AiReplySuggestionInput = {
+	mode: "reply" | "forward" | "compose" | string;
+	userInstruction?: string;
+	currentHtml?: string;
+	originalSubject?: string | null;
+	originalText?: string | null;
+	originalHtml?: string | null;
+	originalFrom?: unknown;
+};
+
+const stripHtmlForPrompt = (value?: string | null) =>
+	(value || "")
+		.replace(/<style[\s\S]*?<\/style>/gi, " ")
+		.replace(/<script[\s\S]*?<\/script>/gi, " ")
+		.replace(/<br\s*\/?>/gi, "\n")
+		.replace(/<\/p>/gi, "\n")
+		.replace(/<[^>]+>/g, " ")
+		.replace(/&nbsp;/gi, " ")
+		.replace(/&amp;/gi, "&")
+		.replace(/&lt;/gi, "<")
+		.replace(/&gt;/gi, ">")
+		.replace(/&quot;/gi, '"')
+		.replace(/&#39;/gi, "'")
+		.replace(/[ \t]+/g, " ")
+		.replace(/\n{3,}/g, "\n\n")
+		.trim()
+		.slice(0, 6000);
+
+export async function generateAiReplySuggestion(
+	input: AiReplySuggestionInput,
+): Promise<FormState> {
+	const user = await isSignedIn();
+	if (!user) return { success: false, error: "Please sign in first." };
+
+	const { OLLAMA_BASE_URL, OLLAMA_MODEL } = getServerEnv();
+	const originalText = stripHtmlForPrompt(
+		input.originalText || input.originalHtml || "",
+	);
+	const currentDraft = stripHtmlForPrompt(input.currentHtml || "");
+	const instruction = (input.userInstruction || "").trim().slice(0, 1200);
+
+	const prompt = `You are drafting an email inside Kurrier. Return only the proposed email body, no explanations, no subject line.
+
+Mode: ${input.mode || "reply"}
+Subject: ${input.originalSubject || "(none)"}
+From: ${JSON.stringify(input.originalFrom || null)}
+
+User instruction / desired tone:
+${instruction || "Write a concise, helpful, professional reply."}
+
+Current draft, if any:
+${currentDraft || "(empty)"}
+
+Original email context:
+${originalText || "(no original message context)"}
+
+Rules:
+- Match the user's instruction and language.
+- Be concise unless the instruction asks for detail.
+- Do not invent facts, dates, promises, prices, or attachments.
+- Do not include greetings/signature if the current draft already contains them unless needed.
+- Output plain text paragraphs only.`;
+
+	try {
+		const response = await fetch(
+			`${OLLAMA_BASE_URL.replace(/\/$/, "")}/api/generate`,
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					model: OLLAMA_MODEL,
+					prompt,
+					stream: false,
+					options: {
+						temperature: 0.4,
+						num_predict: 700,
+					},
+				}),
+				signal: AbortSignal.timeout(60_000),
+			},
+		);
+
+		if (!response.ok) {
+			return {
+				success: false,
+				error: `Ollama request failed with HTTP ${response.status}.`,
+			};
+		}
+
+		const data = (await response.json()) as {
+			response?: string;
+			error?: string;
+		};
+		if (data.error) return { success: false, error: data.error };
+
+		const suggestion = (data.response || "").trim();
+		if (!suggestion) {
+			return { success: false, error: "Ollama returned an empty suggestion." };
+		}
+
+		return { success: true, data: { suggestion } };
+	} catch (error) {
+		return {
+			success: false,
+			error: `Ollama is not reachable: ${String(error)}`,
+		};
+	}
+}
+
 export async function sendMail(
 	_prev: FormState,
 	formData: FormData,

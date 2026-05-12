@@ -24,6 +24,8 @@ export const ZServerConfig = z.object({
 	TYPESENSE_HOST: z.string("TYPESENSE_HOST must be present"),
 	SEARCH_REBUILD_ON_BOOT: z.string("SEARCH_REBUILD_ON_BOOT must be present"),
 	INBOUND_WEBHOOK_SECRET: z.string().optional(),
+	OLLAMA_BASE_URL: z.string().url().optional().default("http://ollama:11434"),
+	OLLAMA_MODEL: z.string().optional().default("llama3.1"),
 });
 
 /** Safe to expose to the browser */

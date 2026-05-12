@@ -17,6 +17,7 @@ export type TextEditorHandle = {
 	focus: (where?: "start" | "end") => void;
 	getElement: () => HTMLElement | null;
 	getHTML: () => string;
+	setHTML: (html: string) => void;
 };
 
 type TextEditorProps = {
@@ -78,6 +79,12 @@ export const TextEditor = forwardRef<TextEditorHandle, TextEditorProps>(
 				},
 				getElement: () => containerRef.current,
 				getHTML: () => value,
+				setHTML: (html: string) => {
+					if (!editor) return;
+					editor.commands.setContent(html || "");
+					setTextValue(editor.getText().trim());
+					setValue(editor.getHTML().trim());
+				},
 			}),
 			[editor, value],
 		);
