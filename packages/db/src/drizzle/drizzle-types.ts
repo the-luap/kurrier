@@ -18,7 +18,7 @@ import {
     calendarEventAttendees,
     driveVolumes,
     driveEntries,
-    draftMessages, mailSubscriptions,
+    draftMessages, mailSubscriptions, userAiSettings,
 } from "./schema";
 import { decryptedSecrets } from "./supabase-schema";
 import { z } from "zod";
@@ -116,3 +116,6 @@ export type DraftMessageEntity = typeof draftMessages.$inferSelect;
 export const DraftMessageInsertSchema = createInsertSchema(draftMessages);
 
 export type MailSubscriptionEntity = typeof mailSubscriptions.$inferSelect;
+
+export type UserAiSettingsEntity = typeof userAiSettings.$inferSelect;
+export type UserAiSettingsCreate = typeof userAiSettings.$inferInsert;

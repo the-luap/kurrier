@@ -133,6 +133,51 @@ export const secretsMeta = pgTable(
 	],
 ).enableRLS();
 
+export const userAiSettings = pgTable(
+	"user_ai_settings",
+	{
+		id: uuid("id").defaultRandom().primaryKey(),
+		ownerId: uuid("owner_id")
+			.references(() => users.id)
+			.notNull()
+			.default(sql`auth.uid()`),
+		provider: text("provider").notNull().default("ollama"),
+		baseUrl: text("base_url").notNull().default("http://10.0.252.12:11434"),
+		model: text("model").notNull().default("gemma3:12b"),
+		systemPrompt: text("system_prompt"),
+		temperature: numeric("temperature", { precision: 4, scale: 2 })
+			.notNull()
+			.default("0.4"),
+		maxTokens: integer("max_tokens").notNull().default(700),
+		enabled: boolean("enabled").notNull().default(true),
+		createdAt: timestamp("created_at", { withTimezone: true })
+			.defaultNow()
+			.notNull(),
+		updatedAt: timestamp("updated_at", { withTimezone: true })
+			.defaultNow()
+			.notNull(),
+	},
+	(t) => [
+		uniqueIndex("uniq_user_ai_settings_owner_provider").on(t.ownerId, t.provider),
+		pgPolicy("user_ai_settings_select_own", {
+			for: "select",
+			to: authenticatedRole,
+			using: sql`${t.ownerId} = ${authUid}`,
+		}),
+		pgPolicy("user_ai_settings_insert_own", {
+			for: "insert",
+			to: authenticatedRole,
+			withCheck: sql`${t.ownerId} = ${authUid}`,
+		}),
+		pgPolicy("user_ai_settings_update_own", {
+			for: "update",
+			to: authenticatedRole,
+			using: sql`${t.ownerId} = ${authUid}`,
+			withCheck: sql`${t.ownerId} = ${authUid}`,
+		}),
+	],
+).enableRLS();
+
 export const providers = pgTable(
 	"providers",
 	{

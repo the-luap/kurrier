@@ -1,6 +1,7 @@
 "use client";
 
 import {
+	Bot,
 	ChevronRight,
 	FolderSync,
 	HardDrive,
@@ -10,7 +11,8 @@ import {
 	Plug,
 	Send,
 } from "lucide-react";
-
+import Link from "next/link";
+import { usePathname } from "next/navigation";
 import {
 	Collapsible,
 	CollapsibleContent,
@@ -27,8 +29,6 @@ import {
 	SidebarMenuSubButton,
 	SidebarMenuSubItem,
 } from "@/components/ui/sidebar";
-import Link from "next/link";
-import { usePathname } from "next/navigation";
 
 export function NavMain() {
 	const pathname = usePathname();
@@ -73,6 +73,12 @@ export function NavMain() {
 			title: "API Keys",
 			url: "/dashboard/platform/api-keys",
 			icon: Key,
+			items: [],
+		},
+		{
+			title: "AI / Ollama",
+			url: "/dashboard/platform/ai",
+			icon: Bot,
 			items: [],
 		},
 	];

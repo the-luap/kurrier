@@ -15,6 +15,7 @@ import {
 	messageAttachments,
 	messages,
 	threads,
+	userAiSettings,
 } from "@db";
 import {
 	type FormState,
@@ -308,7 +309,33 @@ export async function generateAiReplySuggestion(
 	const user = await isSignedIn();
 	if (!user) return { success: false, error: "Please sign in first." };
 
-	const { OLLAMA_BASE_URL, OLLAMA_MODEL } = getServerEnv();
+	const rls = await rlsClient();
+	const [settings] = await rls((tx) =>
+		tx
+			.select()
+			.from(userAiSettings)
+			.where(eq(userAiSettings.provider, "ollama"))
+			.limit(1),
+	);
+
+	if (settings && !settings.enabled) {
+		return {
+			success: false,
+			error: "AI drafts are disabled in Platform settings.",
+		};
+	}
+
+	const serverConfig = getServerEnv();
+	const ollamaBaseUrl = (
+		settings?.baseUrl ||
+		serverConfig.OLLAMA_BASE_URL ||
+		"http://10.0.252.12:11434"
+	).replace(/\/+$/, "");
+	const ollamaModel =
+		settings?.model || serverConfig.OLLAMA_MODEL || "gemma3:12b";
+	const systemPrompt = (settings?.systemPrompt || "").trim();
+	const temperature = Number(settings?.temperature ?? 0.4);
+	const maxTokens = Number(settings?.maxTokens ?? 700);
 	const originalText = stripHtmlForPrompt(
 		input.originalText || input.originalHtml || "",
 	);
@@ -321,8 +348,11 @@ Mode: ${input.mode || "reply"}
 Subject: ${input.originalSubject || "(none)"}
 From: ${JSON.stringify(input.originalFrom || null)}
 
-User instruction / desired tone:
-${instruction || "Write a concise, helpful, professional reply."}
+Default instruction:
+${systemPrompt || "Write a concise, helpful, professional reply."}
+
+User instruction / desired tone for this draft:
+${instruction || "No extra instruction."}
 
 Current draft, if any:
 ${currentDraft || "(empty)"}
@@ -338,23 +368,20 @@ Rules:
 - Output plain text paragraphs only.`;
 
 	try {
-		const response = await fetch(
-			`${OLLAMA_BASE_URL.replace(/\/$/, "")}/api/generate`,
-			{
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({
-					model: OLLAMA_MODEL,
-					prompt,
-					stream: false,
-					options: {
-						temperature: 0.4,
-						num_predict: 700,
-					},
-				}),
-				signal: AbortSignal.timeout(60_000),
-			},
-		);
+		const response = await fetch(`${ollamaBaseUrl}/api/generate`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				model: ollamaModel,
+				prompt,
+				stream: false,
+				options: {
+					temperature,
+					num_predict: maxTokens,
+				},
+			}),
+			signal: AbortSignal.timeout(60_000),
+		});
 
 		if (!response.ok) {
 			return {

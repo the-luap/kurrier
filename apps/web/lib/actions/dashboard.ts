@@ -19,6 +19,7 @@ import {
 	smtpAccountSecrets,
 	smtpAccounts,
 	updateSecret,
+	userAiSettings,
 } from "@db";
 import {
 	createMailer,
@@ -55,6 +56,176 @@ import { parseSecret } from "@/lib/utils";
 
 const DASHBOARD_PATH = "/dashboard/providers";
 const CURRENT_API_VERSION = 1;
+const DEFAULT_OLLAMA_BASE_URL = "http://10.0.252.12:11434";
+const DEFAULT_OLLAMA_MODEL = "gemma3:12b";
+
+const normalizeOllamaBaseUrl = (value: string) =>
+	(value || DEFAULT_OLLAMA_BASE_URL).trim().replace(/\/+$/, "");
+
+const fetchOllamaModels = async (baseUrl: string) => {
+	const response = await fetch(`${normalizeOllamaBaseUrl(baseUrl)}/api/tags`, {
+		method: "GET",
+		signal: AbortSignal.timeout(10_000),
+	});
+
+	if (!response.ok) {
+		throw new Error(`Ollama returned HTTP ${response.status}`);
+	}
+
+	const data = (await response.json()) as {
+		models?: Array<{
+			name?: string;
+			model?: string;
+			size?: number;
+			details?: { parameter_size?: string; quantization_level?: string };
+		}>;
+	};
+
+	return (data.models || [])
+		.map((model) => ({
+			name: model.name || model.model || "",
+			size: model.size || 0,
+			parameterSize: model.details?.parameter_size || "",
+			quantization: model.details?.quantization_level || "",
+		}))
+		.filter((model) => model.name);
+};
+
+export const fetchAiSettings = async () => {
+	const rls = await rlsClient();
+	const [settings] = await rls((tx) =>
+		tx
+			.select()
+			.from(userAiSettings)
+			.where(eq(userAiSettings.provider, "ollama"))
+			.limit(1),
+	);
+
+	return (
+		settings ?? {
+			id: "",
+			provider: "ollama",
+			baseUrl: DEFAULT_OLLAMA_BASE_URL,
+			model: DEFAULT_OLLAMA_MODEL,
+			systemPrompt: "",
+			temperature: "0.4",
+			maxTokens: 700,
+			enabled: true,
+		}
+	);
+};
+
+export const listOllamaModels = async (baseUrl: string): Promise<FormState> => {
+	return handleAction(async () => {
+		await isSignedIn();
+		const models = await fetchOllamaModels(baseUrl);
+		return { success: true, data: { models } };
+	});
+};
+
+export async function saveAiSettings(
+	_prev: FormState,
+	formData: FormData,
+): Promise<FormState> {
+	return handleAction(async () => {
+		const user = await isSignedIn();
+		if (!user?.id) throw new Error("Please sign in first.");
+
+		const baseUrl = normalizeOllamaBaseUrl(
+			String(formData.get("baseUrl") ?? DEFAULT_OLLAMA_BASE_URL),
+		);
+		const model = String(formData.get("model") ?? DEFAULT_OLLAMA_MODEL).trim();
+		const systemPrompt = String(formData.get("systemPrompt") ?? "")
+			.trim()
+			.slice(0, 4000);
+		const temperature = Number(formData.get("temperature") ?? 0.4);
+		const maxTokens = Number(formData.get("maxTokens") ?? 700);
+		const enabled = formData.get("enabled") === "on";
+
+		if (!model) throw new Error("Please select an Ollama model.");
+		if (!Number.isFinite(temperature) || temperature < 0 || temperature > 2) {
+			throw new Error("Temperature must be between 0 and 2.");
+		}
+		if (!Number.isInteger(maxTokens) || maxTokens < 64 || maxTokens > 4096) {
+			throw new Error("Max tokens must be between 64 and 4096.");
+		}
+
+		const rls = await rlsClient();
+		await rls((tx) =>
+			tx
+				.insert(userAiSettings)
+				.values({
+					ownerId: user.id,
+					provider: "ollama",
+					baseUrl,
+					model,
+					systemPrompt: systemPrompt || null,
+					temperature: String(temperature),
+					maxTokens,
+					enabled,
+				})
+				.onConflictDoUpdate({
+					target: [userAiSettings.ownerId, userAiSettings.provider],
+					set: {
+						baseUrl,
+						model,
+						systemPrompt: systemPrompt || null,
+						temperature: String(temperature),
+						maxTokens,
+						enabled,
+						updatedAt: new Date(),
+					},
+				}),
+		);
+
+		revalidatePath("/dashboard/platform/ai");
+		return { success: true, message: "AI settings saved" };
+	});
+}
+
+export const testAiSettings = async (input: {
+	baseUrl: string;
+	model: string;
+	temperature?: number;
+	maxTokens?: number;
+}): Promise<FormState> => {
+	return handleAction(async () => {
+		await isSignedIn();
+		const response = await fetch(
+			`${normalizeOllamaBaseUrl(input.baseUrl)}/api/generate`,
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					model: input.model,
+					prompt:
+						"Reply with one short German sentence confirming that Kurrier AI is ready.",
+					stream: false,
+					options: {
+						temperature: input.temperature ?? 0.2,
+						num_predict: input.maxTokens ?? 80,
+					},
+				}),
+				signal: AbortSignal.timeout(60_000),
+			},
+		);
+
+		if (!response.ok)
+			throw new Error(`Ollama returned HTTP ${response.status}`);
+
+		const data = (await response.json()) as {
+			response?: string;
+			error?: string;
+		};
+		if (data.error) throw new Error(data.error);
+
+		return {
+			success: true,
+			message: "Ollama test successful",
+			data: { response: (data.response || "").trim() },
+		};
+	});
+};
 
 export const syncProviders = async () => {
 	const rls = await rlsClient();
