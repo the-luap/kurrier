@@ -106,7 +106,11 @@ export default function EditorFooter() {
 		file: File,
 		token: string,
 	): Promise<void> => {
-		const url = `${state.publicConfig.API_PUBLIC_URL}/storage/v1/object/${bucket}/${path}`;
+		const storageBaseUrl =
+			typeof window !== "undefined"
+				? window.location.origin
+				: state.publicConfig.API_PUBLIC_URL;
+		const url = `${storageBaseUrl}/storage/v1/object/${bucket}/${path}`;
 
 		await new Promise<void>((resolve, reject) => {
 			const xhr = new XMLHttpRequest();

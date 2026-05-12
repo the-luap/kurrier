@@ -415,6 +415,17 @@ export async function sendMail(
 	formData: FormData,
 ): Promise<FormState> {
 	const decodedForm = decode(formData) as any;
+	const sentMailboxId = String(decodedForm.sentMailboxId ?? "").trim();
+
+	if (!sentMailboxId || sentMailboxId === "undefined") {
+		return {
+			success: false,
+			error:
+				"Sender mailbox is not ready yet. Please close the editor and try Reply again.",
+		};
+	}
+
+	decodedForm.sentMailboxId = sentMailboxId;
 
 	if (toArray(decodedForm.to as any).length === 0) {
 		return {

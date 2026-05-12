@@ -642,9 +642,9 @@ function EmailRenderer({
 				<div className={"flex gap-6"}>
 					<Button
 						onClick={async () => {
-							setShowEditor(!showEditor);
 							setShowEditorMode("reply");
-							void fetchSentMailbox();
+							await fetchSentMailbox();
+							setShowEditor(true);
 						}}
 						leftSection={<Reply />}
 						variant={"outline"}
@@ -654,9 +654,9 @@ function EmailRenderer({
 					</Button>
 					<Button
 						onClick={async () => {
-							setShowEditor(!showEditor);
 							setShowEditorMode("forward");
-							void fetchSentMailbox();
+							await fetchSentMailbox();
+							setShowEditor(true);
 						}}
 						rightSection={<Forward />}
 						variant={"outline"}
@@ -670,7 +670,7 @@ function EmailRenderer({
 			{showEditor && (
 				<div>
 					<EmailEditor
-						sentMailboxId={String(sentMailboxId)}
+						sentMailboxId={sentMailboxId ?? ""}
 						ref={editorRef}
 						publicConfig={publicConfig}
 						message={message}
