@@ -1,4 +1,3 @@
-"use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ZPublicConfig = exports.ZServerConfig = void 0;
 exports.parseServerConfig = parseServerConfig;
@@ -32,6 +31,7 @@ exports.ZServerConfig = zod_1.z.object({
 	SEARCH_REBUILD_ON_BOOT: zod_1.z.string(
 		"SEARCH_REBUILD_ON_BOOT must be present",
 	),
+	INBOUND_WEBHOOK_SECRET: zod_1.z.string().optional(),
 });
 /** Safe to expose to the browser */
 exports.ZPublicConfig = zod_1.z.object({
@@ -45,7 +45,7 @@ function formatZodError(label, err) {
 	var _a;
 	var flat = err.flatten();
 	var fieldErrors = Object.entries(flat.fieldErrors)
-		.map(function (_a) {
+		.map((_a) => {
 			var k = _a[0],
 				v = _a[1];
 			// v is `unknown` to TS; make it a string[] safely
@@ -54,9 +54,7 @@ function formatZodError(label, err) {
 		})
 		.join("\n");
 	var formErrors = ((_a = flat.formErrors) !== null && _a !== void 0 ? _a : [])
-		.map(function (e) {
-			return "  - ".concat(e);
-		})
+		.map((e) => "  - ".concat(e))
 		.join("\n");
 	return "["
 		.concat(label, "] Invalid configuration\n")

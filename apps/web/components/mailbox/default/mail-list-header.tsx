@@ -1,19 +1,23 @@
 "use client";
-import React, { useRef, useEffect, useState } from "react";
-import { MailOpen, RotateCw, Trash2 } from "lucide-react";
-import { useDynamicContext } from "@/hooks/use-dynamic-context";
-import {
-	deleteForever,
-	deltaFetch,
-	FetchMailboxThreadsResult,
-	getDeltaFetchStatus,
-	markAsRead,
-	moveToTrash,
-	revalidateMailbox,
-} from "@/lib/actions/mailbox";
-import { ActionIcon, Button, Tooltip } from "@mantine/core";
 import type { MailboxEntity, MailboxSyncEntity } from "@db";
+import { ActionIcon, Button, Tooltip } from "@mantine/core";
+import { useMediaQuery } from "@mantine/hooks";
+import type { PublicConfig } from "@schema";
+import { clsx } from "clsx";
+import {
+	Ban,
+	Mail,
+	MailOpen,
+	RotateCw,
+	Star,
+	StarOff,
+	Trash2,
+} from "lucide-react";
+import { usePathname, useRouter } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import ComposeMail from "@/components/mailbox/default/compose-mail";
+import MoveToFolder from "@/components/mailbox/default/move-to-folder";
 import {
 	AlertDialog,
 	AlertDialogAction,
@@ -25,12 +29,19 @@ import {
 	AlertDialogTitle,
 	AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import ComposeMail from "@/components/mailbox/default/compose-mail";
-import { PublicConfig } from "@schema";
-import { useMediaQuery } from "@mantine/hooks";
-import { clsx } from "clsx";
-import MoveToFolder from "@/components/mailbox/default/move-to-folder";
-import { usePathname, useRouter } from "next/navigation";
+import { useDynamicContext } from "@/hooks/use-dynamic-context";
+import {
+	deleteForever,
+	deltaFetch,
+	type FetchMailboxThreadsResult,
+	getDeltaFetchStatus,
+	markAsRead,
+	markAsUnread,
+	moveToSpam,
+	moveToTrash,
+	revalidateMailbox,
+	setStarForThreads,
+} from "@/lib/actions/mailbox";
 
 function MailListHeader({
 	mailboxThreads,
@@ -99,10 +110,13 @@ function MailListHeader({
 					}
 
 					if (status.state === "failed") {
-						toast.error(`Sync fehlgeschlagen${finalError ? `: ${finalError}` : ""}`, {
-							id: toastId,
-							position: "bottom-left",
-						});
+						toast.error(
+							`Sync fehlgeschlagen${finalError ? `: ${finalError}` : ""}`,
+							{
+								id: toastId,
+								position: "bottom-left",
+							},
+						);
 						return;
 					}
 				}
@@ -128,13 +142,73 @@ function MailListHeader({
 		}
 	};
 
+	const selectedThreads = () => Array.from(state?.selectedThreadIds ?? []);
+
+	const clearSelection = () => {
+		setState((prev) => ({
+			...(prev ?? {}),
+			selectedThreadIds: new Set<string>(),
+		}));
+	};
+
 	const markRead = async () => {
 		await markAsRead(
-			Array.from(state?.selectedThreadIds ?? []),
+			selectedThreads(),
 			String(mailboxIdRef.current),
 			!!mailboxSync,
 			true,
 		);
+		toast.success("Marked selected threads as read", {
+			position: "bottom-left",
+		});
+		clearSelection();
+		router.refresh();
+	};
+
+	const markUnread = async () => {
+		await markAsUnread(
+			selectedThreads(),
+			String(mailboxIdRef.current),
+			!!mailboxSync,
+			true,
+		);
+		toast.success("Marked selected threads as unread", {
+			position: "bottom-left",
+		});
+		clearSelection();
+		router.refresh();
+	};
+
+	const starThreads = async (starred: boolean) => {
+		await setStarForThreads(
+			selectedThreads(),
+			String(mailboxIdRef.current),
+			starred,
+			!!mailboxSync,
+			true,
+		);
+		toast.success(
+			starred
+				? "Starred selected threads"
+				: "Removed stars from selected threads",
+			{ position: "bottom-left" },
+		);
+		clearSelection();
+		router.refresh();
+	};
+
+	const spamThreads = async () => {
+		await moveToSpam(
+			selectedThreads(),
+			String(mailboxIdRef.current),
+			!!mailboxSync,
+			true,
+		);
+		toast.success("Selected threads moved to Spam", {
+			position: "bottom-left",
+		});
+		clearSelection();
+		router.refresh();
 	};
 
 	const deleteThreads = async () => {
@@ -143,22 +217,26 @@ function MailListHeader({
 			return;
 		}
 		await moveToTrash(
-			Array.from(state?.selectedThreadIds ?? []),
+			selectedThreads(),
 			String(mailboxIdRef.current),
 			!!mailboxSync,
 			true,
 		);
 		toast.success("Messages moved to Trash", { position: "bottom-left" });
+		clearSelection();
+		router.refresh();
 	};
 
 	const removeTrash = async () => {
 		await deleteForever(
-			Array.from(state?.selectedThreadIds ?? []),
+			selectedThreads(),
 			String(mailboxIdRef.current),
 			!!mailboxSync,
 			true,
 		);
 		toast.success("Thread deleted forever", { position: "bottom-left" });
+		clearSelection();
+		router.refresh();
 	};
 
 	const emptyTrash = async () => {
@@ -187,9 +265,13 @@ function MailListHeader({
 						onChange={(e) => {
 							const newSet = new Set(state?.selectedThreadIds ?? []);
 							if (e.target.checked) {
-								mailboxThreads.forEach((t) => newSet.add(t.threadId));
+								mailboxThreads.forEach((t) => {
+									newSet.add(t.threadId);
+								});
 							} else {
-								mailboxThreads.forEach((t) => newSet.delete(t.threadId));
+								mailboxThreads.forEach((t) => {
+									newSet.delete(t.threadId);
+								});
 							}
 							setState((prev) => ({
 								...(prev ?? {}),
@@ -225,9 +307,7 @@ function MailListHeader({
 								: "opacity-0 hidden pointer-events-none",
 						)}
 					>
-						<MoveToFolder
-							activeMailbox={activeMailbox}
-						/>
+						<MoveToFolder activeMailbox={activeMailbox} />
 						<button
 							type="button"
 							onClick={deleteThreads}
@@ -238,11 +318,43 @@ function MailListHeader({
 						</button>
 						<button
 							type="button"
+							onClick={spamThreads}
+							className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs hover:bg-muted"
+							title="Mark as spam"
+						>
+							<Ban className="h-4 w-4" />
+						</button>
+						<button
+							type="button"
+							onClick={() => starThreads(true)}
+							className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs hover:bg-muted"
+							title="Star"
+						>
+							<Star className="h-4 w-4" />
+						</button>
+						<button
+							type="button"
+							onClick={() => starThreads(false)}
+							className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs hover:bg-muted"
+							title="Unstar"
+						>
+							<StarOff className="h-4 w-4" />
+						</button>
+						<button
+							type="button"
 							onClick={markRead}
 							className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs hover:bg-muted"
 							title="Mark read"
 						>
 							<MailOpen className="h-4 w-4" />
+						</button>
+						<button
+							type="button"
+							onClick={markUnread}
+							className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs hover:bg-muted"
+							title="Mark unread"
+						>
+							<Mail className="h-4 w-4" />
 						</button>
 					</div>
 

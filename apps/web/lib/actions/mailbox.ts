@@ -1,50 +1,52 @@
 "use server";
 
-import { cache } from "react";
-import { rlsClient } from "@/lib/actions/clients";
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
+import { PAGE_SIZE } from "@common/mail-client";
 import {
-    db,
-    DraftMessageInsertSchema,
-    draftMessages,
-    identities,
-    mailboxes,
-    mailboxSync,
-    mailboxThreads, mailSubscriptions,
-    messageAttachments,
-    messages,
-    threads,
+	DraftMessageInsertSchema,
+	db,
+	draftMessages,
+	identities,
+	mailboxes,
+	mailboxSync,
+	mailboxThreads,
+	mailSubscriptions,
+	messageAttachments,
+	messages,
+	threads,
 } from "@db";
+import {
+	type FormState,
+	getServerEnv,
+	handleAction,
+	type SearchThreadsResponse,
+} from "@schema";
+import slugify from "@sindresorhus/slugify";
+import dayjs from "dayjs";
+import { decode } from "decode-formdata";
 import {
 	and,
 	asc,
 	count,
 	desc,
 	eq,
+	gt,
 	inArray,
 	isNotNull,
 	isNull,
 	lte,
 	or,
 	sql,
-	gt,
 } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
-import {
-	FormState,
-	getServerEnv,
-	handleAction,
-	SearchThreadsResponse,
-} from "@schema";
-import { decode } from "decode-formdata";
-import { toArray } from "@/lib/utils";
-
-import Typesense, { Client } from "typesense";
-import { isSignedIn } from "@/lib/actions/auth";
-import slugify from "@sindresorhus/slugify";
 import { redirect } from "next/navigation";
-import { PAGE_SIZE } from "@common/mail-client";
+import { cache } from "react";
+import Typesense, { type Client } from "typesense";
+import { isSignedIn } from "@/lib/actions/auth";
+import { rlsClient } from "@/lib/actions/clients";
 import { getRedis } from "@/lib/actions/get-redis";
-import dayjs from "dayjs";
+import { toArray } from "@/lib/utils";
 
 let typeSenseClient: Client | null = null;
 function getTypeSenseClient(): Client {
@@ -531,7 +533,10 @@ export const fetchAdjacentMailboxThreads = cache(
 		const visibleInMailbox = and(
 			eq(mailboxThreads.identityPublicId, identityPublicId),
 			eq(mailboxThreads.mailboxSlug, mailboxSlug),
-			or(isNull(mailboxThreads.snoozedUntil), lte(mailboxThreads.snoozedUntil, now)),
+			or(
+				isNull(mailboxThreads.snoozedUntil),
+				lte(mailboxThreads.snoozedUntil, now),
+			),
 		);
 
 		const [current] = await rls((tx) =>
@@ -575,7 +580,11 @@ export const fetchAdjacentMailboxThreads = cache(
 						) > ${cursor}`,
 					),
 				)
-				.orderBy(asc(effectiveActivityAt), asc(mailboxThreads.lastActivityAt), asc(mailboxThreads.threadId))
+				.orderBy(
+					asc(effectiveActivityAt),
+					asc(mailboxThreads.lastActivityAt),
+					asc(mailboxThreads.threadId),
+				)
 				.limit(1),
 		);
 
@@ -593,7 +602,11 @@ export const fetchAdjacentMailboxThreads = cache(
 						) < ${cursor}`,
 					),
 				)
-				.orderBy(desc(effectiveActivityAt), desc(mailboxThreads.lastActivityAt), desc(mailboxThreads.threadId))
+				.orderBy(
+					desc(effectiveActivityAt),
+					desc(mailboxThreads.lastActivityAt),
+					desc(mailboxThreads.threadId),
+				)
 				.limit(1),
 		);
 
@@ -610,76 +623,73 @@ export const markAsRead = async (
 	markSmtp: boolean,
 	refresh = true,
 ) => {
-		const ids = (Array.isArray(threadIds) ? threadIds : [threadIds])
-			.map(String)
-			.filter(Boolean);
+	const ids = (Array.isArray(threadIds) ? threadIds : [threadIds])
+		.map(String)
+		.filter(Boolean);
 
-		if (!ids.length || !mailboxId) return;
+	if (!ids.length || !mailboxId) return;
 
-		const now = new Date();
-		const rls = await rlsClient();
+	const now = new Date();
+	const rls = await rlsClient();
 
-		await rls(async (tx) => {
-			await tx
-				.update(messages)
-				.set({ seen: true, updatedAt: now })
-				.where(
-					and(
-						inArray(messages.threadId, ids),
-						eq(messages.mailboxId, mailboxId),
-					),
-				);
-
-			await tx
-				.update(mailboxThreads)
-				.set({ unreadCount: 0, updatedAt: now })
-				.where(
-					and(
-						inArray(mailboxThreads.threadId, ids),
-						eq(mailboxThreads.mailboxId, mailboxId),
-					),
-				);
-		});
-
-		if (refresh) {
-			revalidatePath("/dashboard/mail");
-		}
-
-		if (markSmtp) {
-			const { smtpQueue, searchIngestQueue } = await getRedis();
-
-			await Promise.all(
-				ids.map((threadId) =>
-					smtpQueue.add(
-						"mail:set-flags",
-						{ threadId, mailboxId, op: "read" },
-						{
-							attempts: 3,
-							backoff: { type: "exponential", delay: 1500 },
-							removeOnComplete: true,
-							removeOnFail: false,
-						},
-					),
-				),
+	await rls(async (tx) => {
+		await tx
+			.update(messages)
+			.set({ seen: true, updatedAt: now })
+			.where(
+				and(inArray(messages.threadId, ids), eq(messages.mailboxId, mailboxId)),
 			);
 
-			await Promise.all(
-				ids.map((threadId) =>
-					searchIngestQueue.add(
-						"refresh-thread",
-						{ threadId },
-						{
-							jobId: `refresh-${threadId}`,
-							removeOnComplete: true,
-							removeOnFail: false,
-							attempts: 3,
-							backoff: { type: "exponential", delay: 1500 },
-						},
-					),
+		await tx
+			.update(mailboxThreads)
+			.set({ unreadCount: 0, updatedAt: now })
+			.where(
+				and(
+					inArray(mailboxThreads.threadId, ids),
+					eq(mailboxThreads.mailboxId, mailboxId),
 				),
 			);
-		}
-	};
+	});
+
+	if (refresh) {
+		revalidatePath("/dashboard/mail");
+	}
+
+	if (markSmtp) {
+		const { smtpQueue, searchIngestQueue } = await getRedis();
+
+		await Promise.all(
+			ids.map((threadId) =>
+				smtpQueue.add(
+					"mail:set-flags",
+					{ threadId, mailboxId, op: "read" },
+					{
+						attempts: 3,
+						backoff: { type: "exponential", delay: 1500 },
+						removeOnComplete: true,
+						removeOnFail: false,
+					},
+				),
+			),
+		);
+
+		await Promise.all(
+			ids.map((threadId) =>
+				searchIngestQueue.add(
+					"refresh-thread",
+					{ threadId },
+					{
+						jobId: `refresh-${threadId}`,
+						removeOnComplete: true,
+						removeOnFail: false,
+						attempts: 3,
+						backoff: { type: "exponential", delay: 1500 },
+					},
+				),
+			),
+		);
+	}
+};
 
 export const markAsUnread = async (
 	threadIds: string | string[],
@@ -972,6 +982,79 @@ export const toggleStar = async (
 	);
 
 	revalidatePath("/mail");
+};
+
+export const setStarForThreads = async (
+	threadIds: string | string[],
+	mailboxId: string,
+	starred: boolean,
+	starImap: boolean,
+	refresh = true,
+) => {
+	const ids = (Array.isArray(threadIds) ? threadIds : [threadIds])
+		.map(String)
+		.filter(Boolean);
+
+	if (!ids.length || !mailboxId) return;
+	const { smtpQueue, searchIngestQueue } = await getRedis();
+
+	if (starImap) {
+		await Promise.all(
+			ids.map((threadId) =>
+				smtpQueue.add(
+					"mail:set-flags",
+					{ threadId, mailboxId, op: starred ? "flag" : "unflag" },
+					{
+						attempts: 3,
+						backoff: { type: "exponential", delay: 1500 },
+						removeOnComplete: true,
+						removeOnFail: false,
+					},
+				),
+			),
+		);
+	} else {
+		const rls = await rlsClient();
+		await rls(async (tx) => {
+			await tx
+				.update(messages)
+				.set({ flagged: starred, updatedAt: new Date() })
+				.where(
+					and(
+						inArray(messages.threadId, ids),
+						eq(messages.mailboxId, mailboxId),
+					),
+				);
+
+			await tx
+				.update(mailboxThreads)
+				.set({ starred, updatedAt: new Date() })
+				.where(
+					and(
+						inArray(mailboxThreads.threadId, ids),
+						eq(mailboxThreads.mailboxId, mailboxId),
+					),
+				);
+		});
+	}
+
+	await Promise.all(
+		ids.map((threadId) =>
+			searchIngestQueue.add(
+				"refresh-thread",
+				{ threadId },
+				{
+					jobId: `refresh-${threadId}`,
+					removeOnComplete: true,
+					removeOnFail: false,
+					attempts: 3,
+					backoff: { type: "exponential", delay: 1500 },
+				},
+			),
+		),
+	);
+
+	if (refresh) revalidatePath("/mail");
 };
 
 export const fetchMailboxThreadsOld = async (
@@ -1436,7 +1519,9 @@ export async function snoozeThread(input: {
 	});
 }
 
-export const fetchIdentitySnoozedThreads = async (identityPublicId?: string) => {
+export const fetchIdentitySnoozedThreads = async (
+	identityPublicId?: string,
+) => {
 	if (!identityPublicId) return { threads: [] };
 
 	const rls = await rlsClient();
@@ -1462,119 +1547,173 @@ export const fetchIdentitySnoozedThreads = async (identityPublicId?: string) => 
 	return { threads };
 };
 
-
-
 function subscriptionKeyFromHeadersJson(headersJson: any) {
-    const list = headersJson?.list ?? null;
-    const rawListId = String(headersJson?.["list-id"] ?? "").trim() || null;
+	const list = headersJson?.list ?? null;
+	const rawListId = String(headersJson?.["list-id"] ?? "").trim() || null;
 
-    let unsubscribeHttpUrl: string | null = null;
+	let unsubscribeHttpUrl: string | null = null;
 
-    const fromList = list?.unsubscribe?.url || list?.unsubscribe?.href;
-    if (typeof fromList === "string" && fromList) unsubscribeHttpUrl = fromList;
+	const fromList = list?.unsubscribe?.url || list?.unsubscribe?.href;
+	if (typeof fromList === "string" && fromList) unsubscribeHttpUrl = fromList;
 
-    const fromHeader = headersJson?.["list-unsubscribe"];
-    if (!unsubscribeHttpUrl && typeof fromHeader === "string") {
-        const parts = fromHeader
-            .split(",")
-            .map((s: string) => s.trim().replace(/^<|>$/g, ""));
-        const http = parts.find((p: string) => /^https?:/i.test(p));
-        if (http) unsubscribeHttpUrl = http;
-    }
+	const fromHeader = headersJson?.["list-unsubscribe"];
+	if (!unsubscribeHttpUrl && typeof fromHeader === "string") {
+		const parts = fromHeader
+			.split(",")
+			.map((s: string) => s.trim().replace(/^<|>$/g, ""));
+		const http = parts.find((p: string) => /^https?:/i.test(p));
+		if (http) unsubscribeHttpUrl = http;
+	}
 
-    if (rawListId) {
-        const cleaned = rawListId
-            .replace(/^<|>$/g, "")
-            .replace(/\s+/g, "")
-            .toLowerCase();
-        return cleaned ? `list-id:${cleaned}` : null;
-    }
+	if (rawListId) {
+		const cleaned = rawListId
+			.replace(/^<|>$/g, "")
+			.replace(/\s+/g, "")
+			.toLowerCase();
+		return cleaned ? `list-id:${cleaned}` : null;
+	}
 
-    if (unsubscribeHttpUrl) {
-        try {
-            const u = new URL(unsubscribeHttpUrl);
-            const p = (u.pathname || "/").replace(/\/+$/, "") || "/";
-            return `${u.protocol}//${u.host.toLowerCase()}${p}`;
-        } catch {
-            return null;
-        }
-    }
+	if (unsubscribeHttpUrl) {
+		try {
+			const u = new URL(unsubscribeHttpUrl);
+			const p = (u.pathname || "/").replace(/\/+$/, "") || "/";
+			return `${u.protocol}//${u.host.toLowerCase()}${p}`;
+		} catch {
+			return null;
+		}
+	}
 
-    return null;
+	return null;
 }
 
 export async function fetchThreadMailSubscriptions(opts: {
-    ownerId: string;
-    messages: Array<{ id: string; headersJson: any }>;
+	ownerId: string;
+	messages: Array<{ id: string; headersJson: any }>;
 }) {
-    const keysByMessageId = new Map<string, string>();
+	const keysByMessageId = new Map<string, string>();
 
-    for (const m of opts.messages) {
-        const key = subscriptionKeyFromHeadersJson(m.headersJson);
-        if (key) keysByMessageId.set(m.id, key);
-    }
+	for (const m of opts.messages) {
+		const key = subscriptionKeyFromHeadersJson(m.headersJson);
+		if (key) keysByMessageId.set(m.id, key);
+	}
 
-    const uniqueKeys = Array.from(new Set(keysByMessageId.values()));
-    if (!uniqueKeys.length) {
-        return { byMessageId: new Map<string, any>(), keysByMessageId };
-    }
+	const uniqueKeys = Array.from(new Set(keysByMessageId.values()));
+	if (!uniqueKeys.length) {
+		return { byMessageId: new Map<string, any>(), keysByMessageId };
+	}
 
-    const rows = await db
-        .select()
-        .from(mailSubscriptions)
-        .where(
-            and(
-                eq(mailSubscriptions.ownerId, opts.ownerId),
-                inArray(mailSubscriptions.subscriptionKey, uniqueKeys),
-            ),
-        );
+	const rows = await db
+		.select()
+		.from(mailSubscriptions)
+		.where(
+			and(
+				eq(mailSubscriptions.ownerId, opts.ownerId),
+				inArray(mailSubscriptions.subscriptionKey, uniqueKeys),
+			),
+		);
 
-    const byKey = new Map(rows.map((r) => [r.subscriptionKey, r]));
-    const byMessageId = new Map<string, any>();
+	const byKey = new Map(rows.map((r) => [r.subscriptionKey, r]));
+	const byMessageId = new Map<string, any>();
 
-    for (const [messageId, key] of keysByMessageId.entries()) {
-        byMessageId.set(messageId, byKey.get(key) ?? null);
-    }
+	for (const [messageId, key] of keysByMessageId.entries()) {
+		byMessageId.set(messageId, byKey.get(key) ?? null);
+	}
 
-    return { byMessageId, keysByMessageId };
+	return { byMessageId, keysByMessageId };
 }
 
 export type FetchThreadMailSubsResult = Awaited<
-    ReturnType<typeof fetchThreadMailSubscriptions>
+	ReturnType<typeof fetchThreadMailSubscriptions>
 >;
 
+function isPrivateAddress(address: string) {
+	if (address === "localhost") return true;
+	if (isIP(address) === 4) {
+		const [a, b] = address.split(".").map(Number);
+		return (
+			a === 10 ||
+			a === 127 ||
+			(a === 172 && b >= 16 && b <= 31) ||
+			(a === 192 && b === 168) ||
+			(a === 169 && b === 254) ||
+			a === 0
+		);
+	}
+	if (isIP(address) === 6) {
+		const normalized = address.toLowerCase();
+		return (
+			normalized === "::1" ||
+			normalized.startsWith("fc") ||
+			normalized.startsWith("fd") ||
+			normalized.startsWith("fe80:")
+		);
+	}
+	return false;
+}
+
+async function assertSafeUnsubscribeUrl(rawUrl: string) {
+	const url = new URL(rawUrl);
+	if (!["https:", "http:"].includes(url.protocol)) {
+		throw new Error("Unsupported unsubscribe URL protocol");
+	}
+	if (url.username || url.password) {
+		throw new Error("Unsubscribe URL must not contain credentials");
+	}
+	if (isPrivateAddress(url.hostname)) {
+		throw new Error("Unsafe unsubscribe host");
+	}
+	const addresses = await lookup(url.hostname, { all: true, verbatim: true });
+	if (
+		!addresses.length ||
+		addresses.some((addr) => isPrivateAddress(addr.address))
+	) {
+		throw new Error("Unsafe unsubscribe DNS target");
+	}
+	return url;
+}
 
 export async function oneClickUnsubscribe(
-    _prev: FormState,
-    formData: FormData,
+	_prev: FormState,
+	formData: FormData,
 ): Promise<FormState> {
-    return handleAction(async () => {
-        const decodedForm = decode(formData);
-        const id = String(decodedForm.mailSubscriptionId);
-        const [sub] = await db
-            .select()
-            .from(mailSubscriptions)
-            .where(and(eq(mailSubscriptions.id, id)))
-            .limit(1);
-        if (!sub?.unsubscribeHttpUrl) return { success: false, error: "Subscription not found" };
-        await fetch(sub.unsubscribeHttpUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/x-www-form-urlencoded" },
-            body: "List-Unsubscribe=One-Click",
-            redirect: "follow",
-        });
-        await db
-            .update(mailSubscriptions)
-            .set({
-                status: "unsubscribed",
-                unsubscribedAt: new Date(),
-                updatedAt: new Date(),
-            })
-            .where(eq(mailSubscriptions.id, id));
-        revalidatePath(String(decodedForm.pathname));
-        return { success: true };
-    });
+	return handleAction(async () => {
+		const decodedForm = decode(formData);
+		const id = String(decodedForm.mailSubscriptionId);
+		const rls = await rlsClient();
+		const [sub] = await rls((tx) =>
+			tx
+				.select()
+				.from(mailSubscriptions)
+				.where(and(eq(mailSubscriptions.id, id)))
+				.limit(1),
+		);
+		if (!sub?.unsubscribeHttpUrl)
+			return { success: false, error: "Subscription not found" };
 
-
-
+		const url = await assertSafeUnsubscribeUrl(sub.unsubscribeHttpUrl);
+		const res = await fetch(url, {
+			method: "POST",
+			headers: { "Content-Type": "application/x-www-form-urlencoded" },
+			body: "List-Unsubscribe=One-Click",
+			redirect: "manual",
+		});
+		if (res.status < 200 || res.status >= 400) {
+			return {
+				success: false,
+				error: `Unsubscribe failed: HTTP ${res.status}`,
+			};
+		}
+		await rls((tx) =>
+			tx
+				.update(mailSubscriptions)
+				.set({
+					status: "unsubscribed",
+					unsubscribedAt: new Date(),
+					updatedAt: new Date(),
+				})
+				.where(eq(mailSubscriptions.id, id)),
+		);
+		revalidatePath(String(decodedForm.pathname));
+		return { success: true };
+	});
 }

@@ -1,14 +1,15 @@
-import React, { useRef, useState } from "react";
+import type { MessageEntity } from "@db";
 import { ActionIcon, Button, Popover, Progress } from "@mantine/core";
-import { Baseline, Paperclip, X as IconX } from "lucide-react";
 import { RichTextEditor } from "@mantine/tiptap";
+import type { PublicConfig } from "@schema";
+import { Baseline, X as IconX, Paperclip } from "lucide-react";
+import { extension } from "mime-types";
+import type React from "react";
+import { useRef, useState } from "react";
+import { v4 as uuidv4 } from "uuid";
+import ScheduleSend from "@/components/mailbox/default/editor/schedule-send";
 import { useDynamicContext } from "@/hooks/use-dynamic-context";
 import { createClient } from "@/lib/supabase/client";
-import type { PublicConfig } from "@schema";
-import { v4 as uuidv4 } from "uuid";
-import { extension } from "mime-types";
-import { MessageEntity } from "@db";
-import ScheduleSend from "@/components/mailbox/default/editor/schedule-send";
 
 type UploadItem = {
 	name: string;
@@ -21,6 +22,54 @@ type UploadItem = {
 
 const SLOW_MODE = false;
 const SLOW_MS_PER_PERCENT = 20;
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+const BLOCKED_ATTACHMENT_EXTENSIONS = new Set([
+	"ade",
+	"adp",
+	"apk",
+	"app",
+	"bat",
+	"cmd",
+	"com",
+	"cpl",
+	"exe",
+	"hta",
+	"ins",
+	"jar",
+	"js",
+	"jse",
+	"lib",
+	"lnk",
+	"mde",
+	"msc",
+	"msi",
+	"msp",
+	"mst",
+	"pif",
+	"ps1",
+	"scr",
+	"sct",
+	"shb",
+	"sys",
+	"vb",
+	"vbe",
+	"vbs",
+	"vxd",
+	"wsc",
+	"wsf",
+	"wsh",
+]);
+
+function validateAttachment(file: File): string | null {
+	if (file.size > MAX_ATTACHMENT_BYTES) {
+		return `${file.name} is larger than 25 MB`;
+	}
+	const ext = file.name.split(".").pop()?.toLowerCase() || "";
+	if (ext && BLOCKED_ATTACHMENT_EXTENSIONS.has(ext)) {
+		return `${file.name} has a blocked executable file type`;
+	}
+	return null;
+}
 
 const formatBytes = (n: number) => {
 	if (!Number.isFinite(n)) return "";
@@ -63,7 +112,10 @@ export default function EditorFooter() {
 			const xhr = new XMLHttpRequest();
 			xhr.open("POST", url);
 			xhr.setRequestHeader("Authorization", `Bearer ${token}`);
-			xhr.setRequestHeader("x-upsert", "true");
+			xhr.setRequestHeader(
+				"Content-Type",
+				file.type || "application/octet-stream",
+			);
 
 			let lastPct = 0;
 
@@ -143,7 +195,24 @@ export default function EditorFooter() {
 		const bucket = "attachments";
 
 		for (const file of Array.from(files)) {
-			const path = `private/${userId}/${newMessageId.current}/${uuidv4()}.${extension(file.type)}`;
+			const validationError = validateAttachment(file);
+			if (validationError) {
+				setUploads((prev) => [
+					...prev,
+					{
+						name: file.name,
+						path: `${newMessageId.current}/${file.name}`,
+						size: file.size,
+						progress: 100,
+						status: "error",
+						error: validationError,
+					},
+				]);
+				continue;
+			}
+
+			const ext = extension(file.type) || file.name.split(".").pop() || "bin";
+			const path = `private/${userId}/${newMessageId.current}/${uuidv4()}.${ext}`;
 
 			setUploads((prev) => [
 				...prev,
@@ -193,14 +262,12 @@ export default function EditorFooter() {
 								className="flex justify-between items-center w-full max-w-xl bg-zinc-100 rounded px-4 py-2"
 							>
 								<div className="flex items-center gap-2 min-w-0">
-									<a
-										href="#"
+									<span
 										className="text-brand font-semibold truncate max-w-[18rem]"
 										title={u.name}
-										onClick={(e) => e.preventDefault()}
 									>
 										{u.name}
-									</a>
+									</span>
 									<span className="text-sm text-zinc-700">
 										({formatBytes(u.size)})
 									</span>

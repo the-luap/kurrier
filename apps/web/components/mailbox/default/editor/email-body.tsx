@@ -1,10 +1,15 @@
-import React, { useMemo, useRef, useState, useEffect } from "react";
+import DOMPurify from "dompurify";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type Props = { html?: string | null };
 
 export function EmailBody({ html }: Props) {
 	const [hideQuotes, setHideQuotes] = useState(true);
 	const hostRef = useRef<HTMLDivElement>(null);
+	const safeHtml = useMemo(
+		() => DOMPurify.sanitize(html || "", { USE_PROFILES: { html: true } }),
+		[html],
+	);
 
 	// Only show the toggle if we detect quoted blocks
 	const hasQuotes = useMemo(() => {
@@ -22,7 +27,7 @@ export function EmailBody({ html }: Props) {
 			a.rel = "nofollow noopener noreferrer";
 			a.target = "_blank";
 		}
-	}, [html]);
+	});
 
 	return (
 		<div className="space-y-2">
@@ -39,8 +44,8 @@ export function EmailBody({ html }: Props) {
 			<div
 				ref={hostRef}
 				className={hideQuotes ? "email-body hide-quotes" : "email-body"}
-				// you already sanitize or trust your stored HTML; if not, sanitize first
-				dangerouslySetInnerHTML={{ __html: html || "" }}
+				// biome-ignore lint/security/noDangerouslySetInnerHtml: HTML is sanitized with DOMPurify before render.
+				dangerouslySetInnerHTML={{ __html: safeHtml }}
 			/>
 
 			{/* Scoped CSS to collapse quoted sections */}

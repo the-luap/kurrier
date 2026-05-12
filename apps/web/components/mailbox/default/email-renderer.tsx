@@ -98,6 +98,46 @@ export function scrollToEditor(
 	}, 120);
 }
 
+function getHeaderValue(headers: unknown, name: string) {
+	if (!headers || typeof headers !== "object") return "";
+	const record = headers as Record<string, unknown>;
+	const direct =
+		record[name] ?? record[name.toLowerCase()] ?? record[name.toUpperCase()];
+	if (typeof direct === "string") return direct;
+	if (direct && typeof direct === "object" && "value" in direct) {
+		return String((direct as { value?: unknown }).value ?? "");
+	}
+	return "";
+}
+
+function getAuthStatus(headers: unknown) {
+	const authResults = getHeaderValue(headers, "authentication-results");
+	const receivedSpf = getHeaderValue(headers, "received-spf");
+	const dkim = /dkim=\s*pass/i.test(authResults)
+		? "pass"
+		: /dkim=\s*fail/i.test(authResults)
+			? "fail"
+			: "unknown";
+	const dmarc = /dmarc=\s*pass/i.test(authResults)
+		? "pass"
+		: /dmarc=\s*fail/i.test(authResults)
+			? "fail"
+			: "unknown";
+	const spf =
+		/spf=\s*pass/i.test(authResults) || /pass/i.test(receivedSpf)
+			? "pass"
+			: /spf=\s*fail/i.test(authResults) || /fail/i.test(receivedSpf)
+				? "fail"
+				: "unknown";
+	return { authResults, dkim, dmarc, spf };
+}
+
+function authClass(value: string) {
+	if (value === "pass") return "text-green-700 dark:text-green-400";
+	if (value === "fail") return "text-red-700 dark:text-red-400";
+	return "text-muted-foreground";
+}
+
 function EmailRenderer({
 	threadIndex,
 	numberOfMessages,
@@ -132,6 +172,7 @@ function EmailRenderer({
 	const router = useRouter();
 	const [isRead, setIsRead] = useState(Boolean(message.seen));
 	const [isMutating, setIsMutating] = useState(false);
+	const authStatus = getAuthStatus(message.headersJson);
 
 	const [sentMailboxId, setSentMailboxId] = useState<string | undefined>(
 		undefined,
@@ -206,14 +247,26 @@ function EmailRenderer({
 	};
 
 	const downloadEml = async () => {
+		if (!message.rawStorageKey) {
+			toast.error("Raw .eml source is not available for this message", {
+				position: "bottom-left",
+			});
+			return;
+		}
 		const supabase = createClient(publicConfig);
-		const { data } = await supabase.storage
+		const { data, error } = await supabase.storage
 			.from("attachments")
 			.createSignedUrl(String(message.rawStorageKey), 3600, {
 				download: true,
 			});
+		if (error) {
+			toast.error(error.message || "Could not create download URL", {
+				position: "bottom-left",
+			});
+			return;
+		}
 		if (data?.signedUrl) {
-			window.open(data.signedUrl, "_blank");
+			window.open(data.signedUrl, "_blank", "noopener,noreferrer");
 		}
 	};
 
@@ -222,6 +275,10 @@ function EmailRenderer({
 
 	useEffect(() => {
 		if (opened) {
+			if (!message.rawStorageKey) {
+				setEmailString("Raw .eml source is not available for this message.");
+				return;
+			}
 			const supabase = createClient(publicConfig);
 			supabase.storage
 				.from("attachments")
@@ -238,7 +295,7 @@ function EmailRenderer({
 					}
 				});
 		}
-	}, [opened]);
+	}, [opened, publicConfig, message.rawStorageKey]);
 
 	useEffect(() => {
 		const instant = Temporal.Instant.from(receivedAt.toISOString());
@@ -321,35 +378,49 @@ function EmailRenderer({
 						</div>
 					</div>
 
-					{/*<div className="grid grid-cols-[160px_1fr] border-b">*/}
-					{/*    <div className="bg-muted px-3 py-2 font-medium text-muted-foreground">*/}
-					{/*        SPF*/}
-					{/*    </div>*/}
-					{/*    <div className="px-3 py-2">*/}
-					{/*        <span className="text-green-600 font-semibold">PASS</span> with IP 209.85.220.69{" "}*/}
-					{/*        <a href="#" className="text-blue-600 hover:underline">Learn more</a>*/}
-					{/*    </div>*/}
-					{/*</div>*/}
+					<div className="grid grid-cols-[160px_1fr] border-b">
+						<div className="bg-muted px-3 py-2 font-medium text-muted-foreground">
+							SPF
+						</div>
+						<div
+							className={`px-3 py-2 font-semibold uppercase ${authClass(authStatus.spf)}`}
+						>
+							{authStatus.spf}
+						</div>
+					</div>
 
-					{/*<div className="grid grid-cols-[160px_1fr] border-b">*/}
-					{/*    <div className="bg-muted px-3 py-2 font-medium text-muted-foreground">*/}
-					{/*        DKIM*/}
-					{/*    </div>*/}
-					{/*    <div className="px-3 py-2">*/}
-					{/*        <span className="text-green-600 font-semibold">'PASS'</span> with domain google.com{" "}*/}
-					{/*        <a href="#" className="text-blue-600 hover:underline">Learn more</a>*/}
-					{/*    </div>*/}
-					{/*</div>*/}
+					<div className="grid grid-cols-[160px_1fr] border-b">
+						<div className="bg-muted px-3 py-2 font-medium text-muted-foreground">
+							DKIM
+						</div>
+						<div
+							className={`px-3 py-2 font-semibold uppercase ${authClass(authStatus.dkim)}`}
+						>
+							{authStatus.dkim}
+						</div>
+					</div>
 
-					{/*<div className="grid grid-cols-[160px_1fr]">*/}
-					{/*    <div className="bg-muted px-3 py-2 font-medium text-muted-foreground">*/}
-					{/*        DMARC*/}
-					{/*    </div>*/}
-					{/*    <div className="px-3 py-2">*/}
-					{/*        <span className="text-green-600 font-semibold">'PASS'</span>{" "}*/}
-					{/*        <a href="#" className="text-blue-600 hover:underline">Learn more</a>*/}
-					{/*    </div>*/}
-					{/*</div>*/}
+					<div className="grid grid-cols-[160px_1fr] border-b">
+						<div className="bg-muted px-3 py-2 font-medium text-muted-foreground">
+							DMARC
+						</div>
+						<div
+							className={`px-3 py-2 font-semibold uppercase ${authClass(authStatus.dmarc)}`}
+						>
+							{authStatus.dmarc}
+						</div>
+					</div>
+
+					{authStatus.authResults && (
+						<div className="grid grid-cols-[160px_1fr]">
+							<div className="bg-muted px-3 py-2 font-medium text-muted-foreground">
+								Authentication-Results
+							</div>
+							<div className="px-3 py-2 break-all text-xs">
+								{authStatus.authResults}
+							</div>
+						</div>
+					)}
 				</div>
 
 				{/* Action Buttons */}
@@ -413,6 +484,23 @@ function EmailRenderer({
 							to{" "}
 							{`<${getMessageAddress(message, "to") ?? getMessageName(message, "to")}>`}
 						</div>
+					</div>
+					<div className="mt-1 flex gap-1 text-[11px] uppercase">
+						<span
+							className={`rounded border px-1.5 py-0.5 ${authClass(authStatus.spf)}`}
+						>
+							SPF {authStatus.spf}
+						</span>
+						<span
+							className={`rounded border px-1.5 py-0.5 ${authClass(authStatus.dkim)}`}
+						>
+							DKIM {authStatus.dkim}
+						</span>
+						<span
+							className={`rounded border px-1.5 py-0.5 ${authClass(authStatus.dmarc)}`}
+						>
+							DMARC {authStatus.dmarc}
+						</span>
 					</div>
 				</div>
 

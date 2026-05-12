@@ -23,6 +23,7 @@ export const ZServerConfig = z.object({
 	TYPESENSE_PROTOCOL: z.string("TYPESENSE_PROTOCOL must be present"),
 	TYPESENSE_HOST: z.string("TYPESENSE_HOST must be present"),
 	SEARCH_REBUILD_ON_BOOT: z.string("SEARCH_REBUILD_ON_BOOT must be present"),
+	INBOUND_WEBHOOK_SECRET: z.string().optional(),
 });
 
 /** Safe to expose to the browser */
@@ -32,7 +33,11 @@ export const ZPublicConfig = z.object({
 	ANON_KEY: z.string("ANON_KEY must be present"),
 	WEB_URL: z.string("WEB_URL must be present"),
 	DOCS_URL: z.string().optional(),
-	DISABLE_SIGNUP: z.string().optional().transform((val) => val === "true").default(false),
+	DISABLE_SIGNUP: z
+		.string()
+		.optional()
+		.transform((val) => val === "true")
+		.default(false),
 });
 
 export type ServerConfig = z.infer<typeof ZServerConfig>;
