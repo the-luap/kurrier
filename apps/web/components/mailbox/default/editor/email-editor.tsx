@@ -1,22 +1,22 @@
 "use client";
+import type { MessageEntity } from "@db";
+import { Select } from "@mantine/core";
+import type { FormState, PublicConfig } from "@schema";
+import Form from "next/form";
 import React, {
-	useEffect,
-	useRef,
 	forwardRef,
-	useImperativeHandle,
 	useActionState,
+	useEffect,
+	useImperativeHandle,
+	useRef,
 } from "react";
-import { MessageEntity } from "@db";
+import { toast } from "sonner";
 import {
 	TextEditor,
-	TextEditorHandle,
+	type TextEditorHandle,
 } from "@/components/mailbox/default/editor/rich-text-editor";
-import Form from "next/form";
-import { sendMail } from "@/lib/actions/mailbox";
-import type { FormState, PublicConfig } from "@schema";
 import { DynamicContextProvider } from "@/hooks/use-dynamic-context";
-import { toast } from "sonner";
-import { Select } from "@mantine/core";
+import { sendMail } from "@/lib/actions/mailbox";
 
 export type EmailEditorHandle = {
 	focus: () => void;
@@ -28,8 +28,14 @@ type Props = {
 	message: MessageEntity | null;
 	publicConfig: PublicConfig;
 	showEditorMode: string;
+	signatureHtml?: string | null;
 	sentMailboxId: string;
-	senderOptions?: { value: string; label: string; email: string }[];
+	senderOptions?: {
+		value: string;
+		label: string;
+		email: string;
+		signatureHtml?: string;
+	}[];
 	onSentMailboxChange?: (sentMailboxId: string) => void;
 	handleClose: () => void;
 };
@@ -41,6 +47,7 @@ const EmailEditor = forwardRef<EmailEditorHandle, Props>(
 			message,
 			publicConfig,
 			showEditorMode,
+			signatureHtml,
 			sentMailboxId,
 			senderOptions = [],
 			onSentMailboxChange,
@@ -134,7 +141,15 @@ const EmailEditor = forwardRef<EmailEditorHandle, Props>(
 											: ""
 								}
 							/>
-							<TextEditor name={"html"} ref={textEditorRef} />
+							<TextEditor
+								name={"html"}
+								ref={textEditorRef}
+								defaultValue={
+									signatureHtml
+										? `<p></p><div class="kurrier-signature">${signatureHtml}</div>`
+										: ""
+								}
+							/>
 						</Form>
 					</DynamicContextProvider>
 				</div>

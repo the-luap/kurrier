@@ -1,12 +1,13 @@
 // @ts-nocheck
 import "@mantine/tiptap/styles.css";
-import { RichTextEditor, Link } from "@mantine/tiptap";
+import { Link, RichTextEditor } from "@mantine/tiptap";
+import Image from "@tiptap/extension-image";
 import { useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
-import Image from "@tiptap/extension-image";
 
 import React, {
 	forwardRef,
+	useEffect,
 	useImperativeHandle,
 	useRef,
 	useState,
@@ -24,12 +25,12 @@ type TextEditorProps = {
 	onChange?: (html: string) => void;
 };
 
+import type { MessageEntity } from "@db";
 import { Temporal } from "@js-temporal/polyfill";
-import EditorHeader from "@/components/mailbox/default/editor/editor-header";
-import EditorFooter from "@/components/mailbox/default/editor/editor-footer";
-import { useDynamicContext } from "@/hooks/use-dynamic-context";
-import { MessageEntity } from "@db";
 import { FocusTrap } from "@mantine/core";
+import EditorFooter from "@/components/mailbox/default/editor/editor-footer";
+import EditorHeader from "@/components/mailbox/default/editor/editor-header";
+import { useDynamicContext } from "@/hooks/use-dynamic-context";
 
 function formatWhen(d: Date) {
 	return Temporal.Instant.from(d.toISOString())
@@ -54,11 +55,19 @@ export const TextEditor = forwardRef<TextEditorHandle, TextEditorProps>(
 			immediatelyRender: false,
 			parseOptions: { preserveWhitespace: "full" },
 			extensions: [StarterKit, Link, Image],
+			content: defaultValue,
 			onUpdate: ({ editor }) => {
 				setTextValue(editor.getText().trim());
 				setValue(editor.getHTML().trim());
 			},
 		});
+
+		useEffect(() => {
+			if (!editor || !defaultValue) return;
+			editor.commands.setContent(defaultValue);
+			setTextValue(editor.getText().trim());
+			setValue(editor.getHTML().trim());
+		}, [defaultValue, editor]);
 
 		useImperativeHandle(
 			ref,

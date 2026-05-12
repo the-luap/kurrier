@@ -1,9 +1,14 @@
 "use client";
 
-import * as React from "react";
-import { Container } from "@/components/common/containers";
-import { Card, CardContent } from "@/components/ui/card";
 import { ActionIcon, Button, CopyButton, Tooltip } from "@mantine/core";
+import { modals } from "@mantine/modals";
+import type { DnsRecord } from "@providers";
+import {
+	type FormState,
+	type IdentityStatus,
+	IdentityStatusMeta,
+} from "@schema";
+import { IconCheck, IconCopy, IconSend } from "@tabler/icons-react";
 import {
 	ArrowDownFromLine,
 	ArrowUpFromLine,
@@ -13,31 +18,32 @@ import {
 	Eye,
 	Globe,
 	Mail,
+	PencilLine,
 	Plus,
 	RefreshCw,
 	Trash2,
 	Verified,
 } from "lucide-react";
-import { parseSecret } from "@/lib/utils";
-import { modals } from "@mantine/modals";
+import * as React from "react";
+import { useMemo, useState } from "react";
+import { toast } from "sonner";
+import { Container } from "@/components/common/containers";
+import AddDomainIdentityForm from "@/components/dashboard/identities/add-domain-identity-form";
 import AddEmailIdentityForm from "@/components/dashboard/identities/add-email-identity-form";
+import EmailIdentityStatus from "@/components/dashboard/identities/email-identity-status";
+import IdentitySignatureForm from "@/components/dashboard/identities/identity-signature-form";
+import ProviderBadge from "@/components/dashboard/identities/provider-badge";
+import IsVerifiedStatus from "@/components/dashboard/providers/is-verified-status";
+import { Card, CardContent } from "@/components/ui/card";
 import {
 	deleteDomainIdentity,
 	deleteEmailIdentity,
-	FetchDecryptedSecretsResult,
-	FetchUserIdentitiesResult,
+	type FetchDecryptedSecretsResult,
+	type FetchUserIdentitiesResult,
 	testSendingEmail,
 	verifyDomainIdentity,
 } from "@/lib/actions/dashboard";
-import ProviderBadge from "@/components/dashboard/identities/provider-badge";
-import IsVerifiedStatus from "@/components/dashboard/providers/is-verified-status";
-import { IconCheck, IconCopy, IconSend } from "@tabler/icons-react";
-import { useMemo, useState } from "react";
-import { toast } from "sonner";
-import AddDomainIdentityForm from "@/components/dashboard/identities/add-domain-identity-form";
-import { FormState, IdentityStatus, IdentityStatusMeta } from "@schema";
-import EmailIdentityStatus from "@/components/dashboard/identities/email-identity-status";
-import { DnsRecord } from "@providers";
+import { parseSecret } from "@/lib/utils";
 
 function SectionHeader({
 	title,
@@ -154,6 +160,31 @@ export default function MailIdentities({
 						onCompleted={(res: FormState) => {
 							modals.close(openModalId);
 						}}
+					/>
+				</div>
+			),
+		});
+	};
+
+	const openSignatureForm = async (
+		userIdentity: FetchUserIdentitiesResult[number],
+	) => {
+		const openModalId = modals.open({
+			title: (
+				<div className="font-semibold text-brand-foreground">
+					Signature for <strong>{userIdentity.identities.value}</strong>
+				</div>
+			),
+			closeOnEscape: false,
+			closeOnClickOutside: false,
+			size: "lg",
+			children: (
+				<div className="p-2">
+					<IdentitySignatureForm
+						identityId={userIdentity.identities.id}
+						identityValue={userIdentity.identities.value}
+						defaultSignature={userIdentity.identities.signatureHtml}
+						onCompleted={() => modals.close(openModalId)}
 					/>
 				</div>
 			),
@@ -629,6 +660,20 @@ export default function MailIdentities({
 												onClick={() => initTestEmail(userIdentity, decrypted)}
 											>
 												Send Test Email
+											</Button>
+
+											<Button
+												leftSection={<PencilLine size={16} />}
+												size="xs"
+												variant={
+													userIdentity.identities.signatureHtml
+														? "light"
+														: "outline"
+												}
+												className="flex-1 sm:flex-none"
+												onClick={() => openSignatureForm(userIdentity)}
+											>
+												Signature
 											</Button>
 
 											<ActionIcon

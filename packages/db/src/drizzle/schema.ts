@@ -384,6 +384,7 @@ export const identities = pgTable(
 
 		value: text("value").notNull(), // domain or email address
 		displayName: text("display_name"),
+		signatureHtml: text("signature_html"),
 		incomingDomain: boolean("incoming_domain").default(false),
 
 		domainIdentityId: uuid("domain_identity_id")

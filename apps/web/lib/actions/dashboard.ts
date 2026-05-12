@@ -1,57 +1,57 @@
 "use server";
 
+import { kvGet } from "@common";
 import {
 	apiKeys,
 	createSecret,
 	davAccounts,
 	driveVolumes,
 	getSecret,
-	identities,
-	IdentityCreate,
-	IdentityEntity,
+	type IdentityCreate,
+	type IdentityEntity,
 	IdentityInsertSchema,
+	identities,
 	mailboxes,
 	messages,
-	providers,
 	providerSecrets,
+	providers,
 	secretsMeta,
-	smtpAccounts,
 	smtpAccountSecrets,
+	smtpAccounts,
 	updateSecret,
 } from "@db";
 import {
+	createMailer,
+	createStore,
+	type DomainIdentity,
+	type VerifyResult,
+} from "@providers";
+import {
 	apiScopeList,
-	defaultImapQuota,
 	DomainIdentityFormSchema,
-	FormState,
+	defaultImapQuota,
+	type FormState,
 	getPublicEnv,
 	handleAction,
 	MailboxKindDisplay,
 	ProviderAccountFormSchema,
-	Providers,
+	type Providers,
 	SmtpAccountFormSchema,
 	SYSTEM_MAILBOXES,
 } from "@schema";
-import { currentSession, isSignedIn } from "@/lib/actions/auth";
-import { and, count, eq, sql, gte, desc } from "drizzle-orm";
-import { revalidatePath } from "next/cache";
-import { decode } from "decode-formdata";
-import { PgColumn, PgTable } from "drizzle-orm/pg-core";
-import {
-	createMailer,
-	createStore,
-	DomainIdentity,
-	VerifyResult,
-} from "@providers";
-import { parseSecret } from "@/lib/utils";
-import { z } from "zod";
 import slugify from "@sindresorhus/slugify";
-import { rlsClient } from "@/lib/actions/clients";
-import { v4 as uuidv4 } from "uuid";
-import { backfillMailboxes, clearImapClients } from "@/lib/actions/mailbox";
-import { kvGet } from "@common";
+import { decode } from "decode-formdata";
+import { and, count, desc, eq, gte, sql } from "drizzle-orm";
+import type { PgColumn, PgTable } from "drizzle-orm/pg-core";
 import { nanoid } from "nanoid";
+import { revalidatePath } from "next/cache";
+import { v4 as uuidv4 } from "uuid";
+import type { z } from "zod";
+import { currentSession, isSignedIn } from "@/lib/actions/auth";
+import { rlsClient } from "@/lib/actions/clients";
 import { getRedis } from "@/lib/actions/get-redis";
+import { backfillMailboxes, clearImapClients } from "@/lib/actions/mailbox";
+import { parseSecret } from "@/lib/utils";
 
 const DASHBOARD_PATH = "/dashboard/providers";
 const CURRENT_API_VERSION = 1;
@@ -591,6 +591,46 @@ export const fetchUserIdentities = async () => {
 			.leftJoin(providers, eq(identities.providerId, providers.id)),
 	);
 };
+
+export async function updateIdentitySignature(
+	_prev: FormState,
+	formData: FormData,
+): Promise<FormState> {
+	return handleAction(async () => {
+		const identityId = String(formData.get("identityId") ?? "");
+		const signatureHtml = String(formData.get("signatureHtml") ?? "").trim();
+		const safeSignatureHtml = signatureHtml
+			.replace(/<\/?script[^>]*>/gi, "")
+			.replace(/\son\w+=("[^"]*"|'[^']*'|[^\s>]*)/gi, "")
+			.replace(/javascript:/gi, "");
+
+		if (!identityId) {
+			throw new Error("Missing identity id.");
+		}
+
+		if (safeSignatureHtml.length > 20_000) {
+			throw new Error("Signature is too large. Keep it below 20 KB.");
+		}
+
+		const rls = await rlsClient();
+		await rls((tx) =>
+			tx
+				.update(identities)
+				.set({
+					signatureHtml: safeSignatureHtml || null,
+					updatedAt: new Date(),
+				})
+				.where(
+					and(eq(identities.id, identityId), eq(identities.kind, "email")),
+				),
+		);
+
+		revalidatePath("/dashboard/platform/identities");
+		revalidatePath("/dashboard/mail");
+
+		return { success: true, message: "Signature saved" };
+	});
+}
 
 export const deleteDomainIdentity = async (
 	userDomainIdentity: FetchUserIdentitiesResult[number],

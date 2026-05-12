@@ -11,6 +11,7 @@ CREATE TABLE "identities" (
 	"kind" "identity_kind" NOT NULL,
 	"public_id" text NOT NULL,
 	"value" text NOT NULL,
+	"signature_html" text,
 	"incoming_domain" boolean DEFAULT false,
 	"domain_identity_id" uuid DEFAULT null,
 	"dns_records" jsonb DEFAULT 'null'::jsonb,

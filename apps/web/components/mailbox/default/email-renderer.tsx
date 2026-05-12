@@ -1,8 +1,11 @@
 // @ts-nocheck
 "use client";
-import React, { useEffect, useRef, useState } from "react";
-import { MessageAttachmentEntity, MessageEntity } from "@db";
 import { getMessageAddress, getMessageName } from "@common/mail-client";
+import type { MessageAttachmentEntity, MessageEntity } from "@db";
+import { Temporal } from "@js-temporal/polyfill";
+import { ActionIcon, Button, Menu, Modal } from "@mantine/core";
+import { useDisclosure } from "@mantine/hooks";
+import type { PublicConfig } from "@schema";
 import slugify from "@sindresorhus/slugify";
 import {
 	Ban,
@@ -15,25 +18,24 @@ import {
 	Reply,
 	Trash2,
 } from "lucide-react";
-import { Temporal } from "@js-temporal/polyfill";
 import dynamic from "next/dynamic";
-import { ActionIcon, Button, Menu, Modal } from "@mantine/core";
-import { EmailEditorHandle } from "@/components/mailbox/default/editor/email-editor";
+import { useParams, useRouter } from "next/navigation";
+import type React from "react";
+import { useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 import EditorAttachmentItem from "@/components/mailbox/default/editor/editor-attachment-item";
-import { PublicConfig } from "@schema";
+import type { EmailEditorHandle } from "@/components/mailbox/default/editor/email-editor";
+import MailUnsubscriber from "@/components/mailbox/default/mail-unsubscriber";
 import {
+	type FetchThreadMailSubsResult,
 	fetchMailbox,
-	FetchThreadMailSubsResult,
 	markAsRead,
 	markAsUnread,
 	moveToSpam,
 	moveToTrash,
 } from "@/lib/actions/mailbox";
-import { useParams, useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
-import { useDisclosure } from "@mantine/hooks";
-import MailUnsubscriber from "@/components/mailbox/default/mail-unsubscriber";
-import { toast } from "sonner";
+
 const EmailEditor = dynamic(
 	() => import("@/components/mailbox/default/editor/email-editor"),
 	{
@@ -134,13 +136,15 @@ function EmailRenderer({
 	const [sentMailboxId, setSentMailboxId] = useState<string | undefined>(
 		undefined,
 	);
+	const [signatureHtml, setSignatureHtml] = useState<string>("");
 	const params = useParams();
 	const fetchSentMailbox = async () => {
 		if (sentMailboxId) return sentMailboxId;
-		const { activeMailbox } = await fetchMailbox(
+		const { activeMailbox, identity } = await fetchMailbox(
 			String(params.identityPublicId),
 			"sent",
 		);
+		setSignatureHtml(identity.signatureHtml ?? "");
 		const id = activeMailbox?.id ? String(activeMailbox.id) : undefined;
 		setSentMailboxId(id);
 		return id;
@@ -239,27 +243,29 @@ function EmailRenderer({
 	useEffect(() => {
 		const instant = Temporal.Instant.from(receivedAt.toISOString());
 		setFormatted(
-			instant.toZonedDateTimeISO(Temporal.Now.timeZoneId()).toLocaleString("en-US", {
-				day: "2-digit",
-				month: "short",
-				year: "numeric",
-				hour: "2-digit",
-				minute: "2-digit",
-				hour12: true,
-			}),
+			instant
+				.toZonedDateTimeISO(Temporal.Now.timeZoneId())
+				.toLocaleString("en-US", {
+					day: "2-digit",
+					month: "short",
+					year: "numeric",
+					hour: "2-digit",
+					minute: "2-digit",
+					hour12: true,
+				}),
 		);
 		setFormattedTime(
 			instant
-			.toZonedDateTimeISO(Temporal.Now.timeZoneId())
-			.toLocaleString("en-GB", {
-				day: "numeric",
-				month: "long",
-				year: "numeric",
-				hour: "2-digit",
-				minute: "2-digit",
-				hour12: false,
-			})
-			.replace(",", " at"),
+				.toZonedDateTimeISO(Temporal.Now.timeZoneId())
+				.toLocaleString("en-GB", {
+					day: "numeric",
+					month: "long",
+					year: "numeric",
+					hour: "2-digit",
+					minute: "2-digit",
+					hour12: false,
+				})
+				.replace(",", " at"),
 		);
 	}, [receivedAt]);
 
@@ -464,7 +470,9 @@ function EmailRenderer({
 
 								<Menu.Dropdown>
 									<Menu.Item
-										leftSection={isRead ? <Mail size={14} /> : <MailOpen size={14} />}
+										leftSection={
+											isRead ? <Mail size={14} /> : <MailOpen size={14} />
+										}
 										onClick={() => markThreadReadState(!isRead)}
 										disabled={isMutating}
 									>
@@ -584,6 +592,7 @@ function EmailRenderer({
 						}}
 						handleClose={() => setShowEditor(false)}
 						showEditorMode={showEditorMode}
+						signatureHtml={signatureHtml}
 					/>
 				</div>
 			)}
