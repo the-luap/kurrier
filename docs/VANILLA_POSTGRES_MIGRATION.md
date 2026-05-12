@@ -2,7 +2,28 @@
 
 Goal: make this fork run on a normal PostgreSQL deployment without Supabase Auth, Supabase Storage, Kong, GoTrue, Realtime, or Supabase-specific service keys.
 
-Non-goal: remove row-level security. RLS is still the right security boundary for a multi-tenant mail app. We should keep it and replace Supabase-specific helpers with application-owned PostgreSQL helpers.
+Non-goal: remove row-level security or turn Kurrier into a single-user-only product. RLS is still the right security boundary for a public multi-user mail app. We should keep it and replace Supabase-specific helpers with application-owned PostgreSQL helpers.
+
+## Product/security decision
+
+Default target: **multi-user public fork**.
+
+Kurrier already supports multiple application users, each with their own mailboxes, identities, messages, contacts, providers, and secrets. A public fork should not regress that into a private single-user-only app. The migration should preserve the existing tenant model:
+
+- each application user keeps a stable UUID
+- tenant-owned rows keep `owner_id`
+- database RLS remains enabled for tenant-owned tables
+- policies continue to isolate users at the database layer
+- Supabase is replaced as an implementation detail, not as a security model
+
+Optional target: **single-user self-hosted mode**.
+
+For personal deployments, we can later add a convenience mode such as `SINGLE_USER_MODE=true`. That mode should simplify first-run setup and login, but it should not require a separate schema or removal of RLS. It can create/use one local admin user and set that user's context for all normal UI actions.
+
+This gives both audiences what they need:
+
+- public fork / teams: safe multi-user behavior
+- private self-hosters: simple one-account setup with multiple mailboxes
 
 ## Current state
 
@@ -143,6 +164,8 @@ Replace Supabase Auth with app-owned session auth:
 
 Migration path should support importing existing Supabase Auth users if needed.
 
+Single-user mode should be implemented as an auth/setup convenience on top of the same model, not as a separate security architecture. It can auto-provision one admin user and disable public signup, while `owner_id`, RLS, and tenant-scoped helpers continue to work normally.
+
 ### Storage
 
 Replace Supabase Storage with a provider abstraction:
@@ -237,6 +260,11 @@ Tasks:
 3. Replace Supabase middleware/session refresh with local cookie/session middleware.
 4. Replace `supabase.auth.getUser()` and `supabase.auth.admin.getUserById()` call sites.
 5. Add migration/import script for existing users.
+6. Add optional single-user deployment mode:
+   - `SINGLE_USER_MODE=true`
+   - first-run admin provisioning
+   - public signup disabled
+   - all normal queries still run with that user's RLS context
 
 Acceptance criteria:
 
@@ -244,6 +272,7 @@ Acceptance criteria:
 - server actions get the current user from local session
 - worker/API routes can authenticate using local session/API keys
 - RLS context is set from local session user id
+- optional single-user mode works without bypassing RLS
 
 ### Phase 3 — Replace Supabase Storage
 
@@ -304,6 +333,7 @@ Acceptance criteria:
 ## Risk notes
 
 - Do not remove RLS just to simplify the port. Application-only `where owner_id = ...` checks are easier to miss and will eventually leak tenant data.
+- Do not build single-user mode by deleting `owner_id` or bypassing tenant context. Keep one schema and one security model; make single-user a provisioning/auth setting only.
 - Be careful with pooled DB connections. `app.current_user_id` must be transaction-local or reset reliably.
 - Browser-side direct storage access should be removed. Signed URLs should be minted by the app after auth/RLS checks.
 - Existing Supabase Auth user IDs should be preserved where possible because `owner_id` references those UUIDs across the data model.
