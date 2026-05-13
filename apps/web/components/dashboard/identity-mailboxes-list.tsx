@@ -89,6 +89,7 @@ type TreeMailbox = {
 type MailboxWithNavMeta = MailboxEntity & {
 	parentId?: string | null;
 	unreadCount?: number | null;
+	unreadThreads?: number | null;
 	metaData?: { imap?: { selectable?: boolean } } | null;
 };
 
@@ -105,7 +106,10 @@ function buildTree(rows: MailboxEntity[]): TreeMailbox[] {
 			slug: r.slug ?? null,
 			parentId: row.parentId ?? null,
 			selectable: row.metaData?.imap?.selectable !== false,
-			unread: Number(row.unreadCount ?? 0),
+			unread: Math.max(
+				Number(row.unreadCount ?? 0),
+				Number(row.unreadThreads ?? 0),
+			),
 			children: [],
 		});
 	}
@@ -175,12 +179,12 @@ export default function IdentityMailboxesList({
 
 		return (
 			<div className="min-w-0">
-				<div className="group/folder flex min-w-0 items-center">
+				<div className="group/folder grid min-w-0 grid-cols-[1rem_minmax(0,1fr)_1.75rem] items-center gap-1">
 					{hasChildren ? (
 						<button
 							type="button"
 							onClick={() => setOpen((v) => !v)}
-							className="mr-1 shrink-0 rounded p-0.5 hover:bg-sidebar-accent/60"
+							className="rounded p-0.5 hover:bg-sidebar-accent/60"
 							aria-label={open ? "Collapse" : "Expand"}
 						>
 							{open ? (
@@ -190,71 +194,78 @@ export default function IdentityMailboxesList({
 							)}
 						</button>
 					) : (
-						<span className="w-4 shrink-0" />
+						<span className="w-4" />
 					)}
 
-					<div className="flex min-w-0 flex-1 items-center gap-1">
-						<Link
-							href={href}
-							prefetch={false}
-							onClick={onComplete ? () => onComplete() : undefined}
-							aria-disabled={!m.selectable}
-							style={{ paddingLeft: `${Math.min(depth, 4) * 0.625 + 0.5}rem` }}
-							className={cn(
-								"relative flex min-w-0 flex-1 items-center gap-2 rounded-md border border-transparent py-1.5 pr-2 text-sm transition-colors",
-								"hover:border-sidebar-border hover:bg-sidebar-accent/80 hover:text-sidebar-accent-foreground",
-								isActive &&
-									"border-primary/20 bg-primary/10 text-sidebar-accent-foreground shadow-sm dark:border-primary/30 dark:bg-primary/20",
-								!m.selectable &&
-									"opacity-60 pointer-events-none cursor-default",
-							)}
-						>
-							{isActive ? (
-								<span className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-primary" />
-							) : null}
-							<Icon className={cn("h-4 w-4 shrink-0", ACCENT[m.kind])} />
-							<span
-								className="min-w-0 flex-1 truncate"
-								title={
-									m.kind === "custom" ? (m.name ?? "Mailbox") : TITLE[m.kind]
-								}
-							>
-								{m.kind === "custom" ? (m.name ?? "Mailbox") : TITLE[m.kind]}
-							</span>
-							{m.unread > 0 && (
-								<span className="ml-auto shrink-0 rounded-full border border-primary/20 bg-primary/10 px-1.5 text-[10px] leading-5 text-sidebar-foreground dark:border-primary/30 dark:bg-primary/20">
-									{m.unread > 99 ? "99+" : m.unread}
-								</span>
-							)}
-						</Link>
-
-						{m.kind === "custom" && (
-							<Menu withinPortal position="right-start" offset={4}>
-								<Menu.Target>
-									<button
-										type="button"
-										onClick={(e) => {
-											e.stopPropagation(); // don’t toggle parent handlers
-										}}
-										className={cn(
-											"shrink-0 rounded p-1 transition",
-											"hover:bg-sidebar-accent/60",
-										)}
-										aria-label={`Actions for ${m.name ?? "folder"}`}
-									>
-										<MoreVertical className="h-4 w-4" />
-									</button>
-								</Menu.Target>
-								<Menu.Dropdown onClick={(e) => e.stopPropagation()}>
-									<DeleteMailboxFolder
-										mailboxId={m.id}
-										identityPublicId={identityPublicId}
-										imapOp={!!identity.smtpAccountId}
-									/>
-								</Menu.Dropdown>
-							</Menu>
+					<Link
+						href={href}
+						prefetch={false}
+						onClick={onComplete ? () => onComplete() : undefined}
+						aria-disabled={!m.selectable}
+						style={{ paddingLeft: `${Math.min(depth, 4) * 0.625 + 0.5}rem` }}
+						className={cn(
+							"relative flex min-w-0 w-full items-center gap-2 rounded-md border border-transparent py-1.5 pr-2 text-sm transition-colors",
+							"hover:border-sidebar-border hover:bg-sidebar-accent/80 hover:text-sidebar-accent-foreground",
+							isActive &&
+								"border-primary/20 bg-primary/10 text-sidebar-accent-foreground shadow-sm dark:border-primary/30 dark:bg-primary/20",
+							!m.selectable && "opacity-60 pointer-events-none cursor-default",
 						)}
-					</div>
+					>
+						{isActive ? (
+							<span className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-primary" />
+						) : null}
+						<Icon className={cn("h-4 w-4 shrink-0", ACCENT[m.kind])} />
+						<span
+							className="min-w-0 flex-1 truncate"
+							title={
+								m.kind === "custom" ? (m.name ?? "Mailbox") : TITLE[m.kind]
+							}
+						>
+							{m.kind === "custom" ? (m.name ?? "Mailbox") : TITLE[m.kind]}
+						</span>
+						{(m.kind === "inbox" || m.unread > 0) && (
+							<span
+								className={cn(
+									"ml-auto shrink-0 rounded-full border px-1.5 text-[10px] leading-5 tabular-nums",
+									m.unread > 0
+										? "border-primary/20 bg-primary/10 text-sidebar-foreground dark:border-primary/30 dark:bg-primary/20"
+										: "border-sidebar-border bg-sidebar-accent/40 text-sidebar-foreground/60",
+								)}
+								title={`${m.unread} unread`}
+							>
+								{m.unread > 99 ? "99+" : m.unread}
+							</span>
+						)}
+					</Link>
+
+					{m.kind === "custom" ? (
+						<Menu withinPortal position="right-start" offset={4}>
+							<Menu.Target>
+								<button
+									type="button"
+									onClick={(e) => {
+										e.stopPropagation(); // don’t toggle parent handlers
+									}}
+									className={cn(
+										"shrink-0 rounded p-1 transition",
+										"hover:bg-sidebar-accent/60",
+									)}
+									aria-label={`Actions for ${m.name ?? "folder"}`}
+								>
+									<MoreVertical className="h-4 w-4" />
+								</button>
+							</Menu.Target>
+							<Menu.Dropdown onClick={(e) => e.stopPropagation()}>
+								<DeleteMailboxFolder
+									mailboxId={m.id}
+									identityPublicId={identityPublicId}
+									imapOp={!!identity.smtpAccountId}
+								/>
+							</Menu.Dropdown>
+						</Menu>
+					) : (
+						<span className="h-7 w-7" />
+					)}
 				</div>
 
 				{open && hasChildren && (
@@ -292,6 +303,11 @@ export default function IdentityMailboxesList({
 			</Link>
 			{identityMailboxes.map(({ identity, mailboxes }) => {
 				const tree = buildTree(mailboxes as MailboxEntity[]);
+				const identityUnread = tree.reduce(
+					(sum, mailbox) =>
+						sum + (mailbox.kind === "inbox" ? mailbox.unread : 0),
+					0,
+				);
 
 				const scheduledCounts = scheduledDrafts.filter(
 					(draft) => draft.identityId === identity.id,
@@ -301,10 +317,15 @@ export default function IdentityMailboxesList({
 				).length;
 				return (
 					<div key={identity.id} className="min-w-0">
-						<div className="mb-1 mt-3 flex min-w-0 items-center gap-1 border-l-2 border-l-primary/30 px-2 text-xs font-semibold text-sidebar-foreground/60 dark:border-l-primary/50">
+						<div className="mb-1 mt-3 grid min-w-0 grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-1 border-l-2 border-l-primary/30 px-2 text-xs font-semibold text-sidebar-foreground/60 dark:border-l-primary/50">
 							<span className="min-w-0 flex-1 truncate" title={identity.value}>
 								{identity.value}
 							</span>
+							{identityUnread > 0 ? (
+								<span className="shrink-0 rounded-full bg-primary/10 px-1.5 text-[10px] leading-5 text-sidebar-foreground tabular-nums dark:bg-primary/20">
+									{identityUnread > 99 ? "99+" : identityUnread}
+								</span>
+							) : null}
 							<AddNewFolder mailboxes={mailboxes} identity={identity} />
 						</div>
 						<div className="min-w-0 space-y-1">

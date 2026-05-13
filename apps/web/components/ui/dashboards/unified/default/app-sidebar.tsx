@@ -192,8 +192,14 @@ export function AppSidebar({ ...props }: UnifiedSidebarProps) {
 	return (
 		<Sidebar
 			collapsible="icon"
-			className="overflow-hidden *:data-[sidebar=sidebar]:flex-row"
 			{...restProps}
+			style={
+				{
+					"--sidebar-width": "22rem",
+					...restProps.style,
+				} as React.CSSProperties
+			}
+			className="overflow-hidden *:data-[sidebar=sidebar]:flex-row"
 		>
 			{/* This is the first sidebar */}
 			{/* We disable collapsible and adjust width to icon. */}
@@ -301,7 +307,7 @@ export function AppSidebar({ ...props }: UnifiedSidebarProps) {
 			{/* This is the second sidebar */}
 			{/* We disable collapsible and let it fill remaining space */}
 
-			<Sidebar collapsible="none" className="hidden flex-1 md:flex">
+			<Sidebar collapsible="none" className="hidden min-w-0 flex-1 md:flex">
 				<SidebarHeader className="gap-3.5 border-b p-4">
 					<div className="text-left font-sans flex items-center gap-1">
 						<KurrierLogo size={36} />
