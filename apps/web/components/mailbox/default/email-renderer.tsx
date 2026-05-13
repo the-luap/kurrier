@@ -191,6 +191,18 @@ function EmailRenderer({
 		return id;
 	};
 
+	const openEditor = async (mode: "reply" | "forward") => {
+		setShowEditorMode(mode);
+		const mailboxId = await fetchSentMailbox();
+		if (!mailboxId) {
+			toast.error("Sender mailbox is not ready yet", {
+				description: "Kurrier could not resolve the Sent mailbox for this identity.",
+			});
+			return;
+		}
+		setShowEditor(true);
+	};
+
 	useEffect(() => {
 		if (activeMailboxId && threadIndex === 0 && !seenRef.current) {
 			seenRef.current = true;
@@ -544,7 +556,11 @@ function EmailRenderer({
 						<ActionIcon
 							variant={"transparent"}
 							onClick={() => {
-								setShowEditor(!showEditor);
+								if (showEditor) {
+									setShowEditor(false);
+									return;
+								}
+								void openEditor("reply");
 							}}
 						>
 							<Reply size={18} />
@@ -584,19 +600,13 @@ function EmailRenderer({
 									<Menu.Divider />
 									<Menu.Item
 										leftSection={<Reply size={14} />}
-										onClick={() => {
-											setShowEditorMode("reply");
-											setShowEditor(true);
-										}}
+										onClick={() => void openEditor("reply")}
 									>
 										Reply
 									</Menu.Item>
 									<Menu.Item
 										leftSection={<Forward size={14} />}
-										onClick={() => {
-											setShowEditorMode("forward");
-											setShowEditor(true);
-										}}
+										onClick={() => void openEditor("forward")}
 									>
 										Forward
 									</Menu.Item>
@@ -641,11 +651,7 @@ function EmailRenderer({
 			{threadIndex === numberOfMessages - 1 && !showEditor && (
 				<div className={"flex gap-6"}>
 					<Button
-						onClick={async () => {
-							setShowEditorMode("reply");
-							await fetchSentMailbox();
-							setShowEditor(true);
-						}}
+						onClick={() => void openEditor("reply")}
 						leftSection={<Reply />}
 						variant={"outline"}
 						radius={"xl"}
@@ -653,11 +659,7 @@ function EmailRenderer({
 						Reply
 					</Button>
 					<Button
-						onClick={async () => {
-							setShowEditorMode("forward");
-							await fetchSentMailbox();
-							setShowEditor(true);
-						}}
+						onClick={() => void openEditor("forward")}
 						rightSection={<Forward />}
 						variant={"outline"}
 						radius={"xl"}
