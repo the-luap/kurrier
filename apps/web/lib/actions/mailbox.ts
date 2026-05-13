@@ -47,6 +47,7 @@ import Typesense, { type Client } from "typesense";
 import { isSignedIn } from "@/lib/actions/auth";
 import { rlsClient } from "@/lib/actions/clients";
 import { getRedis } from "@/lib/actions/get-redis";
+import { withServerCache } from "@/lib/server-cache";
 import { toArray } from "@/lib/utils";
 
 let typeSenseClient: Client | null = null;
@@ -125,7 +126,7 @@ export const fetchMailbox = cache(
 	},
 );
 
-export const fetchIdentityMailboxList = cache(async () => {
+const fetchIdentityMailboxListUncached = async () => {
 	const rls = await rlsClient();
 
 	const rows = await rls((tx) =>
@@ -221,13 +222,24 @@ export const fetchIdentityMailboxList = cache(async () => {
 			unreadThreads: aggByMailbox.get(mailbox.id)?.unreadThreads ?? 0,
 		})),
 	}));
+};
+
+export const fetchIdentityMailboxList = cache(async () => {
+	const user = await isSignedIn();
+	if (!user?.id) return fetchIdentityMailboxListUncached();
+
+	return withServerCache(
+		`mailbox-list:${user.id}`,
+		15,
+		fetchIdentityMailboxListUncached,
+	);
 });
 
 export type FetchIdentityMailboxListResult = Awaited<
 	ReturnType<typeof fetchIdentityMailboxList>
 >;
 
-export const fetchMailboxOverview = cache(async () => {
+const fetchMailboxOverviewUncached = async () => {
 	const identityMailboxList = await fetchIdentityMailboxList();
 	const inboxMailboxIds = identityMailboxList.flatMap((entry) =>
 		entry.mailboxes
@@ -278,6 +290,17 @@ export const fetchMailboxOverview = cache(async () => {
 			recentThreads: recentByMailbox.get(mailbox.id) ?? [],
 		})),
 	}));
+};
+
+export const fetchMailboxOverview = cache(async () => {
+	const user = await isSignedIn();
+	if (!user?.id) return fetchMailboxOverviewUncached();
+
+	return withServerCache(
+		`mailbox-overview:${user.id}`,
+		10,
+		fetchMailboxOverviewUncached,
+	);
 });
 
 export type FetchMailboxOverviewResult = Awaited<
