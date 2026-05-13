@@ -195,7 +195,7 @@ export function AppSidebar({ ...props }: UnifiedSidebarProps) {
 			{...restProps}
 			style={
 				{
-					"--sidebar-width": "22rem",
+					"--sidebar-width": "18rem",
 					...restProps.style,
 				} as React.CSSProperties
 			}

@@ -178,21 +178,27 @@ export const fetchIdentityMailboxList = cache(async () => {
 			}
 		>,
 	);
+	const mailboxIds = Object.values(byIdentity).flatMap((entry) =>
+		entry.mailboxes.map((mailbox) => mailbox.id),
+	);
 
-	const unreadAgg = await rls((tx) =>
-		tx
-			.select({
-				mailboxId: mailboxThreads.mailboxId,
-				unreadThreads: sql<number>`
+	const unreadAgg = mailboxIds.length
+		? await rls((tx) =>
+				tx
+					.select({
+						mailboxId: mailboxThreads.mailboxId,
+						unreadThreads: sql<number>`
         count(*) FILTER (WHERE ${mailboxThreads.unreadCount} > 0)
       `.as("unread_threads"),
-				unreadTotal: sql<number>`
+						unreadTotal: sql<number>`
         coalesce(sum(${mailboxThreads.unreadCount}), 0)
       `.as("unread_total"),
-			})
-			.from(mailboxThreads)
-			.groupBy(mailboxThreads.mailboxId),
-	);
+					})
+					.from(mailboxThreads)
+					.where(inArray(mailboxThreads.mailboxId, mailboxIds))
+					.groupBy(mailboxThreads.mailboxId),
+			)
+		: [];
 
 	const aggByMailbox = new Map<
 		string,
@@ -223,11 +229,13 @@ export type FetchIdentityMailboxListResult = Awaited<
 
 export const fetchMailboxOverview = cache(async () => {
 	const identityMailboxList = await fetchIdentityMailboxList();
-	const mailboxIds = identityMailboxList.flatMap((entry) =>
-		entry.mailboxes.map((mailbox) => mailbox.id),
+	const inboxMailboxIds = identityMailboxList.flatMap((entry) =>
+		entry.mailboxes
+			.filter((mailbox) => mailbox.kind === "inbox")
+			.map((mailbox) => mailbox.id),
 	);
 
-	if (mailboxIds.length === 0) {
+	if (inboxMailboxIds.length === 0) {
 		return identityMailboxList.map((entry) => ({
 			...entry,
 			mailboxes: [],
@@ -236,37 +244,22 @@ export const fetchMailboxOverview = cache(async () => {
 
 	const rls = await rlsClient();
 	const now = new Date();
-	const [totalRows, recentRows] = await Promise.all([
-		rls((tx) =>
-			tx
-				.select({
-					mailboxId: mailboxThreads.mailboxId,
-					totalThreads: count(),
-				})
-				.from(mailboxThreads)
-				.where(inArray(mailboxThreads.mailboxId, mailboxIds))
-				.groupBy(mailboxThreads.mailboxId),
-		),
-		rls((tx) =>
-			tx
-				.select()
-				.from(mailboxThreads)
-				.where(
-					and(
-						inArray(mailboxThreads.mailboxId, mailboxIds),
-						or(
-							isNull(mailboxThreads.snoozedUntil),
-							lte(mailboxThreads.snoozedUntil, now),
-						),
+	const recentRows = await rls((tx) =>
+		tx
+			.select()
+			.from(mailboxThreads)
+			.where(
+				and(
+					inArray(mailboxThreads.mailboxId, inboxMailboxIds),
+					gt(mailboxThreads.unreadCount, 0),
+					or(
+						isNull(mailboxThreads.snoozedUntil),
+						lte(mailboxThreads.snoozedUntil, now),
 					),
-				)
-				.orderBy(desc(mailboxThreads.lastActivityAt))
-				.limit(Math.min(mailboxIds.length * 3, 300)),
-		),
-	]);
-
-	const totalsByMailbox = new Map(
-		totalRows.map((row) => [row.mailboxId, Number(row.totalThreads ?? 0)]),
+				),
+			)
+			.orderBy(desc(mailboxThreads.lastActivityAt))
+			.limit(Math.min(inboxMailboxIds.length * 3, 150)),
 	);
 	const recentByMailbox = new Map<string, typeof recentRows>();
 	for (const thread of recentRows) {
@@ -281,7 +274,7 @@ export const fetchMailboxOverview = cache(async () => {
 		...entry,
 		mailboxes: entry.mailboxes.map((mailbox) => ({
 			...mailbox,
-			totalThreads: totalsByMailbox.get(mailbox.id) ?? 0,
+			totalThreads: 0,
 			recentThreads: recentByMailbox.get(mailbox.id) ?? [],
 		})),
 	}));

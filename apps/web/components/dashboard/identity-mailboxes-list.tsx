@@ -179,7 +179,14 @@ export default function IdentityMailboxesList({
 
 		return (
 			<div className="min-w-0">
-				<div className="group/folder grid min-w-0 grid-cols-[1rem_minmax(0,1fr)_1.75rem] items-center gap-1">
+				<div
+					className={cn(
+						"group/folder grid min-w-0 items-center gap-1",
+						m.kind === "custom"
+							? "grid-cols-[1rem_minmax(0,1fr)_1.5rem]"
+							: "grid-cols-[1rem_minmax(0,1fr)]",
+					)}
+				>
 					{hasChildren ? (
 						<button
 							type="button"
@@ -263,9 +270,7 @@ export default function IdentityMailboxesList({
 								/>
 							</Menu.Dropdown>
 						</Menu>
-					) : (
-						<span className="h-7 w-7" />
-					)}
+					) : null}
 				</div>
 
 				{open && hasChildren && (
