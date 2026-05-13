@@ -410,18 +410,65 @@ Rules:
 	}
 }
 
+async function resolveSentMailboxIdFromMessageMailbox(
+	messageMailboxId: string,
+): Promise<string | null> {
+	if (!messageMailboxId || messageMailboxId === "undefined") return null;
+
+	const rls = await rlsClient();
+	return await rls(async (tx) => {
+		const [sourceMailbox] = await tx
+			.select({ identityId: mailboxes.identityId })
+			.from(mailboxes)
+			.where(eq(mailboxes.id, messageMailboxId));
+
+		if (!sourceMailbox?.identityId) return null;
+
+		const candidateMailboxes = await tx
+			.select({
+				id: mailboxes.id,
+				kind: mailboxes.kind,
+				slug: mailboxes.slug,
+				name: mailboxes.name,
+			})
+			.from(mailboxes)
+			.where(eq(mailboxes.identityId, sourceMailbox.identityId));
+
+		const sentMailbox =
+			candidateMailboxes.find((mailbox) => mailbox.kind === "sent") ??
+			candidateMailboxes.find((mailbox) => mailbox.slug === "sent") ??
+			candidateMailboxes.find((mailbox) => mailbox.slug === "gesendet") ??
+			candidateMailboxes.find((mailbox) =>
+				mailbox.name?.toLowerCase().includes("sent"),
+			) ??
+			candidateMailboxes.find((mailbox) =>
+				mailbox.name?.toLowerCase().includes("gesendet"),
+			);
+
+		return sentMailbox?.id ? String(sentMailbox.id) : null;
+	});
+}
+
 export async function sendMail(
 	_prev: FormState,
 	formData: FormData,
 ): Promise<FormState> {
 	const decodedForm = decode(formData) as any;
-	const sentMailboxId = String(decodedForm.sentMailboxId ?? "").trim();
+	let sentMailboxId = String(decodedForm.sentMailboxId ?? "").trim();
+
+	if (!sentMailboxId || sentMailboxId === "undefined") {
+		const messageMailboxId = String(
+			decodedForm.messageMailboxId ?? decodedForm.mailboxId ?? "",
+		).trim();
+		sentMailboxId =
+			(await resolveSentMailboxIdFromMessageMailbox(messageMailboxId)) ?? "";
+	}
 
 	if (!sentMailboxId || sentMailboxId === "undefined") {
 		return {
 			success: false,
 			error:
-				"Sender mailbox is not ready yet. Please close the editor and try Reply again.",
+				"Sender mailbox is not ready yet. Kurrier could not resolve the Sent mailbox for this message.",
 		};
 	}
 
