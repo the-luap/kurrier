@@ -181,47 +181,49 @@ export default function MailboxOverview({ overview }: MailboxOverviewProps) {
 											<CardContent className="px-4">
 												{overviewMailbox.recentThreads.length > 0 ? (
 													<div className="flex flex-col divide-y">
-														{overviewMailbox.recentThreads.map((thread) => (
-															<Link
-																key={`${overviewMailbox.id}:${thread.threadId}`}
-																href={`${href}/threads/${thread.threadId}`}
-																className="group flex min-w-0 gap-2 py-2 text-sm"
-															>
-																<Mail
-																	className={cn(
-																		"mt-0.5 h-4 w-4 shrink-0 text-muted-foreground",
-																		thread.unreadCount > 0 && "text-brand",
-																	)}
-																/>
-																<div className="min-w-0 flex-1">
-																	<div className="flex min-w-0 items-center gap-1">
-																		<span
-																			className={cn(
-																				"truncate",
-																				thread.unreadCount > 0 &&
-																					"font-semibold",
+														{overviewMailbox.recentThreads.map(
+															(thread: MailboxThreadEntity) => (
+																<Link
+																	key={`${overviewMailbox.id}:${thread.threadId}`}
+																	href={`${href}/threads/${thread.threadId}`}
+																	className="group flex min-w-0 gap-2 py-2 text-sm"
+																>
+																	<Mail
+																		className={cn(
+																			"mt-0.5 h-4 w-4 shrink-0 text-muted-foreground",
+																			thread.unreadCount > 0 && "text-brand",
+																		)}
+																	/>
+																	<div className="min-w-0 flex-1">
+																		<div className="flex min-w-0 items-center gap-1">
+																			<span
+																				className={cn(
+																					"truncate",
+																					thread.unreadCount > 0 &&
+																						"font-semibold",
+																				)}
+																			>
+																				{thread.subject || "(no subject)"}
+																			</span>
+																			{thread.hasAttachments ? (
+																				<Paperclip className="h-3 w-3 shrink-0 text-muted-foreground" />
+																			) : null}
+																		</div>
+																		<p className="truncate text-xs text-muted-foreground">
+																			{participantLabel(thread.participants)} ·{" "}
+																			{dayjs(thread.lastActivityAt).format(
+																				"DD.MM. HH:mm",
 																			)}
-																		>
-																			{thread.subject || "(no subject)"}
-																		</span>
-																		{thread.hasAttachments ? (
-																			<Paperclip className="h-3 w-3 shrink-0 text-muted-foreground" />
+																		</p>
+																		{thread.previewText ? (
+																			<p className="truncate text-xs text-muted-foreground/80">
+																				{thread.previewText}
+																			</p>
 																		) : null}
 																	</div>
-																	<p className="truncate text-xs text-muted-foreground">
-																		{participantLabel(thread.participants)} ·{" "}
-																		{dayjs(thread.lastActivityAt).format(
-																			"DD.MM. HH:mm",
-																		)}
-																	</p>
-																	{thread.previewText ? (
-																		<p className="truncate text-xs text-muted-foreground/80">
-																			{thread.previewText}
-																		</p>
-																	) : null}
-																</div>
-															</Link>
-														))}
+																</Link>
+															),
+														)}
 													</div>
 												) : (
 													<p className="text-sm text-muted-foreground">
