@@ -76,7 +76,7 @@ export function NavMain() {
 			items: [],
 		},
 		{
-			title: "AI / Ollama",
+			title: "AI Provider",
 			url: "/dashboard/platform/ai",
 			icon: Bot,
 			items: [],

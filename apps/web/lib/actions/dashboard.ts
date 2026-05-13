@@ -56,14 +56,64 @@ import { parseSecret } from "@/lib/utils";
 
 const DASHBOARD_PATH = "/dashboard/providers";
 const CURRENT_API_VERSION = 1;
+type AiProvider = "ollama" | "lmstudio";
+
+const DEFAULT_AI_PROVIDER: AiProvider = "ollama";
 const DEFAULT_OLLAMA_BASE_URL = "http://10.0.252.12:11434";
 const DEFAULT_OLLAMA_MODEL = "gemma3:12b";
+const DEFAULT_LMSTUDIO_BASE_URL = "http://localhost:1234/v1";
+const DEFAULT_LMSTUDIO_MODEL = "";
 
-const normalizeOllamaBaseUrl = (value: string) =>
-	(value || DEFAULT_OLLAMA_BASE_URL).trim().replace(/\/+$/, "");
+const isAiProvider = (value: string): value is AiProvider =>
+	value === "ollama" || value === "lmstudio";
 
-const fetchOllamaModels = async (baseUrl: string) => {
-	const response = await fetch(`${normalizeOllamaBaseUrl(baseUrl)}/api/tags`, {
+const getAiDefaults = (provider: AiProvider) =>
+	provider === "lmstudio"
+		? { baseUrl: DEFAULT_LMSTUDIO_BASE_URL, model: DEFAULT_LMSTUDIO_MODEL }
+		: { baseUrl: DEFAULT_OLLAMA_BASE_URL, model: DEFAULT_OLLAMA_MODEL };
+
+const normalizeAiBaseUrl = (provider: AiProvider, value: string) =>
+	(value || getAiDefaults(provider).baseUrl).trim().replace(/\/+$/, "");
+
+const getAuthHeaders = (apiKey?: string | null): Record<string, string> =>
+	apiKey?.trim() ? { Authorization: `Bearer ${apiKey.trim()}` } : {};
+
+const fetchAiModelsForProvider = async ({
+	provider,
+	baseUrl,
+	apiKey,
+}: {
+	provider: AiProvider;
+	baseUrl: string;
+	apiKey?: string | null;
+}) => {
+	const normalizedBaseUrl = normalizeAiBaseUrl(provider, baseUrl);
+	if (provider === "lmstudio") {
+		const response = await fetch(`${normalizedBaseUrl}/models`, {
+			method: "GET",
+			headers: getAuthHeaders(apiKey),
+			signal: AbortSignal.timeout(10_000),
+		});
+
+		if (!response.ok) {
+			throw new Error(`LM Studio returned HTTP ${response.status}`);
+		}
+
+		const data = (await response.json()) as {
+			data?: Array<{ id?: string; object?: string; owned_by?: string }>;
+		};
+
+		return (data.data || [])
+			.map((model) => ({
+				name: model.id || "",
+				size: 0,
+				parameterSize: "",
+				quantization: "",
+			}))
+			.filter((model) => model.name);
+	}
+
+	const response = await fetch(`${normalizedBaseUrl}/api/tags`, {
 		method: "GET",
 		signal: AbortSignal.timeout(10_000),
 	});
@@ -97,31 +147,57 @@ export const fetchAiSettings = async () => {
 		tx
 			.select()
 			.from(userAiSettings)
-			.where(eq(userAiSettings.provider, "ollama"))
+			.orderBy(desc(userAiSettings.updatedAt))
 			.limit(1),
 	);
 
-	return (
-		settings ?? {
-			id: "",
-			provider: "ollama",
-			baseUrl: DEFAULT_OLLAMA_BASE_URL,
-			model: DEFAULT_OLLAMA_MODEL,
-			systemPrompt: "",
-			temperature: "0.4",
-			maxTokens: 700,
-			enabled: true,
-		}
-	);
+	const provider = isAiProvider(settings?.provider || "")
+		? (settings.provider as AiProvider)
+		: DEFAULT_AI_PROVIDER;
+	const defaults = getAiDefaults(provider);
+
+	return {
+		id: settings?.id ?? "",
+		provider,
+		baseUrl: settings?.baseUrl ?? defaults.baseUrl,
+		model: settings?.model ?? defaults.model,
+		systemPrompt: settings?.systemPrompt ?? "",
+		temperature: settings?.temperature ?? "0.4",
+		maxTokens: settings?.maxTokens ?? 700,
+		enabled: settings?.enabled ?? true,
+		hasApiKey: Boolean(settings?.apiKey),
+	};
 };
 
-export const listOllamaModels = async (baseUrl: string): Promise<FormState> => {
+export const listAiModels = async (input: {
+	provider?: string;
+	baseUrl: string;
+	apiKey?: string;
+}): Promise<FormState> => {
 	return handleAction(async () => {
 		await isSignedIn();
-		const models = await fetchOllamaModels(baseUrl);
+		const provider = isAiProvider(input.provider || "")
+			? (input.provider as AiProvider)
+			: DEFAULT_AI_PROVIDER;
+		const rls = await rlsClient();
+		const [saved] = await rls((tx) =>
+			tx
+				.select()
+				.from(userAiSettings)
+				.where(eq(userAiSettings.provider, provider))
+				.limit(1),
+		);
+		const models = await fetchAiModelsForProvider({
+			provider,
+			baseUrl: input.baseUrl,
+			apiKey: input.apiKey || saved?.apiKey,
+		});
 		return { success: true, data: { models } };
 	});
 };
+
+export const listOllamaModels = async (baseUrl: string): Promise<FormState> =>
+	listAiModels({ provider: "ollama", baseUrl });
 
 export async function saveAiSettings(
 	_prev: FormState,
@@ -131,10 +207,17 @@ export async function saveAiSettings(
 		const user = await isSignedIn();
 		if (!user?.id) throw new Error("Please sign in first.");
 
-		const baseUrl = normalizeOllamaBaseUrl(
-			String(formData.get("baseUrl") ?? DEFAULT_OLLAMA_BASE_URL),
+		const provider = isAiProvider(String(formData.get("provider") ?? ""))
+			? (String(formData.get("provider")) as AiProvider)
+			: DEFAULT_AI_PROVIDER;
+		const defaults = getAiDefaults(provider);
+		const baseUrl = normalizeAiBaseUrl(
+			provider,
+			String(formData.get("baseUrl") ?? defaults.baseUrl),
 		);
-		const model = String(formData.get("model") ?? DEFAULT_OLLAMA_MODEL).trim();
+		const model = String(formData.get("model") ?? defaults.model).trim();
+		const submittedApiKey = String(formData.get("apiKey") ?? "").trim();
+		const clearApiKey = formData.get("clearApiKey") === "on";
 		const systemPrompt = String(formData.get("systemPrompt") ?? "")
 			.trim()
 			.slice(0, 4000);
@@ -142,7 +225,7 @@ export async function saveAiSettings(
 		const maxTokens = Number(formData.get("maxTokens") ?? 700);
 		const enabled = formData.get("enabled") === "on";
 
-		if (!model) throw new Error("Please select an Ollama model.");
+		if (!model) throw new Error("Please select a model.");
 		if (!Number.isFinite(temperature) || temperature < 0 || temperature > 2) {
 			throw new Error("Temperature must be between 0 and 2.");
 		}
@@ -151,14 +234,26 @@ export async function saveAiSettings(
 		}
 
 		const rls = await rlsClient();
+		const [existingSettings] = await rls((tx) =>
+			tx
+				.select()
+				.from(userAiSettings)
+				.where(eq(userAiSettings.provider, provider))
+				.limit(1),
+		);
+		const apiKey = clearApiKey
+			? null
+			: submittedApiKey || existingSettings?.apiKey || null;
+
 		await rls((tx) =>
 			tx
 				.insert(userAiSettings)
 				.values({
 					ownerId: user.id,
-					provider: "ollama",
+					provider,
 					baseUrl,
 					model,
+					apiKey,
 					systemPrompt: systemPrompt || null,
 					temperature: String(temperature),
 					maxTokens,
@@ -169,6 +264,7 @@ export async function saveAiSettings(
 					set: {
 						baseUrl,
 						model,
+						apiKey,
 						systemPrompt: systemPrompt || null,
 						temperature: String(temperature),
 						maxTokens,
@@ -184,31 +280,89 @@ export async function saveAiSettings(
 }
 
 export const testAiSettings = async (input: {
+	provider?: string;
 	baseUrl: string;
 	model: string;
+	apiKey?: string;
 	temperature?: number;
 	maxTokens?: number;
 }): Promise<FormState> => {
 	return handleAction(async () => {
 		await isSignedIn();
-		const response = await fetch(
-			`${normalizeOllamaBaseUrl(input.baseUrl)}/api/generate`,
-			{
+		const provider = isAiProvider(input.provider || "")
+			? (input.provider as AiProvider)
+			: DEFAULT_AI_PROVIDER;
+		const rls = await rlsClient();
+		const [saved] = await rls((tx) =>
+			tx
+				.select()
+				.from(userAiSettings)
+				.where(eq(userAiSettings.provider, provider))
+				.limit(1),
+		);
+		const apiKey = input.apiKey || saved?.apiKey || null;
+		const normalizedBaseUrl = normalizeAiBaseUrl(provider, input.baseUrl);
+
+		if (provider === "lmstudio") {
+			const response = await fetch(`${normalizedBaseUrl}/chat/completions`, {
 				method: "POST",
-				headers: { "Content-Type": "application/json" },
+				headers: {
+					"Content-Type": "application/json",
+					...getAuthHeaders(apiKey),
+				},
 				body: JSON.stringify({
 					model: input.model,
-					prompt:
-						"Reply with one short German sentence confirming that Kurrier AI is ready.",
+					messages: [
+						{
+							role: "user",
+							content:
+								"Reply with one short German sentence confirming that Kurrier AI is ready.",
+						},
+					],
+					temperature: input.temperature ?? 0.2,
+					max_tokens: input.maxTokens ?? 80,
 					stream: false,
-					options: {
-						temperature: input.temperature ?? 0.2,
-						num_predict: input.maxTokens ?? 80,
-					},
 				}),
 				signal: AbortSignal.timeout(60_000),
-			},
-		);
+			});
+
+			if (!response.ok)
+				throw new Error(`LM Studio returned HTTP ${response.status}`);
+
+			const data = (await response.json()) as {
+				choices?: Array<{ message?: { content?: string } }>;
+				error?: { message?: string } | string;
+			};
+			if (data.error) {
+				throw new Error(
+					typeof data.error === "string"
+						? data.error
+						: data.error.message || "LM Studio returned an error",
+				);
+			}
+
+			return {
+				success: true,
+				message: "LM Studio test successful",
+				data: { response: (data.choices?.[0]?.message?.content || "").trim() },
+			};
+		}
+
+		const response = await fetch(`${normalizedBaseUrl}/api/generate`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				model: input.model,
+				prompt:
+					"Reply with one short German sentence confirming that Kurrier AI is ready.",
+				stream: false,
+				options: {
+					temperature: input.temperature ?? 0.2,
+					num_predict: input.maxTokens ?? 80,
+				},
+			}),
+			signal: AbortSignal.timeout(60_000),
+		});
 
 		if (!response.ok)
 			throw new Error(`Ollama returned HTTP ${response.status}`);

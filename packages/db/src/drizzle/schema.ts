@@ -144,6 +144,7 @@ export const userAiSettings = pgTable(
 		provider: text("provider").notNull().default("ollama"),
 		baseUrl: text("base_url").notNull().default("http://10.0.252.12:11434"),
 		model: text("model").notNull().default("gemma3:12b"),
+		apiKey: text("api_key"),
 		systemPrompt: text("system_prompt"),
 		temperature: numeric("temperature", { precision: 4, scale: 2 })
 			.notNull()

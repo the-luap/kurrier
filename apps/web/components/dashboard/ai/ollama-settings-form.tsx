@@ -3,7 +3,9 @@
 import {
 	Button,
 	Card,
+	Checkbox,
 	NumberInput,
+	PasswordInput,
 	Select,
 	Switch,
 	Textarea,
@@ -13,12 +15,12 @@ import type { FormState } from "@schema";
 import { useActionState, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import {
-	listOllamaModels,
+	listAiModels,
 	saveAiSettings,
 	testAiSettings,
 } from "@/lib/actions/dashboard";
 
-type OllamaModel = {
+type AiModel = {
 	name: string;
 	size?: number;
 	parameterSize?: string;
@@ -27,14 +29,16 @@ type OllamaModel = {
 
 type Props = {
 	settings: {
+		provider?: string;
 		baseUrl: string;
 		model: string;
 		systemPrompt?: string | null;
 		temperature: string | number;
 		maxTokens: number;
 		enabled: boolean;
+		hasApiKey?: boolean;
 	};
-	initialModels: OllamaModel[];
+	initialModels: AiModel[];
 };
 
 const formatSize = (bytes?: number) => {
@@ -43,15 +47,18 @@ const formatSize = (bytes?: number) => {
 };
 
 export default function OllamaSettingsForm({ settings, initialModels }: Props) {
+	const [provider, setProvider] = useState(settings.provider || "ollama");
 	const [baseUrl, setBaseUrl] = useState(settings.baseUrl);
 	const [model, setModel] = useState(settings.model);
+	const [apiKey, setApiKey] = useState("");
+	const [clearApiKey, setClearApiKey] = useState(false);
 	const [systemPrompt, setSystemPrompt] = useState(settings.systemPrompt ?? "");
 	const [temperature, setTemperature] = useState(
 		Number(settings.temperature ?? 0.4),
 	);
 	const [maxTokens, setMaxTokens] = useState(settings.maxTokens ?? 700);
 	const [enabled, setEnabled] = useState(settings.enabled);
-	const [models, setModels] = useState<OllamaModel[]>(initialModels);
+	const [models, setModels] = useState<AiModel[]>(initialModels);
 	const [isLoadingModels, setIsLoadingModels] = useState(false);
 	const [isTesting, setIsTesting] = useState(false);
 	const [testResponse, setTestResponse] = useState("");
@@ -88,19 +95,19 @@ export default function OllamaSettingsForm({ settings, initialModels }: Props) {
 	const handleLoadModels = async () => {
 		setIsLoadingModels(true);
 		try {
-			const result = await listOllamaModels(baseUrl);
+			const result = await listAiModels({ provider, baseUrl, apiKey });
 			if (!result.success) {
 				toast.error("Could not load models", { description: result.error });
 				return;
 			}
-			const loaded = ((result.data as { models?: OllamaModel[] })?.models ||
-				[]) as OllamaModel[];
+			const loaded = ((result.data as { models?: AiModel[] })?.models ||
+				[]) as AiModel[];
 			setModels(loaded);
 			if (loaded.length > 0 && !loaded.some((m) => m.name === model)) {
 				setModel(loaded[0].name);
 			}
 			toast.success(
-				`Loaded ${loaded.length} Ollama model${loaded.length === 1 ? "" : "s"}`,
+				`${provider === "lmstudio" ? "LM Studio" : "Ollama"}: loaded ${loaded.length} model${loaded.length === 1 ? "" : "s"}`,
 			);
 		} finally {
 			setIsLoadingModels(false);
@@ -112,20 +119,22 @@ export default function OllamaSettingsForm({ settings, initialModels }: Props) {
 		setTestResponse("");
 		try {
 			const result = await testAiSettings({
+				provider,
 				baseUrl,
 				model,
+				apiKey,
 				temperature,
 				maxTokens: Math.min(maxTokens, 160),
 			});
 			if (!result.success) {
-				toast.error("Ollama test failed", { description: result.error });
+				toast.error("AI test failed", { description: result.error });
 				return;
 			}
 			const response = String(
 				(result.data as { response?: string })?.response || "",
 			);
 			setTestResponse(response);
-			toast.success(result.message || "Ollama test successful");
+			toast.success(result.message || "AI test successful");
 		} finally {
 			setIsTesting(false);
 		}
@@ -136,15 +145,17 @@ export default function OllamaSettingsForm({ settings, initialModels }: Props) {
 			<form action={formAction} className="flex flex-col gap-5 p-4">
 				<div className="flex flex-col gap-1">
 					<h2 className="text-sm font-semibold text-foreground">
-						Ollama reply assistant
+						AI reply assistant
 					</h2>
 					<p className="text-xs text-muted-foreground max-w-prose">
-						Kurrier uses this local Ollama endpoint for reply drafts. The draft
-						is inserted into the editor only; it is never sent automatically.
+						Kurrier can use either Ollama or LM Studio for reply drafts. The
+						draft is inserted into the editor only; it is never sent
+						automatically.
 					</p>
 				</div>
 
 				<input type="hidden" name="enabled" value={enabled ? "on" : ""} />
+				<input type="hidden" name="provider" value={provider} />
 
 				<Switch
 					checked={enabled}
@@ -152,13 +163,36 @@ export default function OllamaSettingsForm({ settings, initialModels }: Props) {
 					label="Enable AI draft button"
 				/>
 
-				<div className="grid gap-4 md:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]">
+				<div className="grid gap-4 md:grid-cols-[minmax(0,0.7fr)_minmax(0,1.2fr)_minmax(0,1fr)]">
+					<Select
+						label="Provider"
+						data={[
+							{ value: "ollama", label: "Ollama" },
+							{ value: "lmstudio", label: "LM Studio" },
+						]}
+						value={provider}
+						onChange={(value) => {
+							const nextProvider = value || "ollama";
+							setProvider(nextProvider);
+							setBaseUrl(
+								nextProvider === "lmstudio"
+									? "http://localhost:1234/v1"
+									: "http://10.0.252.12:11434",
+							);
+							setModel(nextProvider === "lmstudio" ? "" : "gemma3:12b");
+							setModels([]);
+						}}
+					/>
 					<TextInput
 						name="baseUrl"
-						label="Ollama base URL"
+						label="Base URL"
 						value={baseUrl}
 						onChange={(event) => setBaseUrl(event.currentTarget.value)}
-						placeholder="http://10.0.252.12:11434"
+						placeholder={
+							provider === "lmstudio"
+								? "http://10.0.252.x:1234/v1"
+								: "http://10.0.252.12:11434"
+						}
 						required
 					/>
 					<div className="flex items-end gap-2">
@@ -182,6 +216,35 @@ export default function OllamaSettingsForm({ settings, initialModels }: Props) {
 						</Button>
 					</div>
 				</div>
+
+				{provider === "lmstudio" ? (
+					<div className="flex flex-col gap-2">
+						<PasswordInput
+							name="apiKey"
+							label="LM Studio API token (optional)"
+							description={
+								settings.hasApiKey
+									? "A token is already saved. Leave empty to keep it, or enter a new token."
+									: "Leave empty when LM Studio authentication is disabled."
+							}
+							value={apiKey}
+							onChange={(event) => setApiKey(event.currentTarget.value)}
+							placeholder={
+								settings.hasApiKey ? "Saved token present" : "lm-studio-token"
+							}
+						/>
+						{settings.hasApiKey ? (
+							<Checkbox
+								name="clearApiKey"
+								checked={clearApiKey}
+								onChange={(event) =>
+									setClearApiKey(event.currentTarget.checked)
+								}
+								label="Remove saved token and use LM Studio without auth"
+							/>
+						) : null}
+					</div>
+				) : null}
 
 				<div className="grid gap-4 md:grid-cols-2">
 					<NumberInput

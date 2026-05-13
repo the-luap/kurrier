@@ -303,6 +303,14 @@ const stripHtmlForPrompt = (value?: string | null) =>
 		.trim()
 		.slice(0, 6000);
 
+type AiProvider = "ollama" | "lmstudio";
+
+const isAiProvider = (value: string): value is AiProvider =>
+	value === "ollama" || value === "lmstudio";
+
+const getAiAuthHeaders = (apiKey?: string | null): Record<string, string> =>
+	apiKey?.trim() ? { Authorization: `Bearer ${apiKey.trim()}` } : {};
+
 export async function generateAiReplySuggestion(
 	input: AiReplySuggestionInput,
 ): Promise<FormState> {
@@ -314,7 +322,7 @@ export async function generateAiReplySuggestion(
 		tx
 			.select()
 			.from(userAiSettings)
-			.where(eq(userAiSettings.provider, "ollama"))
+			.orderBy(desc(userAiSettings.updatedAt))
 			.limit(1),
 	);
 
@@ -326,13 +334,19 @@ export async function generateAiReplySuggestion(
 	}
 
 	const serverConfig = getServerEnv();
-	const ollamaBaseUrl = (
+	const provider: AiProvider = isAiProvider(settings?.provider || "")
+		? (settings.provider as AiProvider)
+		: "ollama";
+	const baseUrl = (
 		settings?.baseUrl ||
-		serverConfig.OLLAMA_BASE_URL ||
-		"http://10.0.252.12:11434"
+		(provider === "lmstudio"
+			? "http://localhost:1234/v1"
+			: serverConfig.OLLAMA_BASE_URL || "http://10.0.252.12:11434")
 	).replace(/\/+$/, "");
-	const ollamaModel =
-		settings?.model || serverConfig.OLLAMA_MODEL || "gemma3:12b";
+	const model =
+		settings?.model ||
+		(provider === "lmstudio" ? "" : serverConfig.OLLAMA_MODEL || "gemma3:12b");
+	if (!model) return { success: false, error: "No AI model is configured." };
 	const systemPrompt = (settings?.systemPrompt || "").trim();
 	const temperature = Number(settings?.temperature ?? 0.4);
 	const maxTokens = Number(settings?.maxTokens ?? 700);
@@ -368,11 +382,60 @@ Rules:
 - Output plain text paragraphs only.`;
 
 	try {
-		const response = await fetch(`${ollamaBaseUrl}/api/generate`, {
+		if (provider === "lmstudio") {
+			const response = await fetch(`${baseUrl}/chat/completions`, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					...getAiAuthHeaders(settings?.apiKey),
+				},
+				body: JSON.stringify({
+					model,
+					messages: [{ role: "user", content: prompt }],
+					stream: false,
+					temperature,
+					max_tokens: maxTokens,
+				}),
+				signal: AbortSignal.timeout(60_000),
+			});
+
+			if (!response.ok) {
+				return {
+					success: false,
+					error: `LM Studio request failed with HTTP ${response.status}.`,
+				};
+			}
+
+			const data = (await response.json()) as {
+				choices?: Array<{ message?: { content?: string } }>;
+				error?: { message?: string } | string;
+			};
+			if (data.error) {
+				return {
+					success: false,
+					error:
+						typeof data.error === "string"
+							? data.error
+							: data.error.message || "LM Studio returned an error.",
+				};
+			}
+
+			const suggestion = (data.choices?.[0]?.message?.content || "").trim();
+			if (!suggestion) {
+				return {
+					success: false,
+					error: "LM Studio returned an empty suggestion.",
+				};
+			}
+
+			return { success: true, data: { suggestion } };
+		}
+
+		const response = await fetch(`${baseUrl}/api/generate`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({
-				model: ollamaModel,
+				model,
 				prompt,
 				stream: false,
 				options: {
@@ -405,7 +468,7 @@ Rules:
 	} catch (error) {
 		return {
 			success: false,
-			error: `Ollama is not reachable: ${String(error)}`,
+			error: `${provider === "lmstudio" ? "LM Studio" : "Ollama"} is not reachable: ${String(error)}`,
 		};
 	}
 }

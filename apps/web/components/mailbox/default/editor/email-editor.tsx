@@ -143,7 +143,8 @@ const EmailEditor = forwardRef<EmailEditorHandle, Props>(
 
 				if (!result.success) {
 					toast.error("AI suggestion failed", {
-						description: result.error || "Ollama did not return a suggestion.",
+						description:
+							result.error || "The AI provider did not return a suggestion.",
 					});
 					return;
 				}
@@ -151,7 +152,7 @@ const EmailEditor = forwardRef<EmailEditorHandle, Props>(
 				const suggestion = getSuggestionText(result.data);
 				if (!suggestion) {
 					toast.error("AI suggestion failed", {
-						description: "Ollama returned an empty suggestion.",
+						description: "The AI provider returned an empty suggestion.",
 					});
 					return;
 				}
@@ -244,8 +245,8 @@ const EmailEditor = forwardRef<EmailEditorHandle, Props>(
 								</Button>
 							</div>
 							<p className="text-xs text-muted-foreground">
-								Uses Ollama to draft text into the editor. Nothing is sent until
-								you review and press Send.
+								Uses the configured AI provider to draft text into the editor.
+								Nothing is sent until you review and press Send.
 							</p>
 						</div>
 						<TextEditor
