@@ -1,35 +1,35 @@
 "use client";
 
-import Link from "next/link";
-import { useParams, usePathname } from "next/navigation";
-import { cn } from "@/lib/utils";
-import {
-	Inbox,
-	Send,
-	FileText,
-	Archive,
-	Ban,
-	Trash2,
-	Folder,
-	ChevronRight,
-	ChevronDown,
-	MoreVertical,
-	Clock4,
-	LayoutDashboard,
-} from "lucide-react";
-import * as React from "react";
-import type { FetchIdentityMailboxListResult } from "@/lib/actions/mailbox";
-import type { MailboxKind } from "@schema";
 import type {
 	DraftMessageEntity,
 	IdentityEntity,
 	MailboxEntity,
 	MailboxThreadEntity,
 } from "@db";
-import AddNewFolder from "@/components/mailbox/default/add-new-folder";
 import { Menu } from "@mantine/core";
-import DeleteMailboxFolder from "@/components/mailbox/default/delete-folder";
+import type { MailboxKind } from "@schema";
 import { IconMailFast } from "@tabler/icons-react";
+import {
+	Archive,
+	Ban,
+	ChevronDown,
+	ChevronRight,
+	Clock4,
+	FileText,
+	Folder,
+	Inbox,
+	LayoutDashboard,
+	MoreVertical,
+	Send,
+	Trash2,
+} from "lucide-react";
+import Link from "next/link";
+import { useParams, usePathname } from "next/navigation";
+import * as React from "react";
+import AddNewFolder from "@/components/mailbox/default/add-new-folder";
+import DeleteMailboxFolder from "@/components/mailbox/default/delete-folder";
+import type { FetchIdentityMailboxListResult } from "@/lib/actions/mailbox";
+import { cn } from "@/lib/utils";
 
 const ORDER: MailboxKind[] = [
 	"inbox",
@@ -62,6 +62,17 @@ const TITLE: Record<MailboxKind, string> = {
 	trash: "Trash",
 	outbox: "Outbox",
 	custom: "Mailbox",
+};
+
+const ACCENT: Record<MailboxKind, string> = {
+	inbox: "text-blue-600 dark:text-blue-300",
+	sent: "text-emerald-600 dark:text-emerald-300",
+	drafts: "text-amber-600 dark:text-amber-300",
+	archive: "text-violet-600 dark:text-violet-300",
+	spam: "text-rose-600 dark:text-rose-300",
+	trash: "text-red-600 dark:text-red-300",
+	outbox: "text-cyan-600 dark:text-cyan-300",
+	custom: "text-slate-500 dark:text-slate-400",
 };
 
 type TreeMailbox = {
@@ -164,7 +175,7 @@ export default function IdentityMailboxesList({
 
 		return (
 			<div className="min-w-0">
-				<div className="flex min-w-0 items-center">
+				<div className="group/folder flex min-w-0 items-center">
 					{hasChildren ? (
 						<button
 							type="button"
@@ -190,17 +201,18 @@ export default function IdentityMailboxesList({
 							aria-disabled={!m.selectable}
 							style={{ paddingLeft: `${Math.min(depth, 4) * 0.625 + 0.5}rem` }}
 							className={cn(
-								"flex min-w-0 flex-1 items-center gap-2 rounded-md py-1.5 pr-2 text-sm",
-								"hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
-								isActive && "bg-sidebar-accent text-sidebar-accent-foreground",
-								isActive
-									? "text-brand dark:text-white bg-brand-100 dark:bg-neutral-800 hover:text-brand hover:bg-brand-100"
-									: "",
+								"relative flex min-w-0 flex-1 items-center gap-2 rounded-md border border-transparent py-1.5 pr-2 text-sm transition-colors",
+								"hover:border-sidebar-border hover:bg-sidebar-accent/80 hover:text-sidebar-accent-foreground",
+								isActive &&
+									"border-primary/20 bg-primary/10 text-sidebar-accent-foreground shadow-sm dark:border-primary/30 dark:bg-primary/20",
 								!m.selectable &&
 									"opacity-60 pointer-events-none cursor-default",
 							)}
 						>
-							<Icon className="h-4 w-4 shrink-0" />
+							{isActive ? (
+								<span className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-primary" />
+							) : null}
+							<Icon className={cn("h-4 w-4 shrink-0", ACCENT[m.kind])} />
 							<span
 								className="min-w-0 flex-1 truncate"
 								title={
@@ -210,7 +222,7 @@ export default function IdentityMailboxesList({
 								{m.kind === "custom" ? (m.name ?? "Mailbox") : TITLE[m.kind]}
 							</span>
 							{m.unread > 0 && (
-								<span className="ml-auto shrink-0 rounded-full border px-1.5 text-[10px] leading-5 text-sidebar-foreground/80">
+								<span className="ml-auto shrink-0 rounded-full border border-primary/20 bg-primary/10 px-1.5 text-[10px] leading-5 text-sidebar-foreground dark:border-primary/30 dark:bg-primary/20">
 									{m.unread > 99 ? "99+" : m.unread}
 								</span>
 							)}
@@ -269,13 +281,13 @@ export default function IdentityMailboxesList({
 				prefetch={false}
 				onClick={onComplete ? () => onComplete() : undefined}
 				className={cn(
-					"mb-3 flex min-w-0 items-center gap-2 rounded-md px-2 py-2 text-sm font-medium",
-					"hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+					"mb-3 flex min-w-0 items-center gap-2 rounded-md border border-transparent px-2 py-2 text-sm font-medium transition-colors",
+					"hover:border-sidebar-border hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
 					pathname === "/dashboard/mail" &&
-						"bg-sidebar-accent text-sidebar-accent-foreground",
+						"border-primary/20 bg-primary/10 text-sidebar-accent-foreground dark:border-primary/30 dark:bg-primary/20",
 				)}
 			>
-				<LayoutDashboard className="h-4 w-4 shrink-0" />
+				<LayoutDashboard className="h-4 w-4 shrink-0 text-primary" />
 				<span className="min-w-0 truncate">Mailbox Overview</span>
 			</Link>
 			{identityMailboxes.map(({ identity, mailboxes }) => {
@@ -289,7 +301,7 @@ export default function IdentityMailboxesList({
 				).length;
 				return (
 					<div key={identity.id} className="min-w-0">
-						<div className="mb-1 mt-2 flex min-w-0 items-center gap-1 px-1 text-xs font-semibold text-sidebar-foreground/60">
+						<div className="mb-1 mt-3 flex min-w-0 items-center gap-1 border-l-2 border-l-primary/30 px-2 text-xs font-semibold text-sidebar-foreground/60 dark:border-l-primary/50">
 							<span className="min-w-0 flex-1 truncate" title={identity.value}>
 								{identity.value}
 							</span>
@@ -309,9 +321,16 @@ export default function IdentityMailboxesList({
 							<Link
 								href={`/dashboard/mail/${params.identityPublicId}/scheduled`}
 								prefetch={false}
-								className={`my-2 rounded hover:dark:bg-neutral-800 ${currentSlug === "scheduled" ? "dark:bg-neutral-800 dark:text-brand-foreground bg-brand-200 text-brand" : ""} flex justify-start gap-1 w-full p-1.5`}
+								className={cn(
+									"my-2 flex w-full justify-start gap-1 rounded border border-transparent p-1.5 text-sm transition-colors hover:bg-sidebar-accent/80",
+									currentSlug === "scheduled" &&
+										"border-primary/20 bg-primary/10 text-sidebar-accent-foreground dark:border-primary/30 dark:bg-primary/20",
+								)}
 							>
-								<IconMailFast size={22} />
+								<IconMailFast
+									size={22}
+									className="text-cyan-600 dark:text-cyan-300"
+								/>
 								<span className={"font-normal text-sm"}>
 									Scheduled ({scheduledCounts})
 								</span>
@@ -322,9 +341,16 @@ export default function IdentityMailboxesList({
 							<Link
 								href={`/dashboard/mail/${params.identityPublicId}/snoozed`}
 								prefetch={false}
-								className={`my-2 rounded hover:dark:bg-neutral-800 ${currentSlug === "snoozed" ? "dark:bg-neutral-800 dark:text-brand-foreground bg-brand-200 text-brand" : ""} flex justify-start gap-1 w-full p-1.5 items-center`}
+								className={cn(
+									"my-2 flex w-full items-center justify-start gap-1 rounded border border-transparent p-1.5 text-sm transition-colors hover:bg-sidebar-accent/80",
+									currentSlug === "snoozed" &&
+										"border-primary/20 bg-primary/10 text-sidebar-accent-foreground dark:border-primary/30 dark:bg-primary/20",
+								)}
 							>
-								<Clock4 size={16} />
+								<Clock4
+									size={16}
+									className="text-violet-600 dark:text-violet-300"
+								/>
 								<span className={"font-normal text-sm"}>
 									Snoozed ({snoozedThreads.length})
 								</span>

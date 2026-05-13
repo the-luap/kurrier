@@ -1,8 +1,17 @@
 "use client";
 
-import * as React from "react";
+import { Divider } from "@mantine/core";
+import { useMediaQuery } from "@mantine/hooks";
+import type { PublicConfig } from "@schema";
+import type { UserResponse } from "@supabase/supabase-js";
+import { IconFrame } from "@tabler/icons-react";
 import { Calendar, Contact, HardDrive, Inbox, MailOpen } from "lucide-react";
-
+import Link from "next/link";
+import { usePathname, useRouter } from "next/navigation";
+import * as React from "react";
+import KurrierLogo from "@/components/common/kurrier-logo";
+import ThemeColorPicker from "@/components/common/theme-color-picker";
+import ThemeSwitch from "@/components/common/theme-switch";
 import { NavUser } from "@/components/ui/dashboards/workspace/nav-user";
 import {
 	Sidebar,
@@ -16,17 +25,8 @@ import {
 	SidebarMenuItem,
 	useSidebar,
 } from "@/components/ui/sidebar";
-import { usePathname, useRouter } from "next/navigation";
-import KurrierLogo from "@/components/common/kurrier-logo";
-import type { PublicConfig } from "@schema";
-import type { UserResponse } from "@supabase/supabase-js";
-import ThemeColorPicker from "@/components/common/theme-color-picker";
 import type { FetchIdentityMailboxListResult } from "@/lib/actions/mailbox";
-import ThemeSwitch from "@/components/common/theme-switch";
-import Link from "next/link";
-import { useMediaQuery } from "@mantine/hooks";
-import { Divider } from "@mantine/core";
-import { IconFrame } from "@tabler/icons-react";
+import { cn } from "@/lib/utils";
 
 type UnifiedSidebarProps = React.ComponentProps<typeof Sidebar> & {
 	publicConfig: PublicConfig;
@@ -184,7 +184,7 @@ export function AppSidebar({ ...props }: UnifiedSidebarProps) {
 				data.navMain.find((i) => i.url.includes("/mail")) ?? data.navMain[0],
 			);
 		}
-	}, [section, pathName, data.navMain]);
+	}, [section, data.navMain]);
 
 	const { setOpen, toggleSidebar } = useSidebar();
 	const router = useRouter();
@@ -200,14 +200,14 @@ export function AppSidebar({ ...props }: UnifiedSidebarProps) {
 			{/* This will make the sidebar appear as icons. */}
 			<Sidebar
 				collapsible="none"
-				className="w-[calc(var(--sidebar-width-icon)+1px)]! border-r"
+				className="w-[calc(var(--sidebar-width-icon)+1px)]! border-r bg-sidebar"
 			>
 				<SidebarHeader>
 					<SidebarMenu>
 						<SidebarMenuItem>
 							<SidebarMenuButton size="lg" asChild className="md:h-8 md:p-0">
 								<Link href={"/dashboard/platform/overview"}>
-									<div className="bg-sidebar-primary text-sidebar-primary-foreground flex aspect-square size-8 items-center justify-center rounded-lg">
+									<div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-sm dark:bg-primary dark:text-primary-foreground">
 										<MailOpen className="size-4" />
 									</div>
 									<div className="grid flex-1 text-left text-sm leading-tight">
@@ -242,12 +242,19 @@ export function AppSidebar({ ...props }: UnifiedSidebarProps) {
 												router.push(item.url);
 											}}
 											isActive={activeItem?.title === item.title}
-											className={"px-2.5 md:px-2"}
+											className={cn(
+												"relative px-2.5 transition-colors md:px-2",
+												activeItem?.title === item.title &&
+													"bg-primary/10 text-sidebar-accent-foreground dark:bg-primary/20",
+											)}
 										>
+											{item.title === activeItem?.title ? (
+												<span className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-primary" />
+											) : null}
 											<item.icon
 												className={
 													item.title === activeItem?.title
-														? "text-brand dark:text-white"
+														? "text-primary dark:text-primary"
 														: ""
 												}
 											/>
