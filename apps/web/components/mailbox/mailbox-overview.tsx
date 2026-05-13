@@ -39,6 +39,16 @@ export default function MailboxOverview({ overview }: MailboxOverviewProps) {
 		entry,
 		inbox: findInbox(entry),
 	}));
+	const sortedAccounts = [...accounts].sort((a, b) => {
+		const aUnread = Number(a.inbox?.unreadCount ?? 0);
+		const bUnread = Number(b.inbox?.unreadCount ?? 0);
+
+		if (aUnread > 0 && bUnread === 0) return -1;
+		if (aUnread === 0 && bUnread > 0) return 1;
+		if (aUnread !== bUnread) return bUnread - aUnread;
+
+		return a.entry.identity.value.localeCompare(b.entry.identity.value);
+	});
 	const inboxUnread = accounts.reduce(
 		(sum, { inbox }) => sum + Number(inbox?.unreadCount ?? 0),
 		0,
@@ -93,7 +103,7 @@ export default function MailboxOverview({ overview }: MailboxOverviewProps) {
 				</Card>
 			) : (
 				<div className="grid gap-3 xl:grid-cols-2 2xl:grid-cols-3">
-					{accounts.map(({ entry, inbox }) => {
+					{sortedAccounts.map(({ entry, inbox }) => {
 						const unread = Number(inbox?.unreadCount ?? 0);
 						const href = `/dashboard/mail/${entry.identity.publicId}/inbox`;
 						const recentThreads = (inbox?.recentThreads ?? []).slice(0, 3);
