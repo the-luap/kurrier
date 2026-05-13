@@ -27,7 +27,9 @@ import EditorAttachmentItem from "@/components/mailbox/default/editor/editor-att
 import type { EmailEditorHandle } from "@/components/mailbox/default/editor/email-editor";
 import MailUnsubscriber from "@/components/mailbox/default/mail-unsubscriber";
 import {
+	type FetchIdentityMailboxListResult,
 	type FetchThreadMailSubsResult,
+	fetchIdentityMailboxList,
 	fetchMailbox,
 	markAsRead,
 	markAsUnread,
@@ -179,12 +181,38 @@ function EmailRenderer({
 	);
 	const [signatureHtml, setSignatureHtml] = useState<string>("");
 	const params = useParams();
+	const findSentMailbox = (entry: FetchIdentityMailboxListResult[number]) => {
+		return (
+			entry.mailboxes.find((mailbox) => mailbox.kind === "sent") ??
+			entry.mailboxes.find((mailbox) => mailbox.slug === "sent") ??
+			entry.mailboxes.find((mailbox) => mailbox.slug === "gesendet") ??
+			entry.mailboxes.find((mailbox) =>
+				mailbox.name?.toLowerCase().includes("sent"),
+			) ??
+			entry.mailboxes.find((mailbox) =>
+				mailbox.name?.toLowerCase().includes("gesendet"),
+			)
+		);
+	};
+
 	const fetchSentMailbox = async () => {
 		if (sentMailboxId) return sentMailboxId;
-		const { activeMailbox, identity } = await fetchMailbox(
-			String(params.identityPublicId),
-			"sent",
+
+		const identityPublicId = String(params.identityPublicId);
+		const entries = await fetchIdentityMailboxList();
+		const activeEntry = entries.find(
+			(entry) => entry.identity.publicId === identityPublicId,
 		);
+		const sentMailbox = activeEntry ? findSentMailbox(activeEntry) : null;
+
+		if (sentMailbox) {
+			const id = String(sentMailbox.id);
+			setSentMailboxId(id);
+			setSignatureHtml(activeEntry?.identity.signatureHtml ?? "");
+			return id;
+		}
+
+		const { activeMailbox, identity } = await fetchMailbox(identityPublicId, "sent");
 		setSignatureHtml(identity.signatureHtml ?? "");
 		const id = activeMailbox?.id ? String(activeMailbox.id) : undefined;
 		setSentMailboxId(id);
@@ -193,14 +221,25 @@ function EmailRenderer({
 
 	const openEditor = async (mode: "reply" | "forward") => {
 		setShowEditorMode(mode);
-		const mailboxId = await fetchSentMailbox();
-		if (!mailboxId) {
-			toast.error("Sender mailbox is not ready yet", {
-				description: "Kurrier could not resolve the Sent mailbox for this identity.",
+		try {
+			const mailboxId = await fetchSentMailbox();
+			if (!mailboxId) {
+				toast.error("Sender mailbox is not ready yet", {
+					description:
+						"Kurrier could not resolve the Sent mailbox for this identity.",
+				});
+				return;
+			}
+			setShowEditor(true);
+		} catch (error) {
+			console.error("Failed to resolve sender mailbox", error);
+			toast.error("Could not open reply editor", {
+				description:
+					error instanceof Error
+						? error.message
+						: "Kurrier could not resolve the sender mailbox.",
 			});
-			return;
 		}
-		setShowEditor(true);
 	};
 
 	useEffect(() => {
