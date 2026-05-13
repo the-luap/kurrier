@@ -1,17 +1,8 @@
-import React from "react";
+import MailboxOverview from "@/components/mailbox/mailbox-overview";
+import { fetchMailboxOverview } from "@/lib/actions/mailbox";
 
-function Page() {
-	return (
-		<>
-			<div
-				className={
-					"flex flex-1 flex-col items-center justify-center p-4 text-center"
-				}
-			>
-				Select a mailbox to view the emails.
-			</div>
-		</>
-	);
+export default async function Page() {
+	const overview = await fetchMailboxOverview();
+
+	return <MailboxOverview overview={overview} />;
 }
-
-export default Page;

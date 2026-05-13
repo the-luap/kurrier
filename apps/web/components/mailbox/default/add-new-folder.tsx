@@ -1,11 +1,10 @@
 import { useDisclosure } from "@mantine/hooks";
 import { Modal, ActionIcon } from "@mantine/core";
 import { Plus } from "lucide-react";
-import * as React from "react";
 import { ReusableForm } from "@/components/common/reusable-form";
 import {
 	addNewMailboxFolder,
-	FetchIdentityMailboxListResult,
+	type FetchIdentityMailboxListResult,
 } from "@/lib/actions/mailbox";
 import { useMailboxOptions } from "@/hooks/use-mailbox-options";
 
@@ -65,8 +64,13 @@ export default function AddNewFolder({
 				/>
 			</Modal>
 
-			<ActionIcon size={10} onClick={open}>
-				<Plus />
+			<ActionIcon
+				size="sm"
+				variant="subtle"
+				className="shrink-0"
+				onClick={open}
+			>
+				<Plus className="h-3.5 w-3.5" />
 			</ActionIcon>
 		</>
 	);

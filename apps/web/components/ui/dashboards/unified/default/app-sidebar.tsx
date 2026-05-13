@@ -18,10 +18,10 @@ import {
 } from "@/components/ui/sidebar";
 import { usePathname, useRouter } from "next/navigation";
 import KurrierLogo from "@/components/common/kurrier-logo";
-import { PublicConfig } from "@schema";
-import { UserResponse } from "@supabase/supabase-js";
+import type { PublicConfig } from "@schema";
+import type { UserResponse } from "@supabase/supabase-js";
 import ThemeColorPicker from "@/components/common/theme-color-picker";
-import { FetchIdentityMailboxListResult } from "@/lib/actions/mailbox";
+import type { FetchIdentityMailboxListResult } from "@/lib/actions/mailbox";
 import ThemeSwitch from "@/components/common/theme-switch";
 import Link from "next/link";
 import { useMediaQuery } from "@mantine/hooks";
@@ -38,9 +38,9 @@ type UnifiedSidebarProps = React.ComponentProps<typeof Sidebar> & {
 
 export function AppSidebar({ ...props }: UnifiedSidebarProps) {
 	const {
-		publicConfig,
+		publicConfig: _publicConfig,
 		user,
-		identityMailboxes,
+		identityMailboxes: _identityMailboxes,
 		sidebarSectionContent,
 		sidebarTopContent,
 		...restProps
@@ -48,10 +48,7 @@ export function AppSidebar({ ...props }: UnifiedSidebarProps) {
 
 	const isMobile = useMediaQuery("(max-width: 768px)");
 
-	const allMailUrl =
-		identityMailboxes.length > 0
-			? `/dashboard/mail/${identityMailboxes[0].identity.publicId}/inbox`
-			: `/dashboard/mail`;
+	const allMailUrl = "/dashboard/mail";
 
 	const data = {
 		navMain: [
@@ -121,7 +118,6 @@ export function AppSidebar({ ...props }: UnifiedSidebarProps) {
 	};
 
 	const pathName = usePathname();
-	const isOnMail = pathName?.includes("/mail");
 	const isOnPlatform = pathName?.includes("/platform");
 	const isOnContacts = pathName?.includes("/contacts");
 	const isOnCalendar = pathName?.includes("/calendar");

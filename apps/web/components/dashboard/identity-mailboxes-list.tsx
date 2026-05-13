@@ -15,11 +15,12 @@ import {
 	ChevronDown,
 	MoreVertical,
 	Clock4,
+	LayoutDashboard,
 } from "lucide-react";
 import * as React from "react";
-import { FetchIdentityMailboxListResult } from "@/lib/actions/mailbox";
-import { MailboxKind } from "@schema";
-import {
+import type { FetchIdentityMailboxListResult } from "@/lib/actions/mailbox";
+import type { MailboxKind } from "@schema";
+import type {
 	DraftMessageEntity,
 	IdentityEntity,
 	MailboxEntity,
@@ -74,26 +75,33 @@ type TreeMailbox = {
 	children: TreeMailbox[];
 };
 
+type MailboxWithNavMeta = MailboxEntity & {
+	parentId?: string | null;
+	unreadCount?: number | null;
+	metaData?: { imap?: { selectable?: boolean } } | null;
+};
+
 function buildTree(rows: MailboxEntity[]): TreeMailbox[] {
 	const byId = new Map<string, TreeMailbox>();
 	const roots: TreeMailbox[] = [];
 
 	for (const r of rows) {
+		const row = r as MailboxWithNavMeta;
 		byId.set(r.id, {
 			id: r.id,
 			name: r.name ?? null,
 			kind: r.kind as MailboxKind,
 			slug: r.slug ?? null,
-			parentId: (r as any).parentId ?? null,
-			selectable: (r.metaData as any)?.imap?.selectable !== false,
-			unread: Number((r as any).unreadCount ?? 0),
+			parentId: row.parentId ?? null,
+			selectable: row.metaData?.imap?.selectable !== false,
+			unread: Number(row.unreadCount ?? 0),
 			children: [],
 		});
 	}
 
 	for (const node of byId.values()) {
 		if (node.parentId && byId.has(node.parentId)) {
-			byId.get(node.parentId)!.children.push(node);
+			byId.get(node.parentId)?.children.push(node);
 		} else {
 			roots.push(node);
 		}
@@ -155,12 +163,13 @@ export default function IdentityMailboxesList({
 		const hasChildren = m.children.length > 0;
 
 		return (
-			<div>
-				<div className="flex items-center">
+			<div className="min-w-0">
+				<div className="flex min-w-0 items-center">
 					{hasChildren ? (
 						<button
+							type="button"
 							onClick={() => setOpen((v) => !v)}
-							className="mr-1 rounded p-0.5 hover:bg-sidebar-accent/60"
+							className="mr-1 shrink-0 rounded p-0.5 hover:bg-sidebar-accent/60"
 							aria-label={open ? "Collapse" : "Expand"}
 						>
 							{open ? (
@@ -170,17 +179,18 @@ export default function IdentityMailboxesList({
 							)}
 						</button>
 					) : (
-						<span className="w-4" />
+						<span className="w-4 shrink-0" />
 					)}
 
-					<div className="flex w-full items-start">
+					<div className="flex min-w-0 flex-1 items-center gap-1">
 						<Link
 							href={href}
 							prefetch={false}
 							onClick={onComplete ? () => onComplete() : undefined}
 							aria-disabled={!m.selectable}
+							style={{ paddingLeft: `${Math.min(depth, 4) * 0.625 + 0.5}rem` }}
 							className={cn(
-								"flex min-w-0 flex-1 items-center gap-2 rounded-md py-1.5 pl-2 text-sm",
+								"flex min-w-0 flex-1 items-center gap-2 rounded-md py-1.5 pr-2 text-sm",
 								"hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
 								isActive && "bg-sidebar-accent text-sidebar-accent-foreground",
 								isActive
@@ -191,10 +201,19 @@ export default function IdentityMailboxesList({
 							)}
 						>
 							<Icon className="h-4 w-4 shrink-0" />
-							<span className="truncate">
+							<span
+								className="min-w-0 flex-1 truncate"
+								title={
+									m.kind === "custom" ? (m.name ?? "Mailbox") : TITLE[m.kind]
+								}
+							>
 								{m.kind === "custom" ? (m.name ?? "Mailbox") : TITLE[m.kind]}
-								{m.unread > 0 && <span> ({m.unread})</span>}
 							</span>
+							{m.unread > 0 && (
+								<span className="ml-auto shrink-0 rounded-full border px-1.5 text-[10px] leading-5 text-sidebar-foreground/80">
+									{m.unread > 99 ? "99+" : m.unread}
+								</span>
+							)}
 						</Link>
 
 						{m.kind === "custom" && (
@@ -206,7 +225,7 @@ export default function IdentityMailboxesList({
 											e.stopPropagation(); // don’t toggle parent handlers
 										}}
 										className={cn(
-											"rounded p-1 mt-1.25 transition",
+											"shrink-0 rounded p-1 transition",
 											"hover:bg-sidebar-accent/60",
 										)}
 										aria-label={`Actions for ${m.name ?? "folder"}`}
@@ -227,7 +246,7 @@ export default function IdentityMailboxesList({
 				</div>
 
 				{open && hasChildren && (
-					<div>
+					<div className="min-w-0">
 						{m.children.map((child) => (
 							<Item
 								key={child.id}
@@ -244,7 +263,21 @@ export default function IdentityMailboxesList({
 	};
 
 	return (
-		<div className="space-y-2 px-2">
+		<div className="min-w-0 space-y-2 overflow-x-hidden px-2">
+			<Link
+				href="/dashboard/mail"
+				prefetch={false}
+				onClick={onComplete ? () => onComplete() : undefined}
+				className={cn(
+					"mb-3 flex min-w-0 items-center gap-2 rounded-md px-2 py-2 text-sm font-medium",
+					"hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+					pathname === "/dashboard/mail" &&
+						"bg-sidebar-accent text-sidebar-accent-foreground",
+				)}
+			>
+				<LayoutDashboard className="h-4 w-4 shrink-0" />
+				<span className="min-w-0 truncate">Mailbox Overview</span>
+			</Link>
 			{identityMailboxes.map(({ identity, mailboxes }) => {
 				const tree = buildTree(mailboxes as MailboxEntity[]);
 
@@ -255,12 +288,14 @@ export default function IdentityMailboxesList({
 					(snoozed) => snoozed.identityId === identity.id,
 				).length;
 				return (
-					<div key={identity.id}>
-						<div className="px-1 mb-1 mt-2 text-xs font-semibold text-sidebar-foreground/60 flex items-center gap-1">
-							<span>{identity.value}</span>
+					<div key={identity.id} className="min-w-0">
+						<div className="mb-1 mt-2 flex min-w-0 items-center gap-1 px-1 text-xs font-semibold text-sidebar-foreground/60">
+							<span className="min-w-0 flex-1 truncate" title={identity.value}>
+								{identity.value}
+							</span>
 							<AddNewFolder mailboxes={mailboxes} identity={identity} />
 						</div>
-						<div className="space-y-1">
+						<div className="min-w-0 space-y-1">
 							{tree.map((m) => (
 								<Item
 									key={`${identity.id}:${m.id}`}

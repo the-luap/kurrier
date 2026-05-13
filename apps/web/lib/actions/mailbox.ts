@@ -221,6 +221,76 @@ export type FetchIdentityMailboxListResult = Awaited<
 	ReturnType<typeof fetchIdentityMailboxList>
 >;
 
+export const fetchMailboxOverview = cache(async () => {
+	const identityMailboxList = await fetchIdentityMailboxList();
+	const mailboxIds = identityMailboxList.flatMap((entry) =>
+		entry.mailboxes.map((mailbox) => mailbox.id),
+	);
+
+	if (mailboxIds.length === 0) {
+		return identityMailboxList.map((entry) => ({
+			...entry,
+			mailboxes: [],
+		}));
+	}
+
+	const rls = await rlsClient();
+	const now = new Date();
+	const [totalRows, recentRows] = await Promise.all([
+		rls((tx) =>
+			tx
+				.select({
+					mailboxId: mailboxThreads.mailboxId,
+					totalThreads: count(),
+				})
+				.from(mailboxThreads)
+				.where(inArray(mailboxThreads.mailboxId, mailboxIds))
+				.groupBy(mailboxThreads.mailboxId),
+		),
+		rls((tx) =>
+			tx
+				.select()
+				.from(mailboxThreads)
+				.where(
+					and(
+						inArray(mailboxThreads.mailboxId, mailboxIds),
+						or(
+							isNull(mailboxThreads.snoozedUntil),
+							lte(mailboxThreads.snoozedUntil, now),
+						),
+					),
+				)
+				.orderBy(desc(mailboxThreads.lastActivityAt))
+				.limit(Math.min(mailboxIds.length * 3, 300)),
+		),
+	]);
+
+	const totalsByMailbox = new Map(
+		totalRows.map((row) => [row.mailboxId, Number(row.totalThreads ?? 0)]),
+	);
+	const recentByMailbox = new Map<string, typeof recentRows>();
+	for (const thread of recentRows) {
+		const list = recentByMailbox.get(thread.mailboxId) ?? [];
+		if (list.length < 3) {
+			list.push(thread);
+			recentByMailbox.set(thread.mailboxId, list);
+		}
+	}
+
+	return identityMailboxList.map((entry) => ({
+		...entry,
+		mailboxes: entry.mailboxes.map((mailbox) => ({
+			...mailbox,
+			totalThreads: totalsByMailbox.get(mailbox.id) ?? 0,
+			recentThreads: recentByMailbox.get(mailbox.id) ?? [],
+		})),
+	}));
+});
+
+export type FetchMailboxOverviewResult = Awaited<
+	ReturnType<typeof fetchMailboxOverview>
+>;
+
 export const fetchMailboxUnreadCounts = cache(async () => {
 	const rls = await rlsClient();
 
