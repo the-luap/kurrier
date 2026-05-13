@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import type { MailboxThreadEntity } from "@db";
 import type { FetchMailboxOverviewResult } from "@/lib/actions/mailbox";
 import type { MailboxKind } from "@schema";
 
@@ -50,17 +51,19 @@ type MailboxOverviewProps = {
 	overview: FetchMailboxOverviewResult;
 };
 
-function mailboxTitle(
-	mailbox: FetchMailboxOverviewResult[number]["mailboxes"][number],
-) {
+type OverviewMailbox =
+	FetchMailboxOverviewResult[number]["mailboxes"][number] & {
+		totalThreads: number;
+		recentThreads: MailboxThreadEntity[];
+	};
+
+function mailboxTitle(mailbox: OverviewMailbox) {
 	return mailbox.kind === "custom"
 		? (mailbox.name ?? "Mailbox")
 		: TITLE[mailbox.kind as MailboxKind];
 }
 
-function participantLabel(
-	participants: FetchMailboxOverviewResult[number]["mailboxes"][number]["recentThreads"][number]["participants"],
-) {
+function participantLabel(participants: MailboxThreadEntity["participants"]) {
 	const sender = participants?.from?.[0];
 	return sender?.n || sender?.e || "Unknown sender";
 }
@@ -140,13 +143,15 @@ export default function MailboxOverview({ overview }: MailboxOverviewProps) {
 
 							<div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
 								{entry.mailboxes.map((mailbox) => {
-									const Icon = ICON[mailbox.kind as MailboxKind] ?? Folder;
-									const unread = Number(mailbox.unreadCount ?? 0);
-									const title = mailboxTitle(mailbox);
-									const href = `/dashboard/mail/${entry.identity.publicId}/${mailbox.slug ?? "inbox"}`;
+									const overviewMailbox = mailbox as OverviewMailbox;
+									const Icon =
+										ICON[overviewMailbox.kind as MailboxKind] ?? Folder;
+									const unread = Number(overviewMailbox.unreadCount ?? 0);
+									const title = mailboxTitle(overviewMailbox);
+									const href = `/dashboard/mail/${entry.identity.publicId}/${overviewMailbox.slug ?? "inbox"}`;
 
 									return (
-										<Card key={mailbox.id} className="gap-4 py-4">
+										<Card key={overviewMailbox.id} className="gap-4 py-4">
 											<CardHeader className="px-4">
 												<div className="flex min-w-0 items-start justify-between gap-3">
 													<Link
@@ -164,7 +169,7 @@ export default function MailboxOverview({ overview }: MailboxOverviewProps) {
 																{title}
 															</CardTitle>
 															<CardDescription className="text-xs">
-																{mailbox.totalThreads} threads
+																{overviewMailbox.totalThreads} threads
 															</CardDescription>
 														</span>
 													</Link>
@@ -174,11 +179,11 @@ export default function MailboxOverview({ overview }: MailboxOverviewProps) {
 												</div>
 											</CardHeader>
 											<CardContent className="px-4">
-												{mailbox.recentThreads.length > 0 ? (
+												{overviewMailbox.recentThreads.length > 0 ? (
 													<div className="flex flex-col divide-y">
-														{mailbox.recentThreads.map((thread) => (
+														{overviewMailbox.recentThreads.map((thread) => (
 															<Link
-																key={`${mailbox.id}:${thread.threadId}`}
+																key={`${overviewMailbox.id}:${thread.threadId}`}
 																href={`${href}/threads/${thread.threadId}`}
 																className="group flex min-w-0 gap-2 py-2 text-sm"
 															>
