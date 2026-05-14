@@ -1,23 +1,57 @@
-import { defineNitroPlugin } from "nitropack/runtime";
-import { ImapFlow } from "imapflow";
-
+import { db, identities } from "@db";
 import { JobScheduler, Worker } from "bullmq";
-import { deltaFetch } from "../../lib/imap/imap-delta-fetch";
-import { initSmtpClient } from "../../lib/imap/imap-client";
-import { mailSetFlags } from "../../lib/imap/imap-flags";
-import { moveMail } from "../../lib/imap/imap-move";
-
+import { and, eq, isNotNull } from "drizzle-orm";
+import type { ImapFlow } from "imapflow";
+import { defineNitroPlugin } from "nitropack/runtime";
 import { getRedis } from "../../lib/get-redis";
+import { startFullBackfill } from "../../lib/imap/backfill/backfill-full";
+import { discoverMailboxes } from "../../lib/imap/backfill/discover/discover-mailboxes";
+import { initSmtpClient } from "../../lib/imap/imap-client";
 import { deleteMail } from "../../lib/imap/imap-delete";
-import { addNewFolder } from "../../lib/imap/imap-new-folder";
 import { deleteFolder } from "../../lib/imap/imap-delete-folder";
+import { deltaFetch } from "../../lib/imap/imap-delta-fetch";
+import { mailSetFlags } from "../../lib/imap/imap-flags";
 import {
 	imapIdleSync,
 	startRealtimeForIdentity,
 	stopRealtimeForIdentity,
 } from "../../lib/imap/imap-idle-sync";
-import { discoverMailboxes } from "../../lib/imap/backfill/discover/discover-mailboxes";
-import { startFullBackfill } from "../../lib/imap/backfill/backfill-full";
+import { moveMail } from "../../lib/imap/imap-move";
+import { addNewFolder } from "../../lib/imap/imap-new-folder";
+
+const DEFAULT_IMAP_POLL_INTERVAL_MS = 60 * 60 * 1000;
+const MIN_IMAP_POLL_INTERVAL_MS = 5 * 60 * 1000;
+
+function getImapPollIntervalMs() {
+	const configured = Number(process.env.IMAP_POLL_INTERVAL_MS);
+	if (!Number.isFinite(configured) || configured <= 0) {
+		return DEFAULT_IMAP_POLL_INTERVAL_MS;
+	}
+
+	return Math.max(configured, MIN_IMAP_POLL_INTERVAL_MS);
+}
+
+async function deltaFetchAllIdentities(imapInstances: Map<string, ImapFlow>) {
+	const identityRows = await db
+		.select({ id: identities.id })
+		.from(identities)
+		.where(
+			and(eq(identities.kind, "email"), isNotNull(identities.smtpAccountId)),
+		);
+
+	console.info("[imap:delta-fetch-all] polling identities", {
+		count: identityRows.length,
+	});
+
+	for (const identity of identityRows) {
+		await deltaFetch(identity.id, imapInstances).catch((err) => {
+			console.error(
+				`[imap:delta-fetch-all] failed for identityId ${identity.id}:`,
+				err,
+			);
+		});
+	}
+}
 
 export default defineNitroPlugin(async (nitroApp) => {
 	console.info("**********************SMTP-WORKER***************************");
@@ -69,6 +103,11 @@ export default defineNitroPlugin(async (nitroApp) => {
 			} else if (job.name === "mail:delete-permanent") {
 				await deleteMail(job.data, imapInstances);
 			} else if (job.name === "smtp:append:sent") {
+			} else if (job.name === "imap:delta-fetch-all") {
+				console.info("IMAP scheduled delta fetch triggered");
+				await deltaFetchAllIdentities(imapInstances);
+				console.info("IMAP scheduled delta fetch completed");
+				return { success: true };
 			} else if (job.name === "imap:backfill-tick") {
 				console.info(`IMAP Backfill Tick triggered`);
 				await startFullBackfill(imapInstances).catch((err) => {
@@ -117,6 +156,29 @@ export default defineNitroPlugin(async (nitroApp) => {
 	await imapIdleSync(idleImapInstances, imapInstances);
 
 	const scheduler = new JobScheduler("smtp-worker", { connection });
+	const imapPollIntervalMs = getImapPollIntervalMs();
+
+	await scheduler.upsertJobScheduler(
+		"imap-delta-fetch-all-scheduler",
+		{ every: imapPollIntervalMs },
+		"imap:delta-fetch-all",
+		{},
+		{
+			removeOnComplete: true,
+			removeOnFail: false,
+			attempts: 3,
+			backoff: { type: "exponential", delay: 5000 },
+		},
+		{ override: true },
+	);
+
+	console.info("IMAP scheduled delta fetch configured", {
+		intervalMs: imapPollIntervalMs,
+	});
+
+	await deltaFetchAllIdentities(imapInstances).catch((err) => {
+		console.error("Initial IMAP scheduled delta fetch failed", err);
+	});
 
 	await scheduler.upsertJobScheduler(
 		"imap-backfill-scheduler",
@@ -169,13 +231,16 @@ export default defineNitroPlugin(async (nitroApp) => {
 			await logoutAll("realtime", idleImapInstances);
 			console.info("Logged out from IMAP server");
 
-			try {
-				await scheduler.removeJobScheduler("imap-backfill-scheduler");
-			} catch (err: any) {
-				console.error(
-					"Error removing imap-backfill-scheduler:",
-					err?.message ?? err,
-				);
+			for (const schedulerId of [
+				"imap-delta-fetch-all-scheduler",
+				"imap-backfill-scheduler",
+			]) {
+				try {
+					await scheduler.removeJobScheduler(schedulerId);
+				} catch (err) {
+					const message = err instanceof Error ? err.message : err;
+					console.error(`Error removing ${schedulerId}:`, message);
+				}
 			}
 		} catch (err) {
 			console.error("Failed to logout cleanly", err);
