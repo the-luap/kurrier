@@ -1,0 +1,37 @@
+---
+title: OpenAPI
+description: Machine-readable Kurrier API specification
+---
+
+Kurrier publishes a machine-readable OpenAPI 3.1 specification for API clients,
+SDK generators, OpenClaw/AI tools, and contract tests.
+
+## Download
+
+- [`/openapi.json`](/openapi.json)
+- [`/api/openapi`](/api/openapi)
+
+Both routes return the same OpenAPI document.
+
+## Use with tools
+
+Generate a client:
+
+```bash
+npx @openapitools/openapi-generator-cli generate \
+  -i https://your-domain.com/openapi.json \
+  -g typescript-fetch \
+  -o ./kurrier-client
+```
+
+Inspect quickly:
+
+```bash
+curl https://your-domain.com/openapi.json | jq '.paths | keys'
+```
+
+For OpenClaw/AI usage, point the tool importer at `/openapi.json` and create an
+API key with the scopes the agent needs:
+
+- `emails:receive` for reading mailboxes/messages
+- `emails:send` for composing and replying
