@@ -41,6 +41,21 @@ export default defineEventHandler(() => {
 				messages: [
 					{
 						method: "GET",
+						path: "/api/kurrier/messages?limit=50&includeHtml=true",
+						scope: "emails:receive",
+					},
+					{
+						method: "GET",
+						path: "/api/kurrier/emails?limit=50&includeHtml=true",
+						scope: "emails:receive",
+					},
+					{
+						method: "GET",
+						path: "/api/kurrier/mailboxes/:id/messages?limit=50&includeHtml=true",
+						scope: "emails:receive",
+					},
+					{
+						method: "GET",
 						path: "/api/kurrier/threads/:id/messages?limit=50&includeHtml=true",
 						scope: "emails:receive",
 					},
