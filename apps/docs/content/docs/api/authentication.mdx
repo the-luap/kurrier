@@ -3,34 +3,93 @@ title: Authentication
 description: How to access the Kurrier API
 ---
 
-
 ## Overview
 
-Kurrier exposes a simple HTTP+JSON API for sending email and managing webhooks to receive emails from various providers.
+Kurrier exposes a HTTP+JSON API for reading mailboxes and messages, sending email,
+managing identities, and managing webhooks.
 
-All endpoints are **authenticated** and live under the Kurrier namespace:
+All endpoints live under the Kurrier namespace:
 
 ```text
 https://your-domain.com/api/kurrier
 ```
 
-The API is currently v1 and versioning is handled via your API key. You can generate and manage API keys in the Kurrier dashboard
+For Paul’s local instance the base URL is:
+
+```text
+https://kurrier.local.nothaft.cloud/api/kurrier
+```
+
+The base route is a discovery endpoint:
+
+```http
+GET /api/kurrier
+```
+
+It returns the API name, version, supported scopes, and the currently available
+routes.
 
 ---
 
-### Steps
+## API keys
 
-1. Go to **API Keys**
-2. Add a key with a name and optional restrictions. Note, the default scopes allow everything for now and will be refined in the future.
+Create and manage API keys in the Kurrier dashboard:
 
+```text
+/dashboard/platform/api-keys
+```
+
+Steps:
+
+1. Open **Dashboard → Platform → API Keys**.
+2. Create an API key.
+3. Select the scopes your integration needs.
+4. Copy the key once and store it securely.
 
 ![Dashboard Screenshot](/doc-api-keys.jpg)
 
+---
 
-### Authentication
+## Authentication
 
-Every request must include your API key. Kurrier supports bearer token authentication via the `Authorization` header.:
+Every authenticated request must include the API key as a bearer token:
 
 ```http
-Authorization: Bearer YOUR_API_KEY
+Authorization: Bearer <api-key>
 ```
+
+Example:
+
+```bash
+curl https://your-domain.com/api/kurrier/me \
+  -H "Authorization: Bearer $KURRIER_API_KEY"
+```
+
+---
+
+## Scopes
+
+| Scope | Allows |
+|-------|--------|
+| `emails:receive` | Read mailboxes, mailbox overviews, threads, messages, identities, and webhooks. |
+| `emails:send` | Compose new emails and reply to existing messages/threads. |
+
+Use the smallest scope set needed by your integration. For OpenClaw/AI email
+agents that need to read and answer mail, create a key with both `emails:receive`
+and `emails:send`.
+
+---
+
+## Response envelope
+
+Successful API responses use this shape:
+
+```json
+{
+  "success": true,
+  "data": {}
+}
+```
+
+Errors use Nitro/H3’s JSON error format and include `statusCode`,
+`statusMessage`, and `message`.

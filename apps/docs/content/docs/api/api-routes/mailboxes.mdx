@@ -1,0 +1,184 @@
+---
+title: Mailboxes and Messages
+description: Read mailboxes, threads, and messages through Kurrier's API
+---
+
+Kurrier exposes read endpoints for external clients such as OpenClaw, AI agents,
+and backend automations.
+
+All routes below are relative to:
+
+```text
+https://your-domain.com/api/kurrier
+```
+
+For authentication, see the [authentication guide](/docs/api/authentication).
+
+Required scope: `emails:receive`.
+
+---
+
+## List mailboxes
+
+### `GET /mailboxes`
+
+Returns email identities with their mailboxes.
+
+Example:
+
+```bash
+curl https://your-domain.com/api/kurrier/mailboxes \
+  -H "Authorization: Bearer $KURRIER_API_KEY"
+```
+
+Response shape:
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "identity": { "id": "...", "value": "info@example.com" },
+      "mailboxes": [
+        { "id": "...", "name": "Inbox", "slug": "inbox", "kind": "inbox" }
+      ]
+    }
+  ]
+}
+```
+
+---
+
+## Mailbox overview
+
+### `GET /mailboxes/overview`
+
+Returns identities, mailboxes, unread counters, total thread counters, and the
+latest unread inbox threads.
+
+Example:
+
+```bash
+curl https://your-domain.com/api/kurrier/mailboxes/overview \
+  -H "Authorization: Bearer $KURRIER_API_KEY"
+```
+
+Useful for dashboards and AI agents that need a quick inbox summary before
+choosing which mailbox/thread to inspect.
+
+---
+
+## List mailbox threads
+
+### `GET /mailboxes/{mailboxId}/threads`
+
+Returns threads for a mailbox, ordered by last activity descending.
+
+Query parameters:
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `limit` | Number of threads to return. Min `1`, max `100`. | `50` |
+
+Example:
+
+```bash
+curl "https://your-domain.com/api/kurrier/mailboxes/2ba57828-d11b-4e48-81f3-a5182515bf42/threads?limit=20" \
+  -H "Authorization: Bearer $KURRIER_API_KEY"
+```
+
+Response shape:
+
+```json
+{
+  "success": true,
+  "data": {
+    "mailbox": { "id": "...", "name": "Inbox" },
+    "threads": [
+      {
+        "threadId": "...",
+        "mailboxId": "...",
+        "subject": "Example",
+        "previewText": "...",
+        "unreadCount": 1,
+        "lastActivityAt": "2026-05-16T00:00:00.000Z"
+      }
+    ]
+  }
+}
+```
+
+---
+
+## List thread messages
+
+### `GET /threads/{threadId}/messages`
+
+Returns messages in a thread, ordered oldest-first.
+
+Query parameters:
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `limit` | Number of messages to return. Min `1`, max `100`. | `50` |
+| `includeHtml` | Include the raw `html` field. If omitted, `html` is excluded. | `false` |
+
+Example:
+
+```bash
+curl "https://your-domain.com/api/kurrier/threads/7d4d2d9e-1111-2222-3333-444444444444/messages?includeHtml=true" \
+  -H "Authorization: Bearer $KURRIER_API_KEY"
+```
+
+---
+
+## List mailbox messages
+
+### `GET /mailboxes/{mailboxId}/messages`
+
+Returns messages for a mailbox, ordered newest-first.
+
+Query parameters are the same as thread messages: `limit` and `includeHtml`.
+
+Example:
+
+```bash
+curl "https://your-domain.com/api/kurrier/mailboxes/2ba57828-d11b-4e48-81f3-a5182515bf42/messages?limit=20&includeHtml=true" \
+  -H "Authorization: Bearer $KURRIER_API_KEY"
+```
+
+---
+
+## List messages globally
+
+### `GET /messages`
+
+Returns recent messages across all owned mailboxes, ordered newest-first.
+
+Query parameters:
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `limit` | Number of messages to return. Min `1`, max `100`. | `50` |
+| `includeHtml` | Include the raw `html` field. | `false` |
+| `mailboxId` | Optional mailbox filter. | none |
+| `threadId` | Optional thread filter. | none |
+
+`GET /emails` is an alias for integrations that expect email terminology.
+
+Example:
+
+```bash
+curl "https://your-domain.com/api/kurrier/messages?limit=20" \
+  -H "Authorization: Bearer $KURRIER_API_KEY"
+```
+
+---
+
+## Message response notes
+
+Message responses include attachments metadata under `attachments`.
+
+By default `html` is omitted to keep responses smaller and safer for AI clients.
+Pass `includeHtml=true` only when the client explicitly needs HTML rendering or
+analysis.

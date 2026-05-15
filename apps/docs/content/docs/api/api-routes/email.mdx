@@ -1,40 +1,136 @@
 ---
 title: Email
-description: Send email through Kurrier's unified API
+description: Compose, send, and reply to email through Kurrier's API
 ---
 
-Kurrier exposes a single, focused endpoint for sending email.
+Kurrier exposes email write endpoints for external systems such as OpenClaw,
+backend jobs, or AI agents.
 
-For more information on how to authenticate with the Kurrier API, see the [authentication guide](/docs/api/authentication).
+All routes below are relative to:
 
+```text
+https://your-domain.com/api/kurrier
+```
 
-### POST /email/send
+For authentication, see the [authentication guide](/docs/api/authentication).
 
+Required scope: `emails:send`.
+
+---
+
+## Send a new email
+
+### `POST /email/send`
+
+Sends a new email using one of your configured identities.
+
+`POST /email/compose` is an alias with the same request/response shape. Use it
+when an integration prefers explicit compose semantics.
 
 | Field | Description | Example |
 |-------|-------------|---------|
-| **identityId** *(required)* | The Kurrier Identity to send from | `"id_12345"` |
-| **to** *(required)* | One recipient email addresses | `"ada@example.com"` |
-| **subject** *(required)* | Subject line of the email | `"Welcome to Kurrier!"` |
-| **html** *(required unless `text` is provided)* | HTML version of the email body | `"<p>Hello!</p>"` |
-| **text** *(required unless `html` is provided)* | Plain-text version of the email body | `"Hello!"` |
-| **cc** | CC recipients | `"manager@your.co,ops@your.co"` |
-| **bcc** | BCC recipients | `"audit@your.co,gm@your.co"` |
-| **attachments** | Attachments | `[{ "filename": "photo.jpg", "contentType": "image/jpeg", "content": "BASE64_STRING_HERE" }, ...]` |
+| `identityId` *(required)* | Kurrier Identity ID to send from. | `"1a9b317a-8a84-493a-b9f8-83a3800861e2"` |
+| `to` *(required)* | Recipient email address. | `"ada@example.com"` |
+| `subject` *(required)* | Subject line. | `"Welcome to Kurrier"` |
+| `html` *(required unless `text` is provided)* | HTML body. | `"<p>Hello</p>"` |
+| `text` *(required unless `html` is provided)* | Plain-text body. | `"Hello"` |
+| `cc` | CC recipients. String or array. | `"manager@example.com"` |
+| `bcc` | BCC recipients. String or array. | `["audit@example.com"]` |
+| `attachments` | Attachments with base64 content. | See below. |
 
+Example:
 
-
-Send an email using one of your configured Identities (which in turn map to a provider account such as SES, SMTP, Mailgun, Postmark, SendGrid, etc.).
-
-
-
-### Response
-
-On success, Kurrier returns a JSON payload with a unique message id:
-
+```bash
+curl https://your-domain.com/api/kurrier/email/send \
+  -H "Authorization: Bearer $KURRIER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "identityId": "1a9b317a-8a84-493a-b9f8-83a3800861e2",
+    "to": "ada@example.com",
+    "subject": "Hello from Kurrier",
+    "text": "Hello Ada"
+  }'
 ```
+
+Response:
+
+```json
 {
-  "messageId": "3c152a84-6559-4094-a1da-3f1a3209866d"
+  "success": true,
+  "data": {
+    "messageId": "3c152a84-6559-4094-a1da-3f1a3209866d"
+  }
 }
 ```
 
+---
+
+## Reply to an email
+
+### `POST /email/reply`
+
+Replies to an existing message or to the latest message in a thread.
+Kurrier uses the same send queue and reconciliation flow as the web app and sets
+reply metadata such as `In-Reply-To` and `References`.
+
+| Field | Description | Example |
+|-------|-------------|---------|
+| `originalMessageId` | Message ID to reply to. Required unless `threadId` is provided. | `"0fd0f0d1-..."` |
+| `threadId` | Thread ID. Kurrier replies to the latest message in the thread. Required unless `originalMessageId` is provided. | `"7d4d2d9e-..."` |
+| `identityId` | Optional sender identity override. Defaults to the original message identity. | `"1a9b317a-..."` |
+| `to` | Optional recipient override. If omitted, Kurrier uses `Reply-To`, then `From`. | `"ada@example.com"` |
+| `html` *(required unless `text` is provided)* | HTML body. | `"<p>Thanks</p>"` |
+| `text` *(required unless `html` is provided)* | Plain-text body. | `"Thanks"` |
+| `cc` | CC recipients. String or array. | `"team@example.com"` |
+| `bcc` | BCC recipients. String or array. | `["audit@example.com"]` |
+| `attachments` | Attachments with base64 content. | See below. |
+
+Example using a message ID:
+
+```bash
+curl https://your-domain.com/api/kurrier/email/reply \
+  -H "Authorization: Bearer $KURRIER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "originalMessageId": "0fd0f0d1-1111-2222-3333-444444444444",
+    "text": "Thanks, I will take care of it."
+  }'
+```
+
+Example using a thread ID:
+
+```bash
+curl https://your-domain.com/api/kurrier/email/reply \
+  -H "Authorization: Bearer $KURRIER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "threadId": "7d4d2d9e-1111-2222-3333-444444444444",
+    "html": "<p>Thanks, I will take care of it.</p>"
+  }'
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "messageId": "3c152a84-6559-4094-a1da-3f1a3209866d",
+    "originalMessageId": "0fd0f0d1-1111-2222-3333-444444444444"
+  }
+}
+```
+
+---
+
+## Attachments
+
+Attachments are uploaded before the message is queued.
+
+```json
+{
+  "filename": "invoice.pdf",
+  "contentType": "application/pdf",
+  "content": "BASE64_STRING_HERE"
+}
+```
