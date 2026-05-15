@@ -1,9 +1,8 @@
-import { defineEventHandler, getRequestURL } from "h3";
+import { defineEventHandler } from "h3";
 import { apiSuccess } from "../../../../lib/api-helpers";
 
-export default defineEventHandler((event) => {
-	const url = getRequestURL(event);
-	const baseUrl = `${url.origin}/api/kurrier`;
+export default defineEventHandler(() => {
+	const baseUrl = "/api/kurrier";
 
 	return apiSuccess({
 		name: "Kurrier API",
@@ -12,7 +11,7 @@ export default defineEventHandler((event) => {
 		authentication: {
 			type: "bearer",
 			header: "Authorization: Bearer <api-key>",
-			apiKeysDashboard: `${url.origin}/dashboard/platform/api-keys`,
+			apiKeysDashboard: "/dashboard/platform/api-keys",
 		},
 		scopes: {
 			"emails:receive":
