@@ -1,19 +1,19 @@
-import { createError, defineEventHandler } from "h3";
-import { EmailSendSchema } from "@schema";
+import { base64ToBlob } from "@common";
 import { db, identities, mailboxes } from "@db";
+import { EmailSendSchema } from "@schema";
 import { and, eq } from "drizzle-orm";
-import { getRedis } from "../../../../../lib/get-redis";
-import { createSupabaseServiceClient } from "../../../../../lib/create-client-ssr";
+import { createError, defineEventHandler } from "h3";
+import { extension } from "mime-types";
 import {
 	apiSuccess,
 	validateApiKey,
 	validateJSONBody,
 } from "../../../../../lib/api-helpers";
-import { extension } from "mime-types";
-import { base64ToBlob } from "@common";
+import { createSupabaseServiceClient } from "../../../../../lib/create-client-ssr";
+import { getRedis } from "../../../../../lib/get-redis";
 
 export default defineEventHandler(async (event) => {
-	await validateApiKey(event);
+	const { ownerId } = await validateApiKey(event, ["emails:send"]);
 	const { json } = await validateJSONBody(event);
 
 	const parsed = EmailSendSchema.safeParse(json);
@@ -37,7 +37,9 @@ export default defineEventHandler(async (event) => {
 	const [identity] = await db
 		.select()
 		.from(identities)
-		.where(eq(identities.id, data.identityId));
+		.where(
+			and(eq(identities.id, data.identityId), eq(identities.ownerId, ownerId)),
+		);
 	if (!identity) {
 		throw createError({
 			statusCode: 400,
@@ -51,6 +53,7 @@ export default defineEventHandler(async (event) => {
 		.where(
 			and(
 				eq(mailboxes.identityId, data.identityId),
+				eq(mailboxes.ownerId, ownerId),
 				eq(mailboxes.slug, "sent"),
 			),
 		);

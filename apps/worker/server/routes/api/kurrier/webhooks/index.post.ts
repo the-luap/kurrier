@@ -1,13 +1,18 @@
+import {
+	db,
+	WebhookCreateSchema,
+	type WebhookInsertEntity,
+	webhooks,
+} from "@db";
 import { defineEventHandler, readBody } from "h3";
 import {
-	apiSuccess,
 	apiError,
+	apiSuccess,
 	validateApiKey,
 } from "../../../../../lib/api-helpers";
-import { db, WebhookCreateSchema, WebhookInsertEntity, webhooks } from "@db";
 
 export default defineEventHandler(async (event) => {
-	const { ownerId } = await validateApiKey(event);
+	const { ownerId } = await validateApiKey(event, ["emails:receive"]);
 
 	const body = await readBody(event).catch(() => ({}));
 	const parsed = WebhookCreateSchema.safeParse(body);

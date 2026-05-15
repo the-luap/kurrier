@@ -1,14 +1,17 @@
+import { db, identities } from "@db";
+import { and, eq } from "drizzle-orm";
 import { defineEventHandler, getRouterParam } from "h3";
 import {
-	apiSuccess,
 	apiError,
+	apiSuccess,
 	validateApiKey,
 } from "../../../../../lib/api-helpers";
-import { db, identities } from "@db";
-import { eq } from "drizzle-orm";
 
 export default defineEventHandler(async (event) => {
-	const { ownerId } = await validateApiKey(event);
+	const { ownerId } = await validateApiKey(event, [
+		"emails:send",
+		"emails:receive",
+	]);
 	const id = getRouterParam(event, "id");
 
 	if (!id) {
@@ -18,7 +21,7 @@ export default defineEventHandler(async (event) => {
 	const [existing] = await db
 		.select()
 		.from(identities)
-		.where(eq(identities.id, String(id)));
+		.where(and(eq(identities.id, String(id)), eq(identities.ownerId, ownerId)));
 
 	if (!existing) {
 		return apiError(404, "IDENTITY_NOT_FOUND", "Identity not found");
@@ -28,7 +31,9 @@ export default defineEventHandler(async (event) => {
 		return apiError(403, "FORBIDDEN", "You do not own this identity");
 	}
 
-	await db.delete(identities).where(eq(identities.id, String(id)));
+	await db
+		.delete(identities)
+		.where(and(eq(identities.id, String(id)), eq(identities.ownerId, ownerId)));
 
 	return apiSuccess({
 		id: existing.id,

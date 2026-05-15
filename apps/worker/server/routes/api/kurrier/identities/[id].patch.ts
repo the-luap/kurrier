@@ -1,14 +1,17 @@
+import { db, type IdentityCreate, IdentityUpdateSchema, identities } from "@db";
+import { and, eq } from "drizzle-orm";
 import { defineEventHandler, getRouterParam, readBody } from "h3";
 import {
-	apiSuccess,
 	apiError,
+	apiSuccess,
 	validateApiKey,
 } from "../../../../../lib/api-helpers";
-import { db, identities, IdentityCreate, IdentityUpdateSchema } from "@db";
-import { eq } from "drizzle-orm";
 
 export default defineEventHandler(async (event) => {
-	const { ownerId } = await validateApiKey(event);
+	const { ownerId } = await validateApiKey(event, [
+		"emails:send",
+		"emails:receive",
+	]);
 	const id = getRouterParam(event, "id");
 
 	if (!id) {
@@ -38,7 +41,7 @@ export default defineEventHandler(async (event) => {
 	const [existing] = await db
 		.select()
 		.from(identities)
-		.where(eq(identities.id, String(id)));
+		.where(and(eq(identities.id, String(id)), eq(identities.ownerId, ownerId)));
 
 	if (!existing) {
 		return apiError(404, "IDENTITY_NOT_FOUND", "Identity not found");
@@ -51,7 +54,7 @@ export default defineEventHandler(async (event) => {
 	const [updated] = await db
 		.update(identities)
 		.set(updates as IdentityCreate)
-		.where(eq(identities.id, String(id)))
+		.where(and(eq(identities.id, String(id)), eq(identities.ownerId, ownerId)))
 		.returning();
 
 	return apiSuccess(updated);

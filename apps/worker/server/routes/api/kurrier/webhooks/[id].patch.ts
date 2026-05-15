@@ -1,14 +1,19 @@
+import {
+	db,
+	type WebhookInsertEntity,
+	WebhookUpdateSchema,
+	webhooks,
+} from "@db";
+import { and, eq } from "drizzle-orm";
 import { defineEventHandler, getRouterParam, readBody } from "h3";
 import {
-	apiSuccess,
 	apiError,
+	apiSuccess,
 	validateApiKey,
 } from "../../../../../lib/api-helpers";
-import { db, WebhookInsertEntity, webhooks, WebhookUpdateSchema } from "@db";
-import { eq } from "drizzle-orm";
 
 export default defineEventHandler(async (event) => {
-	const { ownerId } = await validateApiKey(event);
+	const { ownerId } = await validateApiKey(event, ["emails:receive"]);
 	const id = getRouterParam(event, "id");
 
 	if (!id) {
@@ -38,7 +43,7 @@ export default defineEventHandler(async (event) => {
 	const [existing] = await db
 		.select()
 		.from(webhooks)
-		.where(eq(webhooks.id, String(id)));
+		.where(and(eq(webhooks.id, String(id)), eq(webhooks.ownerId, ownerId)));
 
 	if (!existing) {
 		return apiError(404, "WEBHOOK_NOT_FOUND", "Webhook not found");
@@ -51,7 +56,7 @@ export default defineEventHandler(async (event) => {
 	const [updated] = await db
 		.update(webhooks)
 		.set(updates as WebhookInsertEntity)
-		.where(eq(webhooks.id, String(id)))
+		.where(and(eq(webhooks.id, String(id)), eq(webhooks.ownerId, ownerId)))
 		.returning();
 
 	return apiSuccess(updated);
