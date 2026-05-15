@@ -1,4 +1,5 @@
 import { db, webhooks } from "@db";
+import { eq } from "drizzle-orm";
 import { defineEventHandler } from "h3";
 import { apiSuccess, validateApiKey } from "../../../../../lib/api-helpers";
 
