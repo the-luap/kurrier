@@ -4,9 +4,10 @@ import { APP_VERSION } from "@common";
 import { db, identities, users, workspaces, workspaceMembers } from "@db";
 import { FormState, getPublicEnv, getServerEnv } from "@schema";
 import argon2 from "argon2";
+import bcrypt from "bcrypt";
 import { Queue, QueueEvents } from "bullmq";
 import { decode } from "decode-formdata";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { jwtVerify, JWTPayload, SignJWT } from "jose";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
@@ -69,6 +70,51 @@ const applyPendingMigrations = async (
 		},
 	);
 };
+
+async function verifyLegacySupabasePassword(
+	userId: string,
+	email: string,
+	password: string,
+) {
+	let rows: Array<{ encrypted_password: string | null }>;
+	try {
+		rows = (await db.execute(sql`
+			select encrypted_password
+			from auth.users
+			where id = ${userId}
+				and lower(email) = ${email}
+				and encrypted_password is not null
+			limit 1
+		`)) as Array<{ encrypted_password: string | null }>;
+	} catch (error) {
+		if (
+			error instanceof Error &&
+			/column .*encrypted_password.* does not exist/i.test(error.message)
+		) {
+			return false;
+		}
+		throw error;
+	}
+
+	const encryptedPassword = rows[0]?.encrypted_password;
+
+	if (!encryptedPassword) {
+		return false;
+	}
+
+	const valid = await bcrypt.compare(password, encryptedPassword);
+
+	if (!valid) {
+		return false;
+	}
+
+	await db
+		.update(users)
+		.set({ passwordHash: await argon2.hash(password) })
+		.where(eq(users.id, userId));
+
+	return true;
+}
 
 async function signToken(userId: string) {
 	const { JWT_SECRET } = getServerEnv();
@@ -146,18 +192,21 @@ export async function login(
 		password: string;
 		locale?: string;
 	};
+	const normalizedEmail = email?.trim().toLowerCase();
 
-	if (!email || !password) {
+	if (!normalizedEmail || !password) {
 		return { error: "Missing email or password" };
 	}
 
-	const [user] = await db.select().from(users).where(eq(users.email, email));
+	const [user] = await db.select().from(users).where(eq(users.email, normalizedEmail));
 
-	if (!user || !user.passwordHash) {
+	if (!user) {
 		return { error: "Invalid credentials" };
 	}
 
-	const valid = await argon2.verify(user.passwordHash, password);
+	const valid = user.passwordHash
+		? await argon2.verify(user.passwordHash, password)
+		: await verifyLegacySupabasePassword(user.id, normalizedEmail, password);
 
 	if (!valid) {
 		return { error: "Invalid credentials" };
@@ -186,15 +235,16 @@ export async function signup(
 		password: string;
 		workspaceName: string;
 	};
+	const normalizedEmail = email?.trim().toLowerCase();
 
-	if (!email || !password) {
+	if (!normalizedEmail || !password) {
 		return { error: "Missing email or password" };
 	}
 
 	const passwordHash = await argon2.hash(password);
 
 	const user = await createUserWithWorkspace({
-		email,
+		email: normalizedEmail,
 		passwordHash,
 		workspaceName,
 	});
