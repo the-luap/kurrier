@@ -47,7 +47,8 @@ export function UnifiedMailboxNav({
 	onCreateLabel?: () => void;
 }) {
 	const pathname = usePathname();
-	const params = useParams() as { mailboxSlug?: string };
+	const params = useParams() as { mailboxSlug?: string; wPublicId?: string };
+	const workspacePublicId = params.wPublicId;
 
 	const unifiedMailboxes: {
 		mailbox: Mailbox;
@@ -88,7 +89,7 @@ export function UnifiedMailboxNav({
 	}) => {
 		const Icon = iconFor[item.mailbox.kind as MailboxKind] ?? Folder;
 		const slug = item.mailbox.slug ?? "inbox";
-		const href = `/dashboard/mail/${item.identity.publicId}/${slug}`;
+		const href = `/w/${workspacePublicId}/dashboard/mail/${item.identity.publicId}/${slug}`;
 
 		const isActive =
 			pathname === href || (params.mailboxSlug == null && slug === "inbox");

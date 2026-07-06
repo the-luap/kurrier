@@ -23,6 +23,7 @@ type Props = {
 	identityPublicId: string;
 	mailboxSync: MailboxSyncEntity | undefined;
 	labelsByThreadId: FetchMailboxThreadLabelsResult;
+	workspacePublicId?: string;
 };
 
 export default function WebmailListItemMobile({
@@ -31,6 +32,7 @@ export default function WebmailListItemMobile({
 	identityPublicId,
 	mailboxSync,
 	labelsByThreadId,
+	workspacePublicId,
 }: Props) {
 	const router = useRouter();
 	const [isDeleting, setIsDeleting] = React.useState(false);
@@ -73,7 +75,7 @@ export default function WebmailListItemMobile({
 
 	const openThread = () => {
 		const url = pathname.match("/dashboard/mail")
-			? `/dashboard/mail/${identityPublicId}/${activeMailbox.slug}/threads/${mailboxThreadItem.threadId}`
+			? `/w/${workspacePublicId}/dashboard/mail/${identityPublicId}/${activeMailbox.slug}/threads/${mailboxThreadItem.threadId}`
 			: `/mail/${identityPublicId}/${activeMailbox.slug}/threads/${mailboxThreadItem.threadId}`;
 		router.push(url);
 	};

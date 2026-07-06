@@ -47,7 +47,8 @@ export function MailboxNav({
 	onCreateLabel?: () => void;
 }) {
 	const pathname = usePathname();
-	const params = useParams() as { mailboxSlug?: string };
+	const params = useParams() as { mailboxSlug?: string; wPublicId?: string };
+	const workspacePublicId = params.wPublicId;
 
 	const sortedMailboxes = [...mailboxes].sort((a, b) => {
 		const ai = orderIndex(a.kind);
@@ -59,7 +60,7 @@ export function MailboxNav({
 	const Item = ({ mailbox }: { mailbox: Mailbox }) => {
 		const Icon = iconFor[mailbox.kind] ?? Folder;
 		const slug = mailbox.slug ?? "inbox";
-		const href = `/dashboard/mail/${identityPublicId}/${slug}`;
+		const href = `/w/${workspacePublicId}/dashboard/mail/${identityPublicId}/${slug}`;
 		const unreadCount = Number(mailbox.unreadCount ?? 0);
 
 		const isActive =

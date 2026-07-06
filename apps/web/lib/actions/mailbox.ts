@@ -47,7 +47,7 @@ import { redirect } from "next/navigation";
 import { cache } from "react";
 import Typesense, { type Client } from "typesense";
 import { isSignedIn } from "@/lib/actions/auth";
-import { rlsClient } from "@/lib/actions/clients";
+import { getWorkspacePublicId, rlsClient } from "@/lib/actions/clients";
 import { getRedis } from "@/lib/actions/get-redis";
 import { s3 } from "@/lib/create-s3-client";
 import { withServerCache } from "@/lib/server-cache";
@@ -1744,7 +1744,8 @@ export async function deleteMailboxFolder({
 	);
 
 	await job.waitUntilFinished(smtpEvents);
-	redirect(`/dashboard/mail/${identityId}/inbox`);
+	const workspacePublicId = await getWorkspacePublicId();
+	redirect(`/w/${workspacePublicId}/dashboard/mail/${identityId}/inbox`);
 	return { success: true };
 }
 

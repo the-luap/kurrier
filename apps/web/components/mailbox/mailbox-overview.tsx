@@ -15,6 +15,7 @@ import { cn } from "@/lib/utils";
 
 type MailboxOverviewProps = {
 	overview: FetchMailboxOverviewResult;
+	workspacePublicId: string;
 };
 
 type OverviewMailbox =
@@ -34,7 +35,10 @@ function findInbox(entry: FetchMailboxOverviewResult[number]) {
 		| undefined;
 }
 
-export default function MailboxOverview({ overview }: MailboxOverviewProps) {
+export default function MailboxOverview({
+	overview,
+	workspacePublicId,
+}: MailboxOverviewProps) {
 	const accounts = overview.map((entry) => ({
 		entry,
 		inbox: findInbox(entry),
@@ -105,7 +109,7 @@ export default function MailboxOverview({ overview }: MailboxOverviewProps) {
 				<div className="grid gap-3 xl:grid-cols-2 2xl:grid-cols-3">
 					{sortedAccounts.map(({ entry, inbox }) => {
 						const unread = Number(inbox?.unreadCount ?? 0);
-						const href = `/dashboard/mail/${entry.identity.publicId}/inbox`;
+						const href = `/w/${workspacePublicId}/dashboard/mail/${entry.identity.publicId}/inbox`;
 						const recentThreads = (inbox?.recentThreads ?? []).slice(0, 3);
 
 						return (

@@ -80,6 +80,7 @@ export default function WebmailList({
 										identityPublicId={identityPublicId}
 										mailboxSync={mailboxSync ?? undefined}
 										labelsByThreadId={labelsByThreadId}
+										workspacePublicId={workspacePublicId}
 									/>
 								) : (
 									<WebmailListItem
