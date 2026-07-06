@@ -1,5 +1,23 @@
 # @kurrier/schema
 
+## 3.0.1
+
+### Patch Changes
+
+- [#467](https://github.com/kurrier-org/kurrier/pull/467) [`2a9716e`](https://github.com/kurrier-org/kurrier/commit/2a9716e48de4a9aed72ca8f21a1cbd5dda0b74de) Thanks [@krokhale](https://github.com/krokhale)! - implement S3-backed cloud storage volumes
+
+## 3.0.0
+
+### Major Changes
+
+- [#449](https://github.com/kurrier-org/kurrier/pull/449) [`d039e87`](https://github.com/kurrier-org/kurrier/commit/d039e87a0e79fef4398875d0873231be897aa397) Thanks [@krokhale](https://github.com/krokhale)! - refactor: simplify platform architecture, routing, storage, and db setup
+
+## 2.0.0
+
+### Major Changes
+
+- [#449](https://github.com/kurrier-org/kurrier/pull/449) [`4a63387`](https://github.com/kurrier-org/kurrier/commit/4a63387eb93bf3dde9aeda194eb6a2cf0fed4cd5) Thanks [@krokhale](https://github.com/krokhale)! - refactor: simplify platform architecture, routing, storage, and db setup
+
 ## 1.1.2
 
 ### Patch Changes

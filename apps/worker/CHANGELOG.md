@@ -1,5 +1,61 @@
 # @kurrier/worker
 
+## 2.0.5
+
+### Patch Changes
+
+- [#477](https://github.com/kurrier-org/kurrier/pull/477) [`4ec878e`](https://github.com/kurrier-org/kurrier/commit/4ec878ed0e4b479999d612ccc9a77e0664e6bbff) Thanks [@krokhale](https://github.com/krokhale)! - changed nodemail imports
+
+## 2.0.4
+
+### Patch Changes
+
+- [#471](https://github.com/kurrier-org/kurrier/pull/471) [`50f0a99`](https://github.com/kurrier-org/kurrier/commit/50f0a99136826a2e7d65414a88d32d20d27601b0) Thanks [@krokhale](https://github.com/krokhale)! - Add storage and mailflow stats to platform overview
+
+## 2.0.3
+
+### Patch Changes
+
+- [#457](https://github.com/kurrier-org/kurrier/pull/457) [`95f7cc5`](https://github.com/kurrier-org/kurrier/commit/95f7cc56de52c1c91651ea96298302c5412fbb56) Thanks [@krokhale](https://github.com/krokhale)! - performance-enhancement-and-refactor-for-smtp-pipeline
+
+## 2.0.2
+
+### Patch Changes
+
+- [#452](https://github.com/kurrier-org/kurrier/pull/452) [`b374c4e`](https://github.com/kurrier-org/kurrier/commit/b374c4e4effcbcee9ad36a57ef59c3d25ac6f699) Thanks [@krokhale](https://github.com/krokhale)! - Add Google OIDC authentication
+
+- [`f510001`](https://github.com/kurrier-org/kurrier/commit/f510001c38de35ba047cf6319b0df6eb80fa295e) Thanks [@krokhale](https://github.com/krokhale)! - updated env vars
+
+## 2.0.1
+
+### Patch Changes
+
+- [#452](https://github.com/kurrier-org/kurrier/pull/452) [`6faea6d`](https://github.com/kurrier-org/kurrier/commit/6faea6d6fe553ab1108700a348b462460a01f22a) Thanks [@krokhale](https://github.com/krokhale)! - Add Google OIDC authentication
+
+## 2.0.0
+
+### Major Changes
+
+- [#449](https://github.com/kurrier-org/kurrier/pull/449) [`d039e87`](https://github.com/kurrier-org/kurrier/commit/d039e87a0e79fef4398875d0873231be897aa397) Thanks [@krokhale](https://github.com/krokhale)! - refactor: simplify platform architecture, routing, storage, and db setup
+
+## 1.0.0
+
+### Major Changes
+
+- [#449](https://github.com/kurrier-org/kurrier/pull/449) [`4a63387`](https://github.com/kurrier-org/kurrier/commit/4a63387eb93bf3dde9aeda194eb6a2cf0fed4cd5) Thanks [@krokhale](https://github.com/krokhale)! - refactor: simplify platform architecture, routing, storage, and db setup
+
+## 0.2.5
+
+### Patch Changes
+
+- [#446](https://github.com/kurrier-org/kurrier/pull/446) [`22fad36`](https://github.com/kurrier-org/kurrier/commit/22fad36fb1bc79e3038184ddd485fb235217475c) Thanks [@krokhale](https://github.com/krokhale)! - scope api resources by owner
+
+## 0.2.4
+
+### Patch Changes
+
+- [#444](https://github.com/kurrier-org/kurrier/pull/444) [`9b7fdc5`](https://github.com/kurrier-org/kurrier/commit/9b7fdc5a34aeed04c4a40e6e6126c9a580786367) Thanks [@divrajbajwa](https://github.com/divrajbajwa)! - Reconnect IMAP IDLE after socket close
+
 ## 0.2.3
 
 ### Patch Changes

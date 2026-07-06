@@ -1,35 +1,38 @@
 "use client";
 
-import type {
+import Link from "next/link";
+import { useParams, usePathname, useRouter } from "next/navigation";
+import { cn, setSidebarWidth } from "@/lib/utils";
+import {
+	Inbox,
+	Send,
+	FileText,
+	Archive,
+	Ban,
+	Trash2,
+	Folder,
+	ChevronRight,
+	ChevronDown,
+	MoreVertical,
+	Clock4,
+} from "lucide-react";
+import * as React from "react";
+import { Suspense, use, useEffect } from "react";
+import {
+	FetchIdentityMailboxListResult,
+	FetchMailboxUnreadCountsResult,
+} from "@/lib/actions/mailbox";
+import { MailboxKind } from "@schema";
+import {
 	DraftMessageEntity,
 	IdentityEntity,
 	MailboxEntity,
 	MailboxThreadEntity,
 } from "@db";
-import { Menu } from "@mantine/core";
-import type { MailboxKind } from "@schema";
-import { IconMailFast } from "@tabler/icons-react";
-import {
-	Archive,
-	Ban,
-	ChevronDown,
-	ChevronRight,
-	Clock4,
-	FileText,
-	Folder,
-	Inbox,
-	LayoutDashboard,
-	MoreVertical,
-	Send,
-	Trash2,
-} from "lucide-react";
-import Link from "next/link";
-import { useParams, usePathname } from "next/navigation";
-import * as React from "react";
 import AddNewFolder from "@/components/mailbox/default/add-new-folder";
+import { Menu, Select } from "@mantine/core";
 import DeleteMailboxFolder from "@/components/mailbox/default/delete-folder";
-import type { FetchIdentityMailboxListResult } from "@/lib/actions/mailbox";
-import { cn } from "@/lib/utils";
+import { IconMailFast } from "@tabler/icons-react";
 
 const ORDER: MailboxKind[] = [
 	"inbox",
@@ -64,17 +67,6 @@ const TITLE: Record<MailboxKind, string> = {
 	custom: "Mailbox",
 };
 
-const ACCENT: Record<MailboxKind, string> = {
-	inbox: "text-blue-600 dark:text-blue-300",
-	sent: "text-emerald-600 dark:text-emerald-300",
-	drafts: "text-amber-600 dark:text-amber-300",
-	archive: "text-violet-600 dark:text-violet-300",
-	spam: "text-rose-600 dark:text-rose-300",
-	trash: "text-red-600 dark:text-red-300",
-	outbox: "text-cyan-600 dark:text-cyan-300",
-	custom: "text-slate-500 dark:text-slate-400",
-};
-
 type TreeMailbox = {
 	id: string;
 	name: string | null;
@@ -86,37 +78,29 @@ type TreeMailbox = {
 	children: TreeMailbox[];
 };
 
-type MailboxWithNavMeta = MailboxEntity & {
-	parentId?: string | null;
-	unreadCount?: number | null;
-	unreadThreads?: number | null;
-	metaData?: { imap?: { selectable?: boolean } } | null;
-};
-
-function buildTree(rows: MailboxEntity[]): TreeMailbox[] {
+function buildTree(
+	rows: MailboxEntity[],
+	unreadCounts: FetchMailboxUnreadCountsResult,
+): TreeMailbox[] {
 	const byId = new Map<string, TreeMailbox>();
 	const roots: TreeMailbox[] = [];
 
 	for (const r of rows) {
-		const row = r as MailboxWithNavMeta;
 		byId.set(r.id, {
 			id: r.id,
 			name: r.name ?? null,
 			kind: r.kind as MailboxKind,
 			slug: r.slug ?? null,
-			parentId: row.parentId ?? null,
-			selectable: row.metaData?.imap?.selectable !== false,
-			unread: Math.max(
-				Number(row.unreadCount ?? 0),
-				Number(row.unreadThreads ?? 0),
-			),
+			parentId: (r as any).parentId ?? null,
+			selectable: (r.metaData as any)?.imap?.selectable !== false,
+			unread: unreadCounts.get(r.id)?.unreadTotal ?? 0,
 			children: [],
 		});
 	}
 
 	for (const node of byId.values()) {
 		if (node.parentId && byId.has(node.parentId)) {
-			byId.get(node.parentId)?.children.push(node);
+			byId.get(node.parentId)!.children.push(node);
 		} else {
 			roots.push(node);
 		}
@@ -135,15 +119,80 @@ function buildTree(rows: MailboxEntity[]): TreeMailbox[] {
 	return roots;
 }
 
+function IdentityExtraCounts({
+								 identity,
+								 scheduledDraftsPromise,
+								 snoozedThreadsPromise,
+								 workspacePublicId,
+								 currentSlug,
+							 }: {
+	identity: IdentityEntity;
+	scheduledDraftsPromise: Promise<DraftMessageEntity[]>;
+	snoozedThreadsPromise: Promise<{ threads: MailboxThreadEntity[] }>;
+	workspacePublicId: string | undefined;
+	currentSlug: string;
+}) {
+	const scheduledDrafts = use(scheduledDraftsPromise);
+	const { threads: snoozedThreads } = use(snoozedThreadsPromise);
+
+	const scheduledCount = scheduledDrafts.filter(
+		(d) => d.identityId === identity.id,
+	).length;
+
+	const snoozedCount = snoozedThreads.filter(
+		(s) => s.identityId === identity.id,
+	).length;
+
+	return (
+		<>
+			{scheduledCount > 0 && (
+				<Link
+					href={`/w/${workspacePublicId}/dashboard/mail/${identity.publicId}/scheduled`}
+					className={`my-2 rounded hover:dark:bg-neutral-800 ${
+						currentSlug === "scheduled"
+							? "dark:bg-neutral-800 dark:text-brand-foreground bg-brand-200 text-brand"
+							: ""
+					} flex justify-start gap-1 w-full p-1.5`}
+				>
+					<IconMailFast size={22} />
+					<span className="font-normal text-sm">
+						Scheduled ({scheduledCount})
+					</span>
+				</Link>
+			)}
+
+			{snoozedCount > 0 && (
+				<Link
+					href={`/w/${workspacePublicId}/dashboard/mail/${identity.publicId}/snoozed`}
+					className={`mx-1.5 my-2 rounded hover:dark:bg-neutral-800 ${
+						currentSlug === "snoozed"
+							? "dark:bg-neutral-800 dark:text-brand-foreground bg-brand-200 text-brand"
+							: ""
+					} flex justify-start gap-1 w-full p-1.5 items-center`}
+				>
+					<Clock4 size={16} />
+					<span className="font-normal text-sm">
+						Snoozed ({snoozedCount})
+					</span>
+				</Link>
+			)}
+		</>
+	);
+}
+
 export default function IdentityMailboxesList({
-	identityMailboxes,
-	scheduledDrafts,
-	snoozedThreads,
-	onComplete,
-}: {
+												  identityMailboxes,
+												  unreadCounts,
+												  scheduledDraftsPromise,
+												  snoozedThreadsPromise,
+												  workspacePublicId,
+												  onComplete,
+											  }: {
 	identityMailboxes: FetchIdentityMailboxListResult;
-	scheduledDrafts: DraftMessageEntity[];
-	snoozedThreads: MailboxThreadEntity[];
+	unreadCounts: FetchMailboxUnreadCountsResult;
+	scheduledDraftsPromise: Promise<DraftMessageEntity[]>;
+	snoozedThreadsPromise: Promise<{ threads: MailboxThreadEntity[] }>;
+	workspacePublicId: string | undefined;
 	onComplete?: () => void;
 }) {
 	const pathname = usePathname();
@@ -151,25 +200,34 @@ export default function IdentityMailboxesList({
 		identityPublicId?: string;
 		mailboxSlug?: string;
 	};
+
+	useEffect(() => {
+		setSidebarWidth("290px");
+		return () => setSidebarWidth("250px");
+	}, []);
+
 	const currentSlug = React.useMemo(() => {
 		const parts = pathname.split("/").filter(Boolean);
 		return parts.at(-1) ?? "inbox";
 	}, [pathname]);
 
+	const router = useRouter()
+
 	const Item = ({
-		m,
-		identityPublicId,
-		depth = 0,
-		identity,
-	}: {
+					  m,
+					  identityPublicId,
+					  identity,
+					  level = 0,
+				  }: {
 		m: TreeMailbox;
 		identityPublicId: string;
-		depth?: number;
 		identity: IdentityEntity;
+		level?: number;
 	}) => {
 		const Icon = ICON[m.kind] ?? Folder;
 		const slug = m.slug ?? "inbox";
-		const href = `/dashboard/mail/${identityPublicId}/${slug}`;
+		const href = `/w/${workspacePublicId}/dashboard/mail/${identityPublicId}/${slug}`;
+
 		const isActive =
 			pathname === href ||
 			(params.identityPublicId === identityPublicId && currentSlug === slug);
@@ -178,20 +236,13 @@ export default function IdentityMailboxesList({
 		const hasChildren = m.children.length > 0;
 
 		return (
-			<div className="min-w-0">
-				<div
-					className={cn(
-						"group/folder grid min-w-0 items-center gap-1",
-						m.kind === "custom"
-							? "grid-cols-[1rem_minmax(0,1fr)_1.5rem]"
-							: "grid-cols-[1rem_minmax(0,1fr)]",
-					)}
-				>
+			<div>
+				<div className="flex items-center">
 					{hasChildren ? (
 						<button
 							type="button"
 							onClick={() => setOpen((v) => !v)}
-							className="rounded p-0.5 hover:bg-sidebar-accent/60"
+							className="mr-1 rounded p-0.5 hover:bg-sidebar-accent/60"
 							aria-label={open ? "Collapse" : "Expand"}
 						>
 							{open ? (
@@ -204,84 +255,67 @@ export default function IdentityMailboxesList({
 						<span className="w-4" />
 					)}
 
-					<Link
-						href={href}
-						prefetch={false}
-						onClick={onComplete ? () => onComplete() : undefined}
-						aria-disabled={!m.selectable}
-						style={{ paddingLeft: `${Math.min(depth, 4) * 0.625 + 0.5}rem` }}
-						className={cn(
-							"relative flex min-w-0 w-full items-center gap-2 rounded-md border border-transparent py-1.5 pr-2 text-sm transition-colors",
-							"hover:border-sidebar-border hover:bg-sidebar-accent/80 hover:text-sidebar-accent-foreground",
-							isActive &&
-								"border-primary/20 bg-primary/10 text-sidebar-accent-foreground shadow-sm dark:border-primary/30 dark:bg-primary/20",
-							!m.selectable && "opacity-60 pointer-events-none cursor-default",
-						)}
-					>
-						{isActive ? (
-							<span className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-primary" />
-						) : null}
-						<Icon className={cn("h-4 w-4 shrink-0", ACCENT[m.kind])} />
-						<span
-							className="min-w-0 flex-1 truncate"
-							title={
-								m.kind === "custom" ? (m.name ?? "Mailbox") : TITLE[m.kind]
-							}
+					<div className="flex w-full items-start">
+						<Link
+							href={href}
+							onClick={onComplete ? () => onComplete() : undefined}
+							aria-disabled={!m.selectable}
+							className={cn(
+								"flex min-w-0 flex-1 items-center gap-2 rounded-md py-1.5 pl-2 text-sm",
+								"hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+								isActive && "bg-sidebar-accent text-sidebar-accent-foreground",
+								isActive
+									? "text-brand dark:text-white bg-brand-100 dark:bg-neutral-800 hover:text-brand hover:bg-brand-100"
+									: "",
+								!m.selectable &&
+								"opacity-60 pointer-events-none cursor-default",
+							)}
+							style={{ paddingLeft: 8 + level * 8 }}
 						>
-							{m.kind === "custom" ? (m.name ?? "Mailbox") : TITLE[m.kind]}
-						</span>
-						{(m.kind === "inbox" || m.unread > 0) && (
-							<span
-								className={cn(
-									"ml-auto shrink-0 rounded-full border px-1.5 text-[10px] leading-5 tabular-nums",
-									m.unread > 0
-										? "border-primary/20 bg-primary/10 text-sidebar-foreground dark:border-primary/30 dark:bg-primary/20"
-										: "border-sidebar-border bg-sidebar-accent/40 text-sidebar-foreground/60",
-								)}
-								title={`${m.unread} unread`}
-							>
-								{m.unread > 99 ? "99+" : m.unread}
+							<Icon className="h-4 w-4 shrink-0" />
+							<span className="truncate">
+								{m.kind === "custom" ? (m.name ?? "Mailbox") : TITLE[m.kind]}
+								{m.unread > 0 && <span> ({m.unread})</span>}
 							</span>
-						)}
-					</Link>
+						</Link>
 
-					{m.kind === "custom" ? (
-						<Menu withinPortal position="right-start" offset={4}>
-							<Menu.Target>
-								<button
-									type="button"
-									onClick={(e) => {
-										e.stopPropagation(); // don’t toggle parent handlers
-									}}
-									className={cn(
-										"shrink-0 rounded p-1 transition",
-										"hover:bg-sidebar-accent/60",
-									)}
-									aria-label={`Actions for ${m.name ?? "folder"}`}
-								>
-									<MoreVertical className="h-4 w-4" />
-								</button>
-							</Menu.Target>
-							<Menu.Dropdown onClick={(e) => e.stopPropagation()}>
-								<DeleteMailboxFolder
-									mailboxId={m.id}
-									identityPublicId={identityPublicId}
-									imapOp={!!identity.smtpAccountId}
-								/>
-							</Menu.Dropdown>
-						</Menu>
-					) : null}
+						{m.kind === "custom" && (
+							<Menu withinPortal position="right-start" offset={4}>
+								<Menu.Target>
+									<button
+										type="button"
+										onClick={(e) => e.stopPropagation()}
+										className={cn(
+											"rounded p-1 mt-1.25 transition",
+											"hover:bg-sidebar-accent/60",
+										)}
+										aria-label={`Actions for ${m.name ?? "folder"}`}
+									>
+										<MoreVertical className="h-4 w-4" />
+									</button>
+								</Menu.Target>
+
+								<Menu.Dropdown onClick={(e) => e.stopPropagation()}>
+									<DeleteMailboxFolder
+										mailboxId={m.id}
+										identityPublicId={identityPublicId}
+										imapOp={!!identity.smtpAccountId}
+									/>
+								</Menu.Dropdown>
+							</Menu>
+						)}
+					</div>
 				</div>
 
 				{open && hasChildren && (
-					<div className="min-w-0">
+					<div>
 						{m.children.map((child) => (
 							<Item
 								key={child.id}
 								m={child}
 								identityPublicId={identityPublicId}
 								identity={identity}
-								depth={depth + 1}
+								level={level + 1}
 							/>
 						))}
 					</div>
@@ -291,49 +325,30 @@ export default function IdentityMailboxesList({
 	};
 
 	return (
-		<div className="min-w-0 space-y-2 overflow-x-hidden px-2">
-			<Link
-				href="/dashboard/mail"
-				prefetch={false}
-				onClick={onComplete ? () => onComplete() : undefined}
-				className={cn(
-					"mb-3 flex min-w-0 items-center gap-2 rounded-md border border-transparent px-2 py-2 text-sm font-medium transition-colors",
-					"hover:border-sidebar-border hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
-					pathname === "/dashboard/mail" &&
-						"border-primary/20 bg-primary/10 text-sidebar-accent-foreground dark:border-primary/30 dark:bg-primary/20",
-				)}
-			>
-				<LayoutDashboard className="h-4 w-4 shrink-0 text-primary" />
-				<span className="min-w-0 truncate">Mailbox Overview</span>
-			</Link>
-			{identityMailboxes.map(({ identity, mailboxes }) => {
-				const tree = buildTree(mailboxes as MailboxEntity[]);
-				const identityUnread = tree.reduce(
-					(sum, mailbox) =>
-						sum + (mailbox.kind === "inbox" ? mailbox.unread : 0),
-					0,
-				);
+		<div className="space-y-2 px-2">
+			<div className={"my-2"}>
+				<Select placeholder="Pick value"
+				        size={"xs"}
+				        onChange={(publicId) => {
+							router.push(`/w/${workspacePublicId}/dashboard/mail/${publicId}/inbox`)
+						}}
+				        value={params.identityPublicId}
+				        data={identityMailboxes.map((id) => {
+							return {value: id.identity.publicId, label: id.identity.value}
+						})} />
+			</div>
 
-				const scheduledCounts = scheduledDrafts.filter(
-					(draft) => draft.identityId === identity.id,
-				).length;
-				const snoozedCounts = snoozedThreads.filter(
-					(snoozed) => snoozed.identityId === identity.id,
-				).length;
+			{identityMailboxes.map(({ identity, mailboxes }) => {
+				const tree = buildTree(mailboxes as MailboxEntity[], unreadCounts);
+
 				return (
-					<div key={identity.id} className="min-w-0">
-						<div className="mb-1 mt-3 grid min-w-0 grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-1 border-l-2 border-l-primary/30 px-2 text-xs font-semibold text-sidebar-foreground/60 dark:border-l-primary/50">
-							<span className="min-w-0 flex-1 truncate" title={identity.value}>
-								{identity.value}
-							</span>
-							{identityUnread > 0 ? (
-								<span className="shrink-0 rounded-full bg-primary/10 px-1.5 text-[10px] leading-5 text-sidebar-foreground tabular-nums dark:bg-primary/20">
-									{identityUnread > 99 ? "99+" : identityUnread}
-								</span>
-							) : null}
+					<div key={identity.id}>
+						<div className="px-1 mb-1 mt-2 text-xs font-semibold text-sidebar-foreground/60 flex items-center gap-1">
+							<span>{identity.value}</span>
 							<AddNewFolder mailboxes={mailboxes} identity={identity} />
 						</div>
-						<div className="min-w-0 space-y-1">
+
+						<div className="space-y-1">
 							{tree.map((m) => (
 								<Item
 									key={`${identity.id}:${m.id}`}
@@ -343,45 +358,16 @@ export default function IdentityMailboxesList({
 								/>
 							))}
 						</div>
-						{scheduledCounts > 0 && (
-							<Link
-								href={`/dashboard/mail/${params.identityPublicId}/scheduled`}
-								prefetch={false}
-								className={cn(
-									"my-2 flex w-full justify-start gap-1 rounded border border-transparent p-1.5 text-sm transition-colors hover:bg-sidebar-accent/80",
-									currentSlug === "scheduled" &&
-										"border-primary/20 bg-primary/10 text-sidebar-accent-foreground dark:border-primary/30 dark:bg-primary/20",
-								)}
-							>
-								<IconMailFast
-									size={22}
-									className="text-cyan-600 dark:text-cyan-300"
-								/>
-								<span className={"font-normal text-sm"}>
-									Scheduled ({scheduledCounts})
-								</span>
-							</Link>
-						)}
 
-						{snoozedCounts > 0 && (
-							<Link
-								href={`/dashboard/mail/${params.identityPublicId}/snoozed`}
-								prefetch={false}
-								className={cn(
-									"my-2 flex w-full items-center justify-start gap-1 rounded border border-transparent p-1.5 text-sm transition-colors hover:bg-sidebar-accent/80",
-									currentSlug === "snoozed" &&
-										"border-primary/20 bg-primary/10 text-sidebar-accent-foreground dark:border-primary/30 dark:bg-primary/20",
-								)}
-							>
-								<Clock4
-									size={16}
-									className="text-violet-600 dark:text-violet-300"
-								/>
-								<span className={"font-normal text-sm"}>
-									Snoozed ({snoozedThreads.length})
-								</span>
-							</Link>
-						)}
+						<Suspense fallback={null}>
+							<IdentityExtraCounts
+								identity={identity}
+								scheduledDraftsPromise={scheduledDraftsPromise}
+								snoozedThreadsPromise={snoozedThreadsPromise}
+								workspacePublicId={workspacePublicId}
+								currentSlug={currentSlug}
+							/>
+						</Suspense>
 					</div>
 				);
 			})}

@@ -1,18 +1,8 @@
 "use client";
 
-import { Divider } from "@mantine/core";
-import { useMediaQuery } from "@mantine/hooks";
-import type { PublicConfig } from "@schema";
-import type { UserResponse } from "@supabase/supabase-js";
-import { IconFrame } from "@tabler/icons-react";
-import { Calendar, Contact, HardDrive, Inbox, MailOpen } from "lucide-react";
-import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
 import * as React from "react";
-import KurrierLogo from "@/components/common/kurrier-logo";
-import ThemeColorPicker from "@/components/common/theme-color-picker";
-import ThemeSwitch from "@/components/common/theme-switch";
-import { NavUser } from "@/components/ui/dashboards/workspace/nav-user";
+import { Calendar, Contact, HardDrive, Inbox, MailOpen } from "lucide-react";
+
 import {
 	Sidebar,
 	SidebarContent,
@@ -25,99 +15,70 @@ import {
 	SidebarMenuItem,
 	useSidebar,
 } from "@/components/ui/sidebar";
-import type { FetchIdentityMailboxListResult } from "@/lib/actions/mailbox";
-import { cn } from "@/lib/utils";
+import { usePathname, useRouter } from "next/navigation";
+import KurrierLogo from "@/components/common/kurrier-logo";
+import ThemeColorPicker from "@/components/common/theme-color-picker";
+import ThemeSwitch from "@/components/common/theme-switch";
+import Link from "next/link";
+import { useMediaQuery } from "@mantine/hooks";
+import { Divider } from "@mantine/core";
+import { IconFrame } from "@tabler/icons-react";
 
 type UnifiedSidebarProps = React.ComponentProps<typeof Sidebar> & {
-	publicConfig: PublicConfig;
-	user: UserResponse["data"]["user"];
-	identityMailboxes: FetchIdentityMailboxListResult;
+	navUserContent: React.ReactNode;
 	sidebarSectionContent?: React.ReactNode;
 	sidebarTopContent?: React.ReactNode;
+	workspacePublicId?: string
 };
 
 export function AppSidebar({ ...props }: UnifiedSidebarProps) {
 	const {
-		publicConfig: _publicConfig,
-		user,
-		identityMailboxes: _identityMailboxes,
 		sidebarSectionContent,
 		sidebarTopContent,
+		workspacePublicId,
+		navUserContent,
 		...restProps
 	} = props;
 
 	const isMobile = useMediaQuery("(max-width: 768px)");
 
-	const allMailUrl = "/dashboard/mail";
-
 	const data = {
 		navMain: [
 			{
 				title: "All Mail",
-				url: allMailUrl,
+				url: `/w/${workspacePublicId}/dashboard/mail`,
 				icon: Inbox,
 				isActive: true,
 			},
 			{
 				title: "Contacts",
-				url: "/dashboard/contacts",
+				url: `/w/${workspacePublicId}/dashboard/contacts`,
 				icon: Contact,
 				isActive: true,
 			},
 			{
 				title: "Calendar",
-				url: "/dashboard/calendar",
+				url: `/w/${workspacePublicId}/dashboard/calendar`,
 				icon: Calendar,
 				isActive: true,
 			},
 			{
 				title: "Drive",
-				url: "/dashboard/drive",
+				url: `/w/${workspacePublicId}/dashboard/drive`,
 				icon: HardDrive,
 				isActive: true,
 			},
 			{
 				title: "Platform",
-				url: "/dashboard/platform/overview",
+				url: `/w/${workspacePublicId}/dashboard/platform/overview`,
 				icon: IconFrame,
 				isActive: false,
 			},
 		],
-		// navPlatform: [
-		// 	{
-		// 		title: "Overview",
-		// 		url: "/dashboard/platform/overview",
-		// 		icon: LayoutDashboard,
-		// 		items: [],
-		// 	},
-		// 	{
-		// 		title: "Providers",
-		// 		url: "/dashboard/platform/providers",
-		// 		icon: Plug,
-		// 		items: [],
-		// 	},
-		// 	{
-		// 		title: "Identities",
-		// 		url: "/dashboard/platform/identities",
-		// 		icon: Send,
-		// 		items: [],
-		// 	},
-		// 	{
-		// 		title: "Sync Services",
-		// 		url: "/dashboard/platform/sync-services",
-		// 		icon: FolderSync,
-		// 		items: [],
-		// 	},
-		// 	{
-		// 		title: "API Keys",
-		// 		url: "/dashboard/platform/api-keys",
-		// 		icon: Key,
-		// 		items: [],
-		// 	},
-		// ],
 	};
 
 	const pathName = usePathname();
+	const isOnMail = pathName?.includes("/mail");
 	const isOnPlatform = pathName?.includes("/platform");
 	const isOnContacts = pathName?.includes("/contacts");
 	const isOnCalendar = pathName?.includes("/calendar");
@@ -184,7 +145,7 @@ export function AppSidebar({ ...props }: UnifiedSidebarProps) {
 				data.navMain.find((i) => i.url.includes("/mail")) ?? data.navMain[0],
 			);
 		}
-	}, [section, data.navMain]);
+	}, [section, pathName, data.navMain]);
 
 	const { setOpen, toggleSidebar } = useSidebar();
 	const router = useRouter();
@@ -192,28 +153,22 @@ export function AppSidebar({ ...props }: UnifiedSidebarProps) {
 	return (
 		<Sidebar
 			collapsible="icon"
-			{...restProps}
-			style={
-				{
-					"--sidebar-width": "18rem",
-					...restProps.style,
-				} as React.CSSProperties
-			}
 			className="overflow-hidden *:data-[sidebar=sidebar]:flex-row"
+			{...restProps}
 		>
 			{/* This is the first sidebar */}
 			{/* We disable collapsible and adjust width to icon. */}
 			{/* This will make the sidebar appear as icons. */}
 			<Sidebar
 				collapsible="none"
-				className="w-[calc(var(--sidebar-width-icon)+1px)]! border-r bg-sidebar"
+				className="w-[calc(var(--sidebar-width-icon)+1px)]! border-r"
 			>
 				<SidebarHeader>
 					<SidebarMenu>
 						<SidebarMenuItem>
 							<SidebarMenuButton size="lg" asChild className="md:h-8 md:p-0">
-								<Link href={"/dashboard/platform/overview"}>
-									<div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-sm dark:bg-primary dark:text-primary-foreground">
+								<Link href={`/w/${workspacePublicId}/dashboard/platform/overview`}>
+									<div className="bg-sidebar-primary text-sidebar-primary-foreground flex aspect-square size-8 items-center justify-center rounded-lg">
 										<MailOpen className="size-4" />
 									</div>
 									<div className="grid flex-1 text-left text-sm leading-tight">
@@ -248,19 +203,12 @@ export function AppSidebar({ ...props }: UnifiedSidebarProps) {
 												router.push(item.url);
 											}}
 											isActive={activeItem?.title === item.title}
-											className={cn(
-												"relative px-2.5 transition-colors md:px-2",
-												activeItem?.title === item.title &&
-													"bg-primary/10 text-sidebar-accent-foreground dark:bg-primary/20",
-											)}
+											className={"px-2.5 md:px-2"}
 										>
-											{item.title === activeItem?.title ? (
-												<span className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-primary" />
-											) : null}
 											<item.icon
 												className={
 													item.title === activeItem?.title
-														? "text-primary dark:text-primary"
+														? "text-brand dark:text-white"
 														: ""
 												}
 											/>
@@ -300,14 +248,14 @@ export function AppSidebar({ ...props }: UnifiedSidebarProps) {
 					</div>
 				</SidebarContent>
 				<SidebarFooter>
-					<NavUser user={user} />
+					{navUserContent}
 				</SidebarFooter>
 			</Sidebar>
 
 			{/* This is the second sidebar */}
 			{/* We disable collapsible and let it fill remaining space */}
 
-			<Sidebar collapsible="none" className="hidden min-w-0 flex-1 md:flex">
+			<Sidebar collapsible="none" className="hidden flex-1 md:flex">
 				<SidebarHeader className="gap-3.5 border-b p-4">
 					<div className="text-left font-sans flex items-center gap-1">
 						<KurrierLogo size={36} />

@@ -1,19 +1,19 @@
-import { base64ToBlob } from "@common";
-import { db, identities, mailboxes } from "@db";
-import { EmailSendSchema } from "@schema";
-import { and, eq } from "drizzle-orm";
 import { createError, defineEventHandler } from "h3";
-import { extension } from "mime-types";
+import {EmailSendSchema, getServerEnv} from "@schema";
+import { db, mailboxes } from "@db";
+import { and, eq } from "drizzle-orm";
+import { getRedis } from "../../../../../lib/get-redis";
+import { s3 } from "../../../../../lib/create-s3-client";
 import {
 	apiSuccess,
-	validateApiKey,
+	validateApiKey, validateIdentityOwnership,
 	validateJSONBody,
 } from "../../../../../lib/api-helpers";
-import { createSupabaseServiceClient } from "../../../../../lib/create-client-ssr";
-import { getRedis } from "../../../../../lib/get-redis";
+import { extension } from "mime-types";
+import {PutObjectCommand} from "@aws-sdk/client-s3";
 
 export default defineEventHandler(async (event) => {
-	const { ownerId } = await validateApiKey(event, ["emails:send"]);
+	const { ownerId } = await validateApiKey(event);
 	const { json } = await validateJSONBody(event);
 
 	const parsed = EmailSendSchema.safeParse(json);
@@ -33,13 +33,8 @@ export default defineEventHandler(async (event) => {
 	}
 
 	const data = parsed.data;
+	const identity = await validateIdentityOwnership({identityId: data.identityId, ownerId: ownerId});
 	const id = crypto.randomUUID();
-	const [identity] = await db
-		.select()
-		.from(identities)
-		.where(
-			and(eq(identities.id, data.identityId), eq(identities.ownerId, ownerId)),
-		);
 	if (!identity) {
 		throw createError({
 			statusCode: 400,
@@ -53,7 +48,6 @@ export default defineEventHandler(async (event) => {
 		.where(
 			and(
 				eq(mailboxes.identityId, data.identityId),
-				eq(mailboxes.ownerId, ownerId),
 				eq(mailboxes.slug, "sent"),
 			),
 		);
@@ -66,33 +60,41 @@ export default defineEventHandler(async (event) => {
 	}
 
 	const payload = {
+		...data,
 		newMessageId: id,
 		messageMailboxId: "",
 		sentMailboxId: String(sentMailbox.id),
 		mailboxId: String(sentMailbox.id),
-		mode: "compose",
-		...data,
+		mode: "compose"
 	} as any;
 
-	const supabase = await createSupabaseServiceClient();
+	const { S3_BUCKET } = getServerEnv();
+
 	const attachments = [];
+
 	for (const file of data?.attachments || []) {
-		const path = `private/${identity.ownerId}/${payload.newMessageId}/${crypto.randomUUID()}.${extension(file.contentType)}`;
-		const blob = base64ToBlob(file.content, file.contentType);
+		const ext = extension(file.contentType) || "dat";
+		const path = `private/${identity.ownerId}/${payload.newMessageId}/${crypto.randomUUID()}.${ext}`;
 
-		const { error: e } = await supabase.storage
-			.from("attachments")
-			.upload(path, blob);
+		const buffer = Buffer.from(file.content, "base64");
 
-		if (!e) {
-			attachments.push({
-				path,
-				messageId: payload.newMessageId,
-				bucketId: "attachments",
-				filenameOriginal: file.filename,
-				contentType: file.contentType,
-			});
-		}
+		await s3.send(
+			new PutObjectCommand({
+				Bucket: S3_BUCKET,
+				Key: path,
+				Body: buffer,
+				ContentType: file.contentType,
+			}),
+		);
+
+		attachments.push({
+			path,
+			messageId: payload.newMessageId,
+			bucketId: S3_BUCKET,
+			filenameOriginal: file.filename,
+			contentType: file.contentType,
+			sizeBytes: buffer.length,
+		});
 	}
 
 	payload.attachments = JSON.stringify(attachments);

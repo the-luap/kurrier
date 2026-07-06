@@ -1,8 +1,8 @@
-import { timingSafeEqual } from "node:crypto";
-import { apiKeys, db, getSecretAdmin, secretsMeta } from "@db";
-import { and, eq } from "drizzle-orm";
 import type { H3Event } from "h3";
 import { createError, readRawBody } from "h3";
+import { apiKeys, db, getSecretAdmin, identities, secretsMeta } from "@db";
+import { and, eq } from "drizzle-orm";
+import crypto from "node:crypto";
 
 export function apiSuccess(data: any = null) {
 	return {
@@ -47,22 +47,12 @@ export async function validateJSONBody(event: H3Event) {
 }
 
 function safeEqual(a: string, b: string) {
-	const left = Buffer.from(a);
-	const right = Buffer.from(b);
-	return left.length === right.length && timingSafeEqual(left, right);
-}
+	const ab = Buffer.from(a);
+	const bb = Buffer.from(b);
 
-function readStoredApiKey(secret: unknown) {
-	const decrypted = (secret as { vault?: { decrypted_secret?: string } })?.vault
-		?.decrypted_secret;
-	if (!decrypted) return null;
+	if (ab.length !== bb.length) return false;
 
-	try {
-		const parsed = JSON.parse(decrypted) as { rawKey?: string };
-		return parsed.rawKey ?? null;
-	} catch {
-		return decrypted;
-	}
+	return crypto.timingSafeEqual(ab, bb);
 }
 
 export async function validateApiKey(
@@ -89,7 +79,7 @@ export async function validateApiKey(
 	}
 
 	const prefix = parts[0];
-	const rest = parts[1] ?? "";
+	const rest = parts.slice(1).join(".");
 	const last4 = rest.slice(-4);
 
 	if (!prefix || last4.length !== 4) {
@@ -99,16 +89,16 @@ export async function validateApiKey(
 		});
 	}
 
-	const rows = await db
+	const [key] = await db
 		.select()
 		.from(apiKeys)
-		.where(and(eq(apiKeys.keyPrefix, prefix), eq(apiKeys.keyLast4, last4)));
+		.where(and(eq(apiKeys.keyPrefix, prefix), eq(apiKeys.keyLast4, last4)))
+		.limit(1);
 
-	const key = rows[0];
 	if (!key) {
 		throw createError({
 			statusCode: 401,
-			statusMessage: "API key not found",
+			statusMessage: "Invalid API key",
 		});
 	}
 
@@ -122,22 +112,18 @@ export async function validateApiKey(
 	const [secretMeta] = await db
 		.select()
 		.from(secretsMeta)
-		.where(eq(secretsMeta.id, key.secretId));
+		.where(eq(secretsMeta.id, key.secretId))
+		.limit(1);
 
-	let actualSecret = null;
-
-	if (secretMeta) {
-		actualSecret = await getSecretAdmin(secretMeta.id);
-		if (!actualSecret) {
-			throw createError({
-				statusCode: 401,
-				statusMessage: "API key secret not found",
-			});
-		}
+	if (!secretMeta) {
+		throw createError({
+			statusCode: 401,
+			statusMessage: "API key secret not found",
+		});
 	}
 
-	const storedKey = readStoredApiKey(actualSecret);
-	if (!storedKey || !safeEqual(storedKey, token)) {
+	const actualSecret = await getSecretAdmin(secretMeta.id);
+	if (!actualSecret?.vault || !safeEqual(String(actualSecret.vault), token)) {
 		throw createError({
 			statusCode: 401,
 			statusMessage: "Invalid API key",
@@ -157,7 +143,32 @@ export async function validateApiKey(
 
 	return {
 		apiKey: key,
-		secret: actualSecret,
+		secret: actualSecret.vault,
 		ownerId: key.ownerId,
 	};
+}
+
+
+export async function validateIdentityOwnership(opts: {
+	identityId: string;
+	ownerId: string;
+}) {
+	const [identity] = await db
+		.select()
+		.from(identities)
+		.where(
+			and(
+				eq(identities.id, opts.identityId),
+				eq(identities.ownerId, opts.ownerId),
+			),
+		)
+		.limit(1);
+
+	if (!identity) {
+		throw createError({
+			statusCode: 403,
+			statusMessage: "Identity not found or access denied",
+		});
+	}
+	return identity;
 }

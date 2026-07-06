@@ -1,9 +1,9 @@
 # -----------------------------
 # Build stage
 # -----------------------------
-FROM node:20-alpine AS build
+FROM node:22-alpine AS build
 WORKDIR /repo
-RUN corepack enable
+RUN corepack enable && corepack prepare pnpm@10.18.3 --activate
 
 # Monorepo basics
 COPY pnpm-lock.yaml package.json pnpm-workspace.yaml ./
@@ -38,17 +38,19 @@ ARG TYPESENSE_HOST=placeholder
 ARG SEARCH_REBUILD_ON_BOOT=false
 ARG WORKER_URL=http://worker
 ARG API_URL=http://kong:8000
-ARG API_PUBLIC_URL=http://kong:8000
-ARG ANON_KEY=placeholder
-ARG WEB_URL=http://localhost:3000
-ARG DOCS_URL=http://localhost:3002
 ARG DAV_URL=http://dav:80
-ARG DISABLE_SIGNUP=false
-ARG INBOUND_WEBHOOK_SECRET=placeholder
+ARG JWT_SECRET=placeholder
+ARG APP_SECRET_ENCRYPTION_KEY=placeholder
+ARG S3_REGION=placeholder
+ARG S3_BUCKET=placeholder
+ARG S3_ENDPOINT=placeholder
+ARG S3_ACCESS_KEY=placeholder
+ARG S3_SECRET_KEY=placeholder
+ARG S3_FORCE_PATH_STYLE=placeholder
 
 ENV DATABASE_URL=$DATABASE_URL
 ENV DATABASE_RLS_URL=$DATABASE_RLS_URL
-ENV SERVICE_ROLE_KEY=$SERVICE_ROLE_KEY
+ENV SERVICE_ROLE_KEY=$SUPABASE_SERVICE_ROLE_KEY
 ENV REDIS_PASSWORD=$REDIS_PASSWORD
 ENV REDIS_HOST=$REDIS_HOST
 ENV REDIS_PORT=$REDIS_PORT
@@ -59,13 +61,15 @@ ENV TYPESENSE_HOST=$TYPESENSE_HOST
 ENV SEARCH_REBUILD_ON_BOOT=$SEARCH_REBUILD_ON_BOOT
 ENV WORKER_URL=$WORKER_URL
 ENV API_URL=$API_URL
-ENV API_PUBLIC_URL=$API_PUBLIC_URL
-ENV ANON_KEY=$ANON_KEY
-ENV WEB_URL=$WEB_URL
-ENV DOCS_URL=$DOCS_URL
 ENV DAV_URL=$DAV_URL
-ENV DISABLE_SIGNUP=$DISABLE_SIGNUP
-ENV INBOUND_WEBHOOK_SECRET=$INBOUND_WEBHOOK_SECRET
+ENV JWT_SECRET=$JWT_SECRET
+ENV APP_SECRET_ENCRYPTION_KEY=$APP_SECRET_ENCRYPTION_KEY
+ENV S3_REGION=$S3_REGION
+ENV S3_BUCKET=$S3_BUCKET
+ENV S3_ENDPOINT=$S3_ENDPOINT
+ENV S3_ACCESS_KEY=$S3_ACCESS_KEY
+ENV S3_SECRET_KEY=$S3_SECRET_KEY
+ENV S3_FORCE_PATH_STYLE=$S3_FORCE_PATH_STYLE
 # ---------------------------------------------
 
 RUN pnpm run build
@@ -74,7 +78,7 @@ RUN pnpm run build
 # -----------------------------
 # Runtime stage (standalone)
 # -----------------------------
-FROM node:20-alpine
+FROM node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production
 ENV HOST=0.0.0.0

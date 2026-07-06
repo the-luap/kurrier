@@ -1,22 +1,17 @@
 "use client";
 
-import { ActionIcon } from "@mantine/core";
-import { useMediaQuery } from "@mantine/hooks";
-import type { PublicConfig } from "@schema";
-import { MailPlus, Minus, PencilLine, X } from "lucide-react";
-import { useParams } from "next/navigation";
-import type React from "react";
-import { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { Minus, X, MailPlus, PencilLine } from "lucide-react";
 import EmailEditor, {
-	type EmailEditorHandle,
+	EmailEditorHandle,
 } from "@/components/mailbox/default/editor/email-editor";
+import { PublicConfig } from "@schema";
 import { Button } from "@/components/ui/button";
-import {
-	type FetchIdentityMailboxListResult,
-	fetchIdentityMailboxList,
-	fetchMailbox,
-} from "@/lib/actions/mailbox";
+import {FetchIdentityMailboxListResult, fetchMailbox} from "@/lib/actions/mailbox";
+import { useParams } from "next/navigation";
+import { useMediaQuery } from "@mantine/hooks";
+import { ActionIcon } from "@mantine/core";
 
 function Portal({ children }: { children: React.ReactNode }) {
 	const elRef = useRef<HTMLDivElement | null>(null);
@@ -38,99 +33,32 @@ function Portal({ children }: { children: React.ReactNode }) {
 
 export default function ComposeMail({
 	publicConfig,
-	identityMailboxes: initialIdentityMailboxes,
+	identityMailboxes
 }: {
 	publicConfig: PublicConfig;
-	identityMailboxes?: FetchIdentityMailboxListResult;
+	identityMailboxes: FetchIdentityMailboxListResult;
 }) {
 	const [open, setOpen] = useState(false);
 	const [appeared, setAppeared] = useState(false);
 	const [minimized, setMinimized] = useState(false);
 	const [expanded, setExpanded] = useState(false);
 	const [sentMailboxId, setSentMailboxId] = useState<string>();
-	const [signatureHtml, setSignatureHtml] = useState<string>("");
-	const [senderOptions, setSenderOptions] = useState<
-		{ value: string; label: string; email: string; signatureHtml: string }[]
-	>([]);
 	const [showEditorMode, setShowEditorMode] = useState<string>("compose");
 	const editorRef = useRef<EmailEditorHandle>(null);
 	const params = useParams();
 	const isMobile = useMediaQuery("(max-width: 768px)");
 
-	const findSentMailbox = (entry: FetchIdentityMailboxListResult[number]) => {
-		return (
-			entry.mailboxes.find((mailbox) => mailbox.kind === "sent") ??
-			entry.mailboxes.find((mailbox) => mailbox.slug === "sent") ??
-			entry.mailboxes.find((mailbox) => mailbox.slug === "gesendet") ??
-			entry.mailboxes.find((mailbox) =>
-				mailbox.name?.toLowerCase().includes("sent"),
-			) ??
-			entry.mailboxes.find((mailbox) =>
-				mailbox.name?.toLowerCase().includes("gesendet"),
-			)
+	const fetchSentMailbox = async () => {
+		const { activeMailbox } = await fetchMailbox(
+			String(params.identityPublicId),
+			"sent",
 		);
-	};
-
-	const loadSenders = async () => {
-		const entries = initialIdentityMailboxes?.length
-			? initialIdentityMailboxes
-			: await fetchIdentityMailboxList();
-		const options = entries
-			.map((entry) => {
-				const sentMailbox = findSentMailbox(entry);
-				if (!sentMailbox) return null;
-				const email = String(entry.identity.value ?? "");
-				return {
-					value: String(sentMailbox.id),
-					label: email,
-					email,
-					signatureHtml: entry.identity.signatureHtml ?? "",
-				};
-			})
-			.filter(Boolean) as {
-			value: string;
-			label: string;
-			email: string;
-			signatureHtml: string;
-		}[];
-
-		setSenderOptions(options);
-
-		const activeIdentityPublicId = params.identityPublicId
-			? String(params.identityPublicId)
-			: null;
-		const activeEntry = activeIdentityPublicId
-			? entries.find(
-					(entry) => entry.identity.publicId === activeIdentityPublicId,
-				)
-			: null;
-		const activeSentMailbox = activeEntry ? findSentMailbox(activeEntry) : null;
-
-		if (activeSentMailbox) {
-			setSentMailboxId(String(activeSentMailbox.id));
-			setSignatureHtml(activeEntry?.identity.signatureHtml ?? "");
-			return;
-		}
-
-		if (options[0]) {
-			setSentMailboxId(options[0].value);
-			setSignatureHtml(options[0].signatureHtml);
-			return;
-		}
-
-		if (activeIdentityPublicId) {
-			const { activeMailbox, identity } = await fetchMailbox(
-				activeIdentityPublicId,
-				"sent",
-			);
-			setSentMailboxId(String(activeMailbox.id));
-			setSignatureHtml(identity.signatureHtml ?? "");
-		}
+		setSentMailboxId(String(activeMailbox.id));
 	};
 
 	useEffect(() => {
 		if (!open) return;
-		loadSenders();
+		fetchSentMailbox();
 
 		const t = setTimeout(() => setAppeared(true), 16);
 		const prev = document.body.style.overflow;
@@ -150,7 +78,6 @@ export default function ComposeMail({
 		setOpen(true);
 		setMinimized(false);
 		setExpanded(false);
-		setSentMailboxId(undefined);
 	};
 
 	const handleClose = () => {
@@ -165,7 +92,7 @@ export default function ComposeMail({
 					<PencilLine size={16} />
 				</ActionIcon>
 			) : (
-				<Button size="lg" onClick={handleOpen}>
+				<Button size="lg" onClick={handleOpen} disabled={!params.identityPublicId}>
 					<MailPlus className="h-5 w-5" />
 					Compose
 				</Button>
@@ -209,22 +136,14 @@ export default function ComposeMail({
 							<div className="flex-1 min-h-0 overflow-auto px-0 pb-[env(safe-area-inset-bottom)]">
 								<EmailEditor
 									sentMailboxId={String(sentMailboxId)}
-									senderOptions={senderOptions}
-									onSentMailboxChange={(value) => {
-										setSentMailboxId(value);
-										setSignatureHtml(
-											senderOptions.find((option) => option.value === value)
-												?.signatureHtml ?? "",
-										);
-									}}
 									ref={editorRef}
 									publicConfig={publicConfig}
+									identityMailboxes={identityMailboxes}
 									message={null}
 									onReady={() =>
 										requestAnimationFrame(() => editorRef.current?.focus())
 									}
 									showEditorMode={showEditorMode}
-									signatureHtml={signatureHtml}
 									handleClose={handleClose}
 								/>
 							</div>
@@ -276,19 +195,11 @@ export default function ComposeMail({
 								<div className="min-h-0">
 									<EmailEditor
 										sentMailboxId={String(sentMailboxId)}
-										senderOptions={senderOptions}
-										onSentMailboxChange={(value) => {
-											setSentMailboxId(value);
-											setSignatureHtml(
-												senderOptions.find((option) => option.value === value)
-													?.signatureHtml ?? "",
-											);
-										}}
 										ref={editorRef}
 										publicConfig={publicConfig}
+										identityMailboxes={identityMailboxes}
 										message={null}
 										showEditorMode={showEditorMode}
-										signatureHtml={signatureHtml}
 										handleClose={handleClose}
 									/>
 								</div>

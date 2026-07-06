@@ -3,6 +3,8 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { PAGE_SIZE } from "@common/mail-client";
+import { GetObjectCommand } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import {
 	DraftMessageInsertSchema,
 	db,
@@ -47,6 +49,7 @@ import Typesense, { type Client } from "typesense";
 import { isSignedIn } from "@/lib/actions/auth";
 import { rlsClient } from "@/lib/actions/clients";
 import { getRedis } from "@/lib/actions/get-redis";
+import { s3 } from "@/lib/create-s3-client";
 import { withServerCache } from "@/lib/server-cache";
 import { toArray } from "@/lib/utils";
 
@@ -125,6 +128,8 @@ export const fetchMailbox = cache(
 		};
 	},
 );
+
+export type FetchMailboxResult = Awaited<ReturnType<typeof fetchMailbox>>;
 
 const fetchIdentityMailboxListUncached = async () => {
 	const rls = await rlsClient();
@@ -357,6 +362,33 @@ export const fetchMessageAttachments = cache(async (messageId: string) => {
 	return { attachments: attachmentsList };
 });
 
+export async function getSignedUrlsForMessage(messageId: string) {
+	const { S3_BUCKET } = getServerEnv();
+	const rls = await rlsClient();
+	const attachments = await rls((tx) =>
+		tx
+			.select()
+			.from(messageAttachments)
+			.where(eq(messageAttachments.messageId, messageId)),
+	);
+	const results = await Promise.all(
+		attachments.map(async (attachment) => {
+			const command = new GetObjectCommand({
+				Bucket: S3_BUCKET!,
+				Key: attachment.path!,
+			});
+
+			const url = await getSignedUrl(s3, command, { expiresIn: 300 });
+
+			return {
+				...attachment,
+				signedUrl: url,
+			};
+		}),
+	);
+	return results;
+}
+
 export const revalidateMailbox = async (path: string) => {
 	revalidatePath(path);
 };
@@ -419,7 +451,10 @@ export async function generateAiReplySuggestion(
 		};
 	}
 
-	const serverConfig = getServerEnv();
+	const serverConfig = getServerEnv() as ReturnType<typeof getServerEnv> & {
+		OLLAMA_BASE_URL?: string;
+		OLLAMA_MODEL?: string;
+	};
 	const provider: AiProvider = isAiProvider(settings?.provider || "")
 		? (settings.provider as AiProvider)
 		: "ollama";
@@ -744,25 +779,36 @@ export const getDeltaFetchStatus = async ({ jobId }: { jobId: string }) => {
 
 export const initSearch = async (
 	query: string,
-	ownerId: string,
+	workspacePublicId: string,
+	identityPublicId: string,
+	mailboxSlug: string,
 	hasAttachment: boolean,
 	onlyUnread: boolean,
 	starred: boolean,
 	page: number,
 ): Promise<SearchThreadsResponse> => {
+	const q = query.trim();
+	if (!q) {
+		return { items: [], totalThreads: 0, totalMessages: 0 };
+	}
+
 	const client = getTypeSenseClient();
 
-	const filters = [`ownerId:=${JSON.stringify(ownerId)}`];
+	const filters = [
+		`workspacePublicId:=${JSON.stringify(workspacePublicId)}`,
+		`identityPublicId:=${JSON.stringify(identityPublicId)}`,
+		`mailboxSlug:=${JSON.stringify(mailboxSlug)}`,
+	];
 	if (hasAttachment) filters.push("hasAttachment:=1");
 	if (onlyUnread) filters.push("unread:=1");
-	if (starred) filters.push("starred:=1"); // NEW
+	if (starred) filters.push("starred:=1");
 
 	const result = (await client
 		.collections("messages")
 		.documents()
 		.search({
-			q: query,
-			query_by: "subject,html,text,fromName,fromEmail,participants",
+			q,
+			query_by: "subject,html,text,snippet,fromName,fromEmail,participants",
 			filter_by: filters.join(" && "),
 			sort_by: "createdAt:desc",
 			group_by: "threadId",
@@ -800,11 +846,11 @@ export const initSearch = async (
 	};
 };
 
-export const backfillMailboxes = async (identityId: string) => {
+export const backfillMailboxes = async (identityId: string, workspaceId?: string) => {
 	const { smtpQueue, smtpEvents } = await getRedis();
 	const job = await smtpQueue.add(
 		"imap:backfill-discover",
-		{ identityId },
+		{ identityId, workspaceId },
 		{
 			jobId: `imap-backfill-discover-${identityId}`,
 			attempts: 3,

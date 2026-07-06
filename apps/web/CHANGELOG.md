@@ -1,5 +1,73 @@
 # web
 
+## 2.0.9
+
+### Patch Changes
+
+- [#480](https://github.com/kurrier-org/kurrier/pull/480) [`163600f`](https://github.com/kurrier-org/kurrier/commit/163600fae73ee7261049012ebbb5ff64786ae7ac) Thanks [@krokhale](https://github.com/krokhale)! - translations support
+
+## 2.0.8
+
+### Patch Changes
+
+- [#474](https://github.com/kurrier-org/kurrier/pull/474) [`36d2fd7`](https://github.com/kurrier-org/kurrier/commit/36d2fd761b129892a2e52fb34b5d5a568b27d3c8) Thanks [@krokhale](https://github.com/krokhale)! - fix unable to reply to bug
+
+## 2.0.7
+
+### Patch Changes
+
+- [#471](https://github.com/kurrier-org/kurrier/pull/471) [`50f0a99`](https://github.com/kurrier-org/kurrier/commit/50f0a99136826a2e7d65414a88d32d20d27601b0) Thanks [@krokhale](https://github.com/krokhale)! - Add storage and mailflow stats to platform overview
+
+## 2.0.6
+
+### Patch Changes
+
+- [#469](https://github.com/kurrier-org/kurrier/pull/469) [`260951a`](https://github.com/kurrier-org/kurrier/commit/260951a2148e52ef10f9f258f3f7e7af2ceed735) Thanks [@krokhale](https://github.com/krokhale)! - Refactor drive storage to use volume-scoped S3 prefixes
+
+## 2.0.5
+
+### Patch Changes
+
+- [#467](https://github.com/kurrier-org/kurrier/pull/467) [`2a9716e`](https://github.com/kurrier-org/kurrier/commit/2a9716e48de4a9aed72ca8f21a1cbd5dda0b74de) Thanks [@krokhale](https://github.com/krokhale)! - implement S3-backed cloud storage volumes
+
+## 2.0.4
+
+### Patch Changes
+
+- [#461](https://github.com/kurrier-org/kurrier/pull/461) [`c818d78`](https://github.com/kurrier-org/kurrier/commit/c818d786ee15723a6bfd94ed46c9c4a4de437f8f) Thanks [@krokhale](https://github.com/krokhale)! - Improve identity deletion cleanup flow
+
+## 2.0.3
+
+### Patch Changes
+
+- [#457](https://github.com/kurrier-org/kurrier/pull/457) [`95f7cc5`](https://github.com/kurrier-org/kurrier/commit/95f7cc56de52c1c91651ea96298302c5412fbb56) Thanks [@krokhale](https://github.com/krokhale)! - performance-enhancement-and-refactor-for-smtp-pipeline
+
+## 2.0.2
+
+### Patch Changes
+
+- [#452](https://github.com/kurrier-org/kurrier/pull/452) [`b374c4e`](https://github.com/kurrier-org/kurrier/commit/b374c4e4effcbcee9ad36a57ef59c3d25ac6f699) Thanks [@krokhale](https://github.com/krokhale)! - Add Google OIDC authentication
+
+- [`f510001`](https://github.com/kurrier-org/kurrier/commit/f510001c38de35ba047cf6319b0df6eb80fa295e) Thanks [@krokhale](https://github.com/krokhale)! - updated env vars
+
+## 2.0.1
+
+### Patch Changes
+
+- [#452](https://github.com/kurrier-org/kurrier/pull/452) [`6faea6d`](https://github.com/kurrier-org/kurrier/commit/6faea6d6fe553ab1108700a348b462460a01f22a) Thanks [@krokhale](https://github.com/krokhale)! - Add Google OIDC authentication
+
+## 2.0.0
+
+### Major Changes
+
+- [#449](https://github.com/kurrier-org/kurrier/pull/449) [`d039e87`](https://github.com/kurrier-org/kurrier/commit/d039e87a0e79fef4398875d0873231be897aa397) Thanks [@krokhale](https://github.com/krokhale)! - refactor: simplify platform architecture, routing, storage, and db setup
+
+## 1.0.0
+
+### Major Changes
+
+- [#449](https://github.com/kurrier-org/kurrier/pull/449) [`4a63387`](https://github.com/kurrier-org/kurrier/commit/4a63387eb93bf3dde9aeda194eb6a2cf0fed4cd5) Thanks [@krokhale](https://github.com/krokhale)! - refactor: simplify platform architecture, routing, storage, and db setup
+
 ## 0.2.3
 
 ### Patch Changes

@@ -2,6 +2,7 @@
 	"pages": [
 		"index",
 		"installation",
+		"oidc",
 		"contacts",
 		"calendars",
 		"getting-started",
@@ -10,6 +11,7 @@
 		"upgrading",
 		"contributing",
 		"consulting",
+		"faster",
 		"support"
 	]
 }

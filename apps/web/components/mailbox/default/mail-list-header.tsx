@@ -33,6 +33,7 @@ import { useDynamicContext } from "@/hooks/use-dynamic-context";
 import {
 	deleteForever,
 	deltaFetch,
+	type FetchIdentityMailboxListResult,
 	type FetchMailboxThreadsResult,
 	getDeltaFetchStatus,
 	markAsRead,
@@ -48,10 +49,12 @@ function MailListHeader({
 	mailboxSync,
 	publicConfig,
 	activeMailbox,
+	identityMailboxes,
 }: {
 	mailboxThreads: FetchMailboxThreadsResult;
 	publicConfig: PublicConfig;
 	activeMailbox: MailboxEntity;
+	identityMailboxes: FetchIdentityMailboxListResult;
 	mailboxSync?: MailboxSyncEntity;
 }) {
 	const { state, setState } = useDynamicContext<{
@@ -358,7 +361,7 @@ function MailListHeader({
 						</button>
 					</div>
 
-					{isMobile && <ComposeMail publicConfig={publicConfig} />}
+					{isMobile && <ComposeMail publicConfig={publicConfig} identityMailboxes={identityMailboxes} />}
 				</div>
 			</div>
 

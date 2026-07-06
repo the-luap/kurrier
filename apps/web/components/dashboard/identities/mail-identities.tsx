@@ -1,14 +1,9 @@
 "use client";
 
-import { ActionIcon, Button, CopyButton, Tooltip } from "@mantine/core";
-import { modals } from "@mantine/modals";
-import type { DnsRecord } from "@providers";
-import {
-	type FormState,
-	type IdentityStatus,
-	IdentityStatusMeta,
-} from "@schema";
-import { IconCheck, IconCopy, IconSend } from "@tabler/icons-react";
+import * as React from "react";
+import { Container } from "@/components/common/containers";
+import { Card, CardContent } from "@/components/ui/card";
+import {ActionIcon, Button, CopyButton, Tooltip} from "@mantine/core";
 import {
 	ArrowDownFromLine,
 	ArrowUpFromLine,
@@ -16,34 +11,40 @@ import {
 	CheckCircle,
 	Clock,
 	Eye,
-	Globe,
+	Globe, LoaderCircle,
 	Mail,
-	PencilLine,
 	Plus,
 	RefreshCw,
 	Trash2,
-	Verified,
+	Verified, XCircle,
 } from "lucide-react";
-import * as React from "react";
-import { useMemo, useState } from "react";
-import { toast } from "sonner";
-import { Container } from "@/components/common/containers";
-import AddDomainIdentityForm from "@/components/dashboard/identities/add-domain-identity-form";
+import { parseSecret } from "@/lib/utils";
+import { modals } from "@mantine/modals";
 import AddEmailIdentityForm from "@/components/dashboard/identities/add-email-identity-form";
-import EmailIdentityStatus from "@/components/dashboard/identities/email-identity-status";
-import IdentitySignatureForm from "@/components/dashboard/identities/identity-signature-form";
-import ProviderBadge from "@/components/dashboard/identities/provider-badge";
-import IsVerifiedStatus from "@/components/dashboard/providers/is-verified-status";
-import { Card, CardContent } from "@/components/ui/card";
 import {
 	deleteDomainIdentity,
 	deleteEmailIdentity,
-	type FetchDecryptedSecretsResult,
-	type FetchUserIdentitiesResult,
+	FetchDecryptedSecretsResult,
+	FetchUserIdentitiesResult,
 	testSendingEmail,
 	verifyDomainIdentity,
 } from "@/lib/actions/dashboard";
-import { parseSecret } from "@/lib/utils";
+import ProviderBadge from "@/components/dashboard/identities/provider-badge";
+import IsVerifiedStatus from "@/components/dashboard/providers/is-verified-status";
+import { IconCheck, IconCopy, IconSend } from "@tabler/icons-react";
+import { useMemo, useState } from "react";
+import { toast } from "sonner";
+import AddDomainIdentityForm from "@/components/dashboard/identities/add-domain-identity-form";
+import { FormState, IdentityStatus, IdentityStatusMeta } from "@schema";
+import EmailIdentityStatus from "@/components/dashboard/identities/email-identity-status";
+import { DnsRecord } from "@providers";
+import MarkDefaultDentity from "@/components/dashboard/identities/mark-default-dentity";
+import {WorkspaceEntity} from "@db";
+import {
+	FetchAdminWorkspaceIdentitiesResult,
+	FetchWorkspaceMembersResult
+} from "@/lib/actions/workspace";
+import AddVirtualEmailIdentityForm from "@/components/dashboard/identities/add-virtual-email-identity-form";
 
 function SectionHeader({
 	title,
@@ -81,11 +82,17 @@ export default function MailIdentities({
 	smtpAccounts,
 	providerAccounts,
 	providerOptions,
+	workspace,
+	workspaceMembers,
+	workspaceUserIdentities
 }: {
 	userIdentities: FetchUserIdentitiesResult;
 	smtpAccounts: FetchDecryptedSecretsResult;
 	providerAccounts: FetchDecryptedSecretsResult;
 	providerOptions: { label: string; value: string }[];
+	workspace: WorkspaceEntity;
+	workspaceMembers: FetchWorkspaceMembersResult;
+	workspaceUserIdentities: FetchAdminWorkspaceIdentitiesResult;
 }) {
 	const userEmailIdentities = useMemo(
 		() => userIdentities.filter((i) => i.identities.kind === "email"),
@@ -135,6 +142,34 @@ export default function MailIdentities({
 						providerOptions={providerOptions}
 						providerAccounts={providerAccounts}
 						userDomainIdentities={userDomainIdentities}
+						workspaceMembers={workspaceMembers}
+						userEmailIdentities={userEmailIdentities}
+						onCompleted={() => modals.close(openModalId)}
+					/>
+				</div>
+			),
+		});
+	};
+
+	const openAddVirtualEmailForm = async () => {
+		const openModalId = modals.open({
+			title: (
+				<div className="font-semibold text-brand-foreground">
+					Add Virtual Email Identity
+				</div>
+			),
+			closeOnEscape: false,
+			closeOnClickOutside: false,
+			size: "lg",
+			children: (
+				<div className="p-2">
+					<AddVirtualEmailIdentityForm
+						smtpAccounts={smtpAccounts}
+						providerOptions={providerOptions}
+						providerAccounts={providerAccounts}
+						userDomainIdentities={userDomainIdentities}
+						workspaceMembers={workspaceMembers}
+						userEmailIdentities={userEmailIdentities}
 						onCompleted={() => modals.close(openModalId)}
 					/>
 				</div>
@@ -166,54 +201,83 @@ export default function MailIdentities({
 		});
 	};
 
-	const openSignatureForm = async (
-		userIdentity: FetchUserIdentitiesResult[number],
-	) => {
-		const openModalId = modals.open({
-			title: (
-				<div className="font-semibold text-brand-foreground">
-					Signature for <strong>{userIdentity.identities.value}</strong>
-				</div>
-			),
-			closeOnEscape: false,
-			closeOnClickOutside: false,
-			size: "lg",
-			children: (
-				<div className="p-2">
-					<IdentitySignatureForm
-						identityId={userIdentity.identities.id}
-						identityValue={userIdentity.identities.value}
-						defaultSignature={userIdentity.identities.signatureHtml}
-						onCompleted={() => modals.close(openModalId)}
-					/>
-				</div>
-			),
-		});
-	};
 
 	const confirmDeleteIdentity = async (
 		userIdentity: FetchUserIdentitiesResult[number],
 	) => {
 		modals.openConfirmModal({
-			title: (
-				<div className={"font-semibold text-brand-foreground"}>
-					Delete Identity
-				</div>
-			),
+			title: <div className="font-semibold text-brand-foreground">Delete Identity</div>,
 			centered: true,
 			children: (
-				<div className="text-sm ">
-					Are you sure you want to delete <b>{userIdentity.identities.value}</b>
-					? This will remove the identity permanently and unlink any associated
-					secrets.
+				<div className="text-sm">
+					Are you sure you want to delete <b>{userIdentity.identities.value}</b>? This will remove the identity permanently and unlink any associated secrets.
 				</div>
 			),
 			labels: { confirm: "Delete", cancel: "Cancel" },
 			confirmProps: { color: "red" },
 			onConfirm: async () => {
-				const { success, message } = await deleteEmailIdentity(userIdentity);
-				if (success) {
-					toast.success(message);
+				const modalId = modals.open({
+					title: <div className="font-semibold text-brand-foreground">Deleting identity</div>,
+					centered: true,
+					closeOnEscape: false,
+					closeOnClickOutside: false,
+					withCloseButton: false,
+					children: (
+						<div className={"my-4"}>
+							<div className={"my-4"}>
+								Deleting <b>{userIdentity.identities.value}</b>. This may take a moment.
+							</div>
+							<div className="flex justify-center py-4">
+								<LoaderCircle className="h-8 w-8 animate-spin text-brand dark:text-brand-foreground" />
+							</div>
+						</div>
+					),
+				});
+
+				const res = await deleteEmailIdentity(userIdentity);
+
+				if (res.success) {
+					toast.success(res.message);
+
+					modals.updateModal({
+						modalId,
+						title: <div className="font-semibold text-brand-foreground">Identity deleted</div>,
+						closeOnEscape: true,
+						closeOnClickOutside: true,
+						withCloseButton: true,
+						children: (
+							<div className={"my-4"}>
+								<div className={"my-4"}>{res.message}</div>
+								<div className={"my-4 flex justify-center"}>
+									<CheckCircle className="h-8 w-8 text-teal-600" />
+								</div>
+								<Button fullWidth onClick={() => modals.close(modalId)}>
+									Close
+								</Button>
+							</div>
+						),
+					});
+				} else {
+					toast.error("Failed to delete identity");
+
+					modals.updateModal({
+						modalId,
+						title: <div className="font-semibold text-brand-foreground">Delete failed</div>,
+						closeOnEscape: true,
+						closeOnClickOutside: true,
+						withCloseButton: true,
+						children: (
+							<div className={"my-4"}>
+								<div className={"my-4"}>{res.message || "Failed to delete identity."}</div>
+								<div className={"my-4 flex justify-center"}>
+									<XCircle className="h-8 w-8 text-red-600" />
+								</div>
+								<Button fullWidth onClick={() => modals.close(modalId)}>
+									Close
+								</Button>
+							</div>
+						),
+					});
 				}
 			},
 		});
@@ -224,13 +288,13 @@ export default function MailIdentities({
 	) => {
 		modals.openConfirmModal({
 			title: (
-				<div className={"font-semibold text-brand-foreground"}>
+				<div className="font-semibold text-brand-foreground">
 					Delete Identity
 				</div>
 			),
 			centered: true,
 			children: (
-				<div className="text-sm ">
+				<div className="text-sm">
 					Are you sure you want to delete{" "}
 					<b>{userDomainIdentity.identities.value}</b>? This will remove the
 					identity permanently and unlink any associated secrets.
@@ -239,21 +303,100 @@ export default function MailIdentities({
 			labels: { confirm: "Delete", cancel: "Cancel" },
 			confirmProps: { color: "red" },
 			onConfirm: async () => {
-				const providerAccount = providerAccounts.find((acc) => {
-					return (
-						acc.linkRow.providerId === userDomainIdentity.identities.providerId
-					);
+				const modalId = modals.open({
+					title: (
+						<div className="font-semibold text-brand-foreground">
+							Deleting domain identity...
+						</div>
+					),
+					centered: true,
+					closeOnEscape: false,
+					closeOnClickOutside: false,
+					withCloseButton: false,
+					children: (
+						<div className="space-y-4">
+							<p className="text-sm text-muted-foreground">
+								Deleting{" "}
+								<span className="font-semibold text-foreground">
+								{userDomainIdentity.identities.value}
+							</span>
+								. This may take a moment.
+							</p>
+
+							<div className="flex justify-center py-4">
+								<div className="h-8 w-8 animate-spin rounded-full border-2 border-muted-foreground/30 border-t-brand-foreground" />
+							</div>
+						</div>
+					),
 				});
-				const { error } = await deleteDomainIdentity(
-					userDomainIdentity,
-					providerAccount,
-				);
-				if (error) {
-					toast.error("Failed to delete domain identity", {
-						description: error,
+
+				const providerAccount = providerAccounts.find((acc) => {
+					return acc.linkRow.providerId === userDomainIdentity.identities.providerId;
+				});
+
+				const res = await deleteDomainIdentity(userDomainIdentity, providerAccount);
+
+				if (res.success) {
+					toast.success("Domain identity deleted");
+
+					modals.updateModal({
+						modalId,
+						title: (
+							<div className="font-semibold text-brand-foreground">
+								Domain identity deleted
+							</div>
+						),
+						closeOnEscape: true,
+						closeOnClickOutside: true,
+						withCloseButton: true,
+						children: (
+							<div className="space-y-4">
+								<p className="text-sm text-muted-foreground">
+								<span className="font-semibold text-foreground">
+									{userDomainIdentity.identities.value}
+								</span>{" "}
+									was deleted successfully.
+								</p>
+
+								<div className="flex justify-center py-4">
+									<CheckCircle className="h-8 w-8 text-teal-600" />
+								</div>
+
+								<Button fullWidth onClick={() => modals.close(modalId)}>
+									Close
+								</Button>
+							</div>
+						),
 					});
 				} else {
-					toast.success("Domain identity deleted");
+					toast.error("Failed to delete domain identity");
+
+					modals.updateModal({
+						modalId,
+						title: (
+							<div className="font-semibold text-brand-foreground">
+								Delete failed
+							</div>
+						),
+						closeOnEscape: true,
+						closeOnClickOutside: true,
+						withCloseButton: true,
+						children: (
+							<div className="space-y-4">
+								<p className="text-sm text-red-600">
+									{"Failed to delete domain identity."}
+								</p>
+
+								<div className="flex justify-center py-4">
+									<BadgeMinus className="h-8 w-8 text-red-600" />
+								</div>
+
+								<Button fullWidth onClick={() => modals.close(modalId)}>
+									Close
+								</Button>
+							</div>
+						),
+					});
 				}
 			},
 		});
@@ -568,16 +711,28 @@ export default function MailIdentities({
 							title="Email Addresses"
 							count={userEmailIdentities.length}
 							action={
-								<Button
-									onClick={openAddEmailForm}
-									variant="outline"
-									size="sm"
-									className="gap-2"
-									aria-label="Add email"
-								>
-									<Plus className="size-4" />
-									Add Email
-								</Button>
+								<div className={"flex gap-4"}>
+									<Button
+										onClick={openAddEmailForm}
+										variant="outline"
+										size="sm"
+										className="gap-2"
+										aria-label="Add email"
+									>
+										<Plus className="size-4" />
+										Add Email
+									</Button>
+									{/*<Button*/}
+									{/*	onClick={openAddVirtualEmailForm}*/}
+									{/*	variant="outline"*/}
+									{/*	size="sm"*/}
+									{/*	className="gap-2"*/}
+									{/*	aria-label="Add virtual email"*/}
+									{/*>*/}
+									{/*	<Plus className="size-4" />*/}
+									{/*	Add Virtual Email*/}
+									{/*</Button>*/}
+								</div>
 							}
 						/>
 
@@ -616,6 +771,7 @@ export default function MailIdentities({
 												<div className="min-w-0">
 													<div className="truncate font-semibold text-brand-foreground">
 														{userIdentity.identities.value}
+														<MarkDefaultDentity workspaceUserIdentities={workspaceUserIdentities} workspace={workspace} userIdentity={userIdentity.identities} />
 													</div>
 
 													<div className="mt-2 flex flex-wrap items-center gap-2">
@@ -637,21 +793,24 @@ export default function MailIdentities({
 															/>
 														)}
 													</div>
+													<div className="flex flex-wrap items-center gap-2 text-xxs mt-2 text-foreground dark:text-muted-foreground">
+														ID: <code>{userIdentity.identities.id}</code>
+													</div>
 												</div>
 											</div>
 										</div>
 
 										<div className="flex gap-2 sm:gap-3 w-full sm:w-auto">
-											<Button
-												leftSection={<IconSend size={16} />}
-												size="xs"
-												className="flex-1 sm:flex-none"
-												href={`/dashboard/mail/${userIdentity.identities.publicId}/inbox`}
-												target={"_blank"}
-												component="a"
-											>
-												Mailbox
-											</Button>
+											{/*<Button*/}
+											{/*	leftSection={<IconSend size={16} />}*/}
+											{/*	size="xs"*/}
+											{/*	className="flex-1 sm:flex-none"*/}
+											{/*	href={`/dashboard/mail/${userIdentity.identities.publicId}/inbox`}*/}
+											{/*	target={"_blank"}*/}
+											{/*	component="a"*/}
+											{/*>*/}
+											{/*	Mailbox*/}
+											{/*</Button>*/}
 											<Button
 												leftSection={<IconSend size={16} />}
 												size="xs"
@@ -660,20 +819,6 @@ export default function MailIdentities({
 												onClick={() => initTestEmail(userIdentity, decrypted)}
 											>
 												Send Test Email
-											</Button>
-
-											<Button
-												leftSection={<PencilLine size={16} />}
-												size="xs"
-												variant={
-													userIdentity.identities.signatureHtml
-														? "light"
-														: "outline"
-												}
-												className="flex-1 sm:flex-none"
-												onClick={() => openSignatureForm(userIdentity)}
-											>
-												Signature
 											</Button>
 
 											<ActionIcon

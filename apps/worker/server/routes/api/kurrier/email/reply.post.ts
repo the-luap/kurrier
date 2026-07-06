@@ -1,15 +1,16 @@
-import { base64ToBlob } from "@common";
 import { db, identities, mailboxes, messages } from "@db";
+import { PutObjectCommand } from "@aws-sdk/client-s3";
 import { and, desc, eq } from "drizzle-orm";
 import { createError, defineEventHandler } from "h3";
 import { extension } from "mime-types";
 import { z } from "zod";
+import { getServerEnv } from "@schema";
 import {
 	apiSuccess,
 	validateApiKey,
 	validateJSONBody,
 } from "../../../../../lib/api-helpers";
-import { createSupabaseServiceClient } from "../../../../../lib/create-client-ssr";
+import { s3 } from "../../../../../lib/create-s3-client";
 import { getRedis } from "../../../../../lib/get-redis";
 
 const emailAddress = z.string().trim().email();
@@ -171,25 +172,30 @@ export default defineEventHandler(async (event) => {
 		html: data.html,
 	} as Record<string, unknown>;
 
-	const supabase = await createSupabaseServiceClient();
+	const { S3_BUCKET } = getServerEnv();
 	const attachments = [];
 	for (const file of data.attachments || []) {
-		const path = `private/${ownerId}/${newMessageId}/${crypto.randomUUID()}.${extension(file.contentType)}`;
-		const blob = base64ToBlob(file.content, file.contentType);
+		const ext = extension(file.contentType) || "dat";
+		const path = `private/${ownerId}/${newMessageId}/${crypto.randomUUID()}.${ext}`;
+		const buffer = Buffer.from(file.content, "base64");
 
-		const { error } = await supabase.storage
-			.from("attachments")
-			.upload(path, blob);
+		await s3.send(
+			new PutObjectCommand({
+				Bucket: S3_BUCKET,
+				Key: path,
+				Body: buffer,
+				ContentType: file.contentType,
+			}),
+		);
 
-		if (!error) {
-			attachments.push({
-				path,
-				messageId: newMessageId,
-				bucketId: "attachments",
-				filenameOriginal: file.filename,
-				contentType: file.contentType,
-			});
-		}
+		attachments.push({
+			path,
+			messageId: newMessageId,
+			bucketId: S3_BUCKET,
+			filenameOriginal: file.filename,
+			contentType: file.contentType,
+			sizeBytes: buffer.length,
+		});
 	}
 
 	payload.attachments = JSON.stringify(attachments);

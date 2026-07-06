@@ -2,14 +2,12 @@ import { defineNitroPlugin } from "nitropack/runtime";
 import {
 	AddressObjectJSON,
 	ComposeMode,
-	getPublicEnv,
 	getServerEnv,
 	MailComposeInput,
 } from "@schema";
 import { getMessageAddress, getMessageName } from "@common/mail-client";
 import { generateSnippet, upsertMailboxThreadItem } from "@common";
 const serverConfig = getServerEnv();
-const publicConfig = getPublicEnv();
 import IORedis from "ioredis";
 import { Worker } from "bullmq";
 import {
@@ -32,14 +30,13 @@ import {
 import { createMailer } from "@providers";
 import { toArray } from "drizzle-orm/mysql-core";
 import { and, eq } from "drizzle-orm";
-import { createClient, SupabaseClient } from "@supabase/supabase-js";
-const supabase = createClient(
-	publicConfig.API_URL,
-	serverConfig.SERVICE_ROLE_KEY,
-);
 import addressparser from "addressparser";
 import { PgTransaction } from "drizzle-orm/pg-core";
 import { getRedis } from "../../lib/get-redis";
+import {GetObjectCommand, PutObjectCommand} from "@aws-sdk/client-s3";
+import {s3} from "../../lib/create-s3-client";
+import MailComposer from "nodemailer/lib/mail-composer/index.js";
+// import MailComposer from "nodemailer/lib/mail-composer";
 const connection = new IORedis({
 	maxRetriesPerRequest: null,
 	password: serverConfig.REDIS_PASSWORD,
@@ -101,11 +98,12 @@ export default defineNitroPlugin(async (nitroApp) => {
 
 	type GetOriginalMessageType = Awaited<ReturnType<typeof getOriginalMessage>>;
 
-	async function ensureThreadId(ownerId: string, tx: PgTransaction<any>) {
+	async function ensureThreadId(ownerId: string, workspaceId: string, tx: PgTransaction<any>) {
 		const [t] = await tx
 			.insert(threads)
 			.values({
 				ownerId,
+				workspaceId,
 				lastMessageDate: new Date(),
 			})
 			.returning({ id: threads.id });
@@ -130,8 +128,8 @@ export default defineNitroPlugin(async (nitroApp) => {
 	}
 
 	const processDraft = async ({
-		draftMessageId,
-	}: {
+									draftMessageId,
+								}: {
 		draftMessageId: string;
 	}) => {
 		const [draft] = await db
@@ -200,19 +198,19 @@ export default defineNitroPlugin(async (nitroApp) => {
 
 			const [secrets] = mailbox.identity.providerId
 				? await decryptAdminSecrets({
-						linkTable: providerSecrets,
-						foreignCol: providerSecrets.providerId,
-						secretIdCol: providerSecrets.secretId,
-						ownerId: mailbox.identity.ownerId,
-						parentId: String(mailbox.identity.providerId),
-					})
+					linkTable: providerSecrets,
+					foreignCol: providerSecrets.providerId,
+					secretIdCol: providerSecrets.secretId,
+					ownerId: mailbox.identity.ownerId,
+					parentId: String(mailbox.identity.providerId),
+				})
 				: await decryptAdminSecrets({
-						linkTable: smtpAccountSecrets,
-						foreignCol: smtpAccountSecrets.accountId,
-						secretIdCol: smtpAccountSecrets.secretId,
-						ownerId: mailbox.identity.ownerId,
-						parentId: String(mailbox.identity.smtpAccountId),
-					});
+					linkTable: smtpAccountSecrets,
+					foreignCol: smtpAccountSecrets.accountId,
+					secretIdCol: smtpAccountSecrets.secretId,
+					ownerId: mailbox.identity.ownerId,
+					parentId: String(mailbox.identity.smtpAccountId),
+				});
 
 			const credentials = secrets?.vault?.decrypted_secret
 				? JSON.parse(secrets.vault.decrypted_secret)
@@ -224,7 +222,6 @@ export default defineNitroPlugin(async (nitroApp) => {
 			);
 
 			const attachmentBlobs = await fetchAttachmentBlobs(
-				supabase,
 				decodedForm.attachments as string,
 			);
 
@@ -262,6 +259,7 @@ export default defineNitroPlugin(async (nitroApp) => {
 			} else {
 				threadIdForMessage = await ensureThreadId(
 					mailbox.identity.ownerId,
+					mailbox.mailbox.workspaceId,
 					tx as PgTransaction<any>,
 				);
 			}
@@ -274,19 +272,20 @@ export default defineNitroPlugin(async (nitroApp) => {
 			const references =
 				data.mode === "reply" && origRow?.message
 					? Array.from(
-							new Set(
-								[
-									...(Array.isArray(origRow.message.references)
-										? origRow.message.references
-										: []),
-									origRow.message.messageId ?? null,
-								].filter(Boolean),
-							),
-						).slice(-30)
+						new Set(
+							[
+								...(Array.isArray(origRow.message.references)
+									? origRow.message.references
+									: []),
+								origRow.message.messageId ?? null,
+							].filter(Boolean),
+						),
+					).slice(-30)
 					: [];
 
 			const newMessageBody = MessageInsertSchema.parse({
 				mailboxId: mailboxIdForMessage,
+				workspaceId: mailbox.mailbox.workspaceId,
 				threadId: threadIdForMessage,
 				messageId: "PLACEHOLDER",
 				inReplyTo: inReplyTo ?? undefined,
@@ -303,6 +302,9 @@ export default defineNitroPlugin(async (nitroApp) => {
 				ownerId: mailbox.identity.ownerId,
 				seen: true,
 			});
+			if (decodedForm.apiMessageId) {
+				newMessageBody.id = String(decodedForm.apiMessageId);
+			}
 
 			const mailerResponse = await mailer.sendEmail(data.to, {
 				from: mailbox.identity.value,
@@ -329,10 +331,45 @@ export default defineNitroPlugin(async (nitroApp) => {
 					.values(parsedMessage as MessageCreate)
 					.returning();
 
+
+				const emlBuffer = await buildEmlBuffer({
+					messageId: String(mailerResponse.MessageId) || `msg-${Date.now()}`,
+					from: mailbox.identity.value,
+					to: data.to || [],
+					cc: data.cc || [],
+					bcc: data.bcc || [],
+					subject: String(newMessage.subject || "(no subject)"),
+					text: newMessage.text,
+					html: newMessage.html,
+					inReplyTo,
+					references,
+					attachments: attachmentBlobs,
+				});
+				const rawStorageKey = `eml/${newMessage.ownerId}/${newMessage.mailboxId}/${newMessage.id}.eml`;
+				await s3.send(
+					new PutObjectCommand({
+						Bucket: serverConfig.S3_BUCKET,
+						Key: rawStorageKey,
+						Body: emlBuffer,
+						ContentType: "message/rfc822",
+					}),
+				);
+				await tx
+					.update(messages)
+					.set({
+						rawStorageKey,
+						sizeBytes: emlBuffer.length,
+					})
+					.where(eq(messages.id, newMessage.id));
+
+
+
+
 				for (const attachmentBlob of attachmentBlobs) {
 					await tx.insert(messageAttachments).values({
 						...attachmentBlob.item,
 						ownerId: newMessage.ownerId,
+						workspaceId: mailbox.mailbox.workspaceId,
 						messageId: newMessage.id,
 					});
 				}
@@ -356,9 +393,9 @@ export default defineNitroPlugin(async (nitroApp) => {
 	};
 
 	const generateMailAttrs = async ({
-		data,
-		orig,
-	}: {
+										 data,
+										 orig,
+									 }: {
 		data: MailComposeInput;
 		orig: GetOriginalMessageType | null;
 	}) => {
@@ -389,12 +426,12 @@ export default defineNitroPlugin(async (nitroApp) => {
 		// Human-friendly fallback
 		const origDateLabel = rawDate
 			? new Date(rawDate).toLocaleString(undefined, {
-					year: "numeric",
-					month: "short",
-					day: "2-digit",
-					hour: "2-digit",
-					minute: "2-digit",
-				})
+				year: "numeric",
+				month: "short",
+				day: "2-digit",
+				hour: "2-digit",
+				minute: "2-digit",
+			})
 			: "";
 
 		const origHtml = hasOrig ? origMsg!.html || origMsg!.textAsHtml || "" : "";
@@ -442,8 +479,17 @@ export default defineNitroPlugin(async (nitroApp) => {
 		return { subject, text, html };
 	};
 
+
+	async function streamToBuffer(stream: any): Promise<Buffer> {
+		return await new Promise((resolve, reject) => {
+			const chunks: any[] = [];
+			stream.on("data", (chunk: any) => chunks.push(chunk));
+			stream.on("error", reject);
+			stream.on("end", () => resolve(Buffer.concat(chunks)));
+		});
+	}
+
 	async function fetchAttachmentBlobs(
-		supabase: SupabaseClient,
 		attachmentsString: string,
 	): Promise<AttachmentDownload[]> {
 		let attachments: unknown = [];
@@ -454,33 +500,36 @@ export default defineNitroPlugin(async (nitroApp) => {
 		}
 
 		const list = Array.isArray(attachments) ? attachments : [];
-		const candidates = list.filter((a: any) => a && a.bucketId && a.path);
+		const candidates = list.filter((a: any) => a && a.path);
 
 		if (candidates.length === 0) return [];
 
 		try {
 			const downloads = await Promise.all(
 				candidates.map(async (attachment: any): Promise<AttachmentDownload> => {
-					const { data: blob, error } = await supabase.storage
-						.from(String(attachment.bucketId))
-						.download(String(attachment.path));
+					const command = new GetObjectCommand({
+						Bucket: serverConfig.S3_BUCKET,
+						Key: String(attachment.path),
+					});
 
-					if (error || !blob) {
-						throw new Error(
-							`Failed to download "${attachment.path}": ${error?.message ?? "unknown error"}`,
-						);
+					const response = await s3.send(command);
+
+					if (!response.Body) {
+						throw new Error(`Failed to download "${attachment.path}"`);
 					}
 
-					const sizeBytes = Number(attachment.sizeBytes ?? blob.size);
+					const buffer = await streamToBuffer(response.Body);
 
 					const item = MessageAttachmentInsertSchema.parse(attachment);
+					const uint8 = new Uint8Array(buffer);
 
 					return {
 						item,
-						blob,
+						blob: new Blob([uint8], {
+							type: String(attachment.contentType || "application/octet-stream"),
+						}),
 						name: String(attachment.filenameOriginal || "attachment"),
-						sizeBytes,
-						// contentType,
+						sizeBytes: buffer.length,
 					};
 				}),
 			);
@@ -490,6 +539,52 @@ export default defineNitroPlugin(async (nitroApp) => {
 			console.error("fetchAttachmentBlobs error:", e);
 			return [];
 		}
+	}
+
+
+	async function blobToBuffer(blob: Blob) {
+		return Buffer.from(await blob.arrayBuffer());
+	}
+
+	async function buildEmlBuffer(opts: {
+		messageId: string;
+		from: string;
+		to: string[];
+		cc?: string[];
+		bcc?: string[];
+		subject: string;
+		text?: string | null;
+		html?: string | null;
+		inReplyTo?: string | null;
+		references?: string[];
+		attachments: AttachmentDownload[];
+	}) {
+		const composer = new MailComposer({
+			messageId: opts.messageId,
+			from: opts.from,
+			to: opts.to,
+			cc: opts.cc,
+			bcc: opts.bcc,
+			subject: opts.subject,
+			text: opts.text || "",
+			html: opts.html || "",
+			inReplyTo: opts.inReplyTo || undefined,
+			references: opts.references?.length ? opts.references : undefined,
+			attachments: await Promise.all(
+				opts.attachments.map(async (att) => ({
+					filename: att.name,
+					content: await blobToBuffer(att.blob),
+					contentType: String(att.item.contentType || "application/octet-stream"),
+				})),
+			),
+		});
+
+		return await new Promise<Buffer>((resolve, reject) => {
+			composer.compile().build((err, message) => {
+				if (err) reject(err);
+				else resolve(message);
+			});
+		});
 	}
 
 	nitroApp.hooks.hookOnce("close", async () => {

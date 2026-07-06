@@ -1,18 +1,17 @@
 "use client";
 
 import {
-	Bot,
-	ChevronRight,
+	Blocks,
+	ChevronRight, CreditCard,
 	FolderSync,
 	HardDrive,
 	Key,
 	LayoutDashboard,
 	type LucideIcon,
 	Plug,
-	Send,
+	Send, Webhook,
 } from "lucide-react";
-import Link from "next/link";
-import { usePathname } from "next/navigation";
+
 import {
 	Collapsible,
 	CollapsibleContent,
@@ -29,8 +28,10 @@ import {
 	SidebarMenuSubButton,
 	SidebarMenuSubItem,
 } from "@/components/ui/sidebar";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
 
-export function NavMain() {
+export function NavMain({workspacePublicId, workspaceRole}: {workspacePublicId?: string, workspaceRole?: string}) {
 	const pathname = usePathname();
 
 	const navPlatformItems: {
@@ -41,46 +42,61 @@ export function NavMain() {
 	}[] = [
 		{
 			title: "Overview",
-			url: "/dashboard/platform/overview",
+			url: `/w/${workspacePublicId}/dashboard/platform/overview`,
 			icon: LayoutDashboard,
 			items: [],
 		},
-		{
-			title: "Providers",
-			url: "/dashboard/platform/providers",
-			icon: Plug,
-			items: [],
-		},
-		{
-			title: "Identities",
-			url: "/dashboard/platform/identities",
-			icon: Send,
-			items: [],
-		},
-		{
-			title: "Storage",
-			url: "/dashboard/platform/storage",
-			icon: HardDrive,
-			items: [],
-		},
-		{
-			title: "Sync Services",
-			url: "/dashboard/platform/sync-services",
-			icon: FolderSync,
-			items: [],
-		},
-		{
-			title: "API Keys",
-			url: "/dashboard/platform/api-keys",
-			icon: Key,
-			items: [],
-		},
-		{
-			title: "AI Provider",
-			url: "/dashboard/platform/ai",
-			icon: Bot,
-			items: [],
-		},
+		...(workspaceRole === "owner"
+			? [
+				{
+					title: "Providers",
+					url: `/w/${workspacePublicId}/dashboard/platform/providers`,
+					icon: Plug,
+					items: [],
+				},
+				{
+					title: "Identities",
+					url: `/w/${workspacePublicId}/dashboard/platform/identities`,
+					icon: Send,
+					items: [],
+				},
+			]
+			: []),
+		...(workspaceRole === "owner"
+			? [
+				{
+					title: "Workspace",
+					url: `/w/${workspacePublicId}/dashboard/platform/workspace`,
+					icon: Blocks,
+					items: [],
+				},
+				{
+					title: "Storage",
+					url: `/w/${workspacePublicId}/dashboard/platform/storage`,
+					icon: HardDrive,
+					items: [],
+				},
+				{
+					title: "API Keys",
+					url: `/w/${workspacePublicId}/dashboard/platform/api-keys`,
+					icon: Key,
+					items: [],
+				},
+				{
+					title: "Webhooks",
+					url: `/w/${workspacePublicId}/dashboard/platform/webhooks`,
+					icon: Webhook,
+					items: [],
+				},
+				{
+					title: "Sync Services",
+					url: `/w/${workspacePublicId}/dashboard/platform/sync-services`,
+					icon: FolderSync,
+					items: [],
+				},
+			]
+			: []),
+
 	];
 
 	return (

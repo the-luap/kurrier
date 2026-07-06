@@ -14,7 +14,8 @@ export const ZServerConfig = z.object({
 	DATABASE_RLS_URL: z.string(
 		"DATABASE_RLS_URL must be a valid Postgres connection URL",
 	),
-	SERVICE_ROLE_KEY: z.string("SERVICE_ROLE_KEY must be present"),
+	JWT_SECRET: z.string("JWT_SECRET must be present"),
+	APP_SECRET_ENCRYPTION_KEY: z.string("APP_SECRET_ENCRYPTION_KEY must be present"),
 	REDIS_PASSWORD: z.string("REDIS_PASSWORD must be present"),
 	REDIS_HOST: z.string("REDIS_HOST must be present"),
 	REDIS_PORT: z.string("REDIS_PORT must be present"),
@@ -23,23 +24,20 @@ export const ZServerConfig = z.object({
 	TYPESENSE_PROTOCOL: z.string("TYPESENSE_PROTOCOL must be present"),
 	TYPESENSE_HOST: z.string("TYPESENSE_HOST must be present"),
 	SEARCH_REBUILD_ON_BOOT: z.string("SEARCH_REBUILD_ON_BOOT must be present"),
-	INBOUND_WEBHOOK_SECRET: z.string().optional(),
-	OLLAMA_BASE_URL: z.string().url().optional().default("http://ollama:11434"),
-	OLLAMA_MODEL: z.string().optional().default("llama3.1"),
+	S3_REGION: z.string("S3_REGION must be present"),
+	S3_BUCKET: z.string("S3_BUCKET must be present"),
+	S3_ENDPOINT: z.string("S3_ENDPOINT must be present"),
+	S3_ACCESS_KEY: z.string("S3_ACCESS_KEY must be present"),
+	S3_SECRET_KEY: z.string("S3_SECRET_KEY must be present"),
+	S3_FORCE_PATH_STYLE: z.string("S3_FORCE_PATH_STYLE must be present"),
 });
 
 /** Safe to expose to the browser */
 export const ZPublicConfig = z.object({
-	API_PUBLIC_URL: z.string("API_PUBLIC_URL must be present"),
-	API_URL: z.string("API_URL must be present"),
-	ANON_KEY: z.string("ANON_KEY must be present"),
 	WEB_URL: z.string("WEB_URL must be present"),
 	DOCS_URL: z.string().optional(),
-	DISABLE_SIGNUP: z
-		.string()
-		.optional()
-		.transform((val) => val === "true")
-		.default(false),
+	DAV_URL: z.string("DAV_URL must be present"),
+	DISABLE_SIGNUP: z.string().optional().transform((val) => val === "true").default(false),
 });
 
 export type ServerConfig = z.infer<typeof ZServerConfig>;

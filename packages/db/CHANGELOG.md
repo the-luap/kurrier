@@ -1,5 +1,37 @@
 # @kurrier/db
 
+## 3.0.3
+
+### Patch Changes
+
+- [#461](https://github.com/kurrier-org/kurrier/pull/461) [`c818d78`](https://github.com/kurrier-org/kurrier/commit/c818d786ee15723a6bfd94ed46c9c4a4de437f8f) Thanks [@krokhale](https://github.com/krokhale)! - Improve identity deletion cleanup flow
+
+## 3.0.2
+
+### Patch Changes
+
+- [#452](https://github.com/kurrier-org/kurrier/pull/452) [`b374c4e`](https://github.com/kurrier-org/kurrier/commit/b374c4e4effcbcee9ad36a57ef59c3d25ac6f699) Thanks [@krokhale](https://github.com/krokhale)! - Add Google OIDC authentication
+
+- [`f510001`](https://github.com/kurrier-org/kurrier/commit/f510001c38de35ba047cf6319b0df6eb80fa295e) Thanks [@krokhale](https://github.com/krokhale)! - updated env vars
+
+## 3.0.1
+
+### Patch Changes
+
+- [#452](https://github.com/kurrier-org/kurrier/pull/452) [`6faea6d`](https://github.com/kurrier-org/kurrier/commit/6faea6d6fe553ab1108700a348b462460a01f22a) Thanks [@krokhale](https://github.com/krokhale)! - Add Google OIDC authentication
+
+## 3.0.0
+
+### Major Changes
+
+- [#449](https://github.com/kurrier-org/kurrier/pull/449) [`d039e87`](https://github.com/kurrier-org/kurrier/commit/d039e87a0e79fef4398875d0873231be897aa397) Thanks [@krokhale](https://github.com/krokhale)! - refactor: simplify platform architecture, routing, storage, and db setup
+
+## 2.0.0
+
+### Major Changes
+
+- [#449](https://github.com/kurrier-org/kurrier/pull/449) [`4a63387`](https://github.com/kurrier-org/kurrier/commit/4a63387eb93bf3dde9aeda194eb6a2cf0fed4cd5) Thanks [@krokhale](https://github.com/krokhale)! - refactor: simplify platform architecture, routing, storage, and db setup
+
 ## 1.1.2
 
 ### Patch Changes
