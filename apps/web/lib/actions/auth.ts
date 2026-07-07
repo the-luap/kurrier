@@ -112,18 +112,28 @@ export async function signup(
 
 export const isSignedIn = async () => {
 	const client = await createClient();
-	const {
-		data: { user },
-	} = await client.auth.getUser();
-	return user;
+	try {
+		const {
+			data: { user },
+		} = await client.auth.getUser();
+		return user;
+	} catch (error) {
+		console.warn("Unable to load authenticated user", error);
+		return null;
+	}
 };
 
 export const currentSession = async () => {
 	const client = await createClient();
-	const {
-		data: { session },
-	} = await client.auth.getSession();
-	return session as AuthSession;
+	try {
+		const {
+			data: { session },
+		} = await client.auth.getSession();
+		return session as AuthSession | null;
+	} catch (error) {
+		console.warn("Unable to load auth session", error);
+		return null;
+	}
 };
 
 export const signOut = async (redirectUrl?: string) => {
