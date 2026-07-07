@@ -123,7 +123,7 @@ export const isSignedIn = async () => {
 	}
 };
 
-export const currentSession = async () => {
+export const currentSession = async (): Promise<AuthSession | null> => {
 	const client = await createClient();
 	try {
 		const {

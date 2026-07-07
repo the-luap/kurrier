@@ -46,6 +46,8 @@ import { and, count, desc, eq, gte, sql } from "drizzle-orm";
 import type { PgColumn, PgTable } from "drizzle-orm/pg-core";
 import { nanoid } from "nanoid";
 import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
+import type { AuthSession } from "@supabase/supabase-js";
 import { v4 as uuidv4 } from "uuid";
 import type { z } from "zod";
 import { currentSession, isSignedIn } from "@/lib/actions/auth";
@@ -63,6 +65,13 @@ const DEFAULT_OLLAMA_BASE_URL = "http://10.0.252.12:11434";
 const DEFAULT_OLLAMA_MODEL = "gemma3:12b";
 const DEFAULT_LMSTUDIO_BASE_URL = "http://localhost:1234/v1";
 const DEFAULT_LMSTUDIO_MODEL = "";
+
+const requireSession = (session: AuthSession | null): AuthSession => {
+	if (!session) {
+		redirect("/auth/login");
+	}
+	return session;
+};
 
 const isAiProvider = (value: string): value is AiProvider =>
 	value === "ollama" || value === "lmstudio";
@@ -396,7 +405,7 @@ export async function upsertProviderAccount(
 	formData: FormData,
 ): Promise<FormState> {
 	return handleAction(async () => {
-		const session = await currentSession();
+		const session = requireSession(await currentSession());
 		const data = decode(formData);
 		const parsed = ProviderAccountFormSchema.parse(data);
 
@@ -440,7 +449,7 @@ export async function upsertSMTPAccount(
 	formData: FormData,
 ): Promise<FormState> {
 	return handleAction(async () => {
-		const session = await currentSession();
+		const session = requireSession(await currentSession());
 
 		const data = decode(formData);
 		const parsed = SmtpAccountFormSchema.parse(data);
@@ -522,7 +531,7 @@ export async function fetchDecryptedSecrets({
 	parentId?: string;
 }) {
 	const rls = await rlsClient();
-	const session = await currentSession();
+	const session = requireSession(await currentSession());
 
 	const rows = await rls((tx) => {
 		let q = tx
@@ -594,7 +603,7 @@ export const verifySmtpAccount = async (
 ): Promise<FormState<VerifyResult>> => {
 	return handleAction(async () => {
 		const parsedVaultValues = smtpSecret.parsedSecret;
-		const session = await currentSession();
+		const session = requireSession(await currentSession());
 
 		const mailer = createMailer("smtp", parsedVaultValues);
 		const res = await mailer.verify(String(smtpSecret?.linkRow?.accountId));
@@ -858,7 +867,7 @@ export async function addNewEmailIdentity(
 					.returning(),
 			);
 
-			const session = await currentSession();
+			const session = requireSession(await currentSession());
 			parsedVaultValues.sendVerified = true;
 			parsedVaultValues.receiveVerified = domainIdentity.incomingDomain;
 			if (domainIdentity.incomingDomain) {
@@ -1047,7 +1056,7 @@ export const verifyProviderAccount = async (
 			const data = providerSecret.parsedSecret;
 			data.verified = res.ok;
 
-			const session = await currentSession();
+			const session = requireSession(await currentSession());
 			await updateSecret(session, String(providerSecret?.linkRow?.secretId), {
 				value: JSON.stringify(data),
 			});
@@ -1073,7 +1082,7 @@ export const verifyProviderAccount = async (
 			res = await store.verify(String(providerSecret?.metaId), {});
 			const data = providerSecret.parsedSecret;
 			data.verified = res.ok;
-			const session = await currentSession();
+			const session = requireSession(await currentSession());
 			await updateSecret(session, String(providerSecret?.linkRow?.secretId), {
 				value: JSON.stringify(data),
 			});
@@ -1101,7 +1110,7 @@ export const verifyProviderAccount = async (
 			const data = providerSecret.parsedSecret;
 			data.verified = res.ok;
 
-			const session = await currentSession();
+			const session = requireSession(await currentSession());
 			await updateSecret(session, String(providerSecret?.linkRow?.secretId), {
 				value: JSON.stringify(data),
 			});
@@ -1128,7 +1137,7 @@ export const verifyProviderAccount = async (
 			const data = providerSecret.parsedSecret;
 			data.verified = res.ok;
 
-			const session = await currentSession();
+			const session = requireSession(await currentSession());
 			await updateSecret(session, String(providerSecret?.linkRow?.secretId), {
 				value: JSON.stringify(data),
 			});
@@ -1155,7 +1164,7 @@ export const verifyProviderAccount = async (
 			const data = providerSecret.parsedSecret;
 			data.verified = res.ok;
 
-			const session = await currentSession();
+			const session = requireSession(await currentSession());
 			await updateSecret(session, String(providerSecret?.linkRow?.secretId), {
 				value: JSON.stringify(data),
 			});
@@ -1234,7 +1243,7 @@ export async function addApiKey(
 	formData: FormData,
 ): Promise<FormState> {
 	return handleAction(async () => {
-		const session = await currentSession();
+		const session = requireSession(await currentSession());
 		const data = decode(formData);
 
 		const { ulid, name, scope } = data as {
@@ -1291,7 +1300,7 @@ export async function addApiKey(
 
 export const fetchUserAPIKeys = async () => {
 	const rls = await rlsClient();
-	const session = await currentSession();
+	const session = requireSession(await currentSession());
 
 	const apiKeyRows = await rls((tx) =>
 		tx
@@ -1325,7 +1334,7 @@ export type FetchUserAPIKeysResult = Awaited<
 
 export const fetchUserDavAccounts = async () => {
 	const rls = await rlsClient();
-	const session = await currentSession();
+	const session = requireSession(await currentSession());
 
 	const [row] = await rls((tx) =>
 		tx
