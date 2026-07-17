@@ -46,7 +46,7 @@ import { cache } from "react";
 import Typesense, { type Client } from "typesense";
 import { isSignedIn } from "@/lib/actions/auth";
 import { rlsClient } from "@/lib/actions/clients";
-import { getRedis } from "@/lib/actions/get-redis";
+import { getRedis, getSmtpQueue } from "@/lib/actions/get-redis";
 import { withServerCache } from "@/lib/server-cache";
 import { toArray } from "@/lib/utils";
 
@@ -701,45 +701,65 @@ export async function sendMail(
 }
 
 export const deltaFetch = async ({ identityId }: { identityId: string }) => {
-	const { smtpQueue } = await getRedis();
-	const job = await smtpQueue.add(
-		"delta-fetch",
-		{ identityId },
-		{
-			jobId: `delta-fetch-${identityId}-${Date.now()}`,
-			removeOnComplete: { age: 300 },
-			removeOnFail: { age: 900 },
-		},
-	);
-	const state = await job.getState();
-	return {
-		success: true,
-		jobId: String(job.id),
-		state,
-	};
+	try {
+		const { smtpQueue } = await getSmtpQueue();
+		const job = await smtpQueue.add(
+			"delta-fetch",
+			{ identityId },
+			{
+				jobId: `delta-fetch-${identityId}-${Date.now()}`,
+				removeOnComplete: { age: 300 },
+				removeOnFail: { age: 900 },
+			},
+		);
+		const state = await job.getState();
+		return {
+			success: true,
+			jobId: String(job.id),
+			state,
+			error: null,
+		};
+	} catch (error) {
+		console.error("Failed to enqueue delta-fetch job", error);
+		return {
+			success: false,
+			jobId: null,
+			state: "failed",
+			error: "Sync queue is unavailable. Please retry in a moment.",
+		};
+	}
 };
 
 export const getDeltaFetchStatus = async ({ jobId }: { jobId: string }) => {
-	const { smtpQueue } = await getRedis();
-	const job = await smtpQueue.getJob(jobId);
+	try {
+		const { smtpQueue } = await getSmtpQueue();
+		const job = await smtpQueue.getJob(jobId);
 
-	if (!job) {
+		if (!job) {
+			return {
+				success: false,
+				state: "missing",
+				error: "Sync job was not found. It may already have been cleaned up.",
+			};
+		}
+
+		const state = await job.getState();
+		const failedReason = job.failedReason;
+
+		return {
+			success: state !== "failed",
+			jobId: String(job.id),
+			state,
+			error: failedReason || null,
+		};
+	} catch (error) {
+		console.error("Failed to read delta-fetch job status", error);
 		return {
 			success: false,
-			state: "missing",
-			error: "Sync job was not found. It may already have been cleaned up.",
+			state: "failed",
+			error: "Sync queue is unavailable. Please retry in a moment.",
 		};
 	}
-
-	const state = await job.getState();
-	const failedReason = job.failedReason;
-
-	return {
-		success: state !== "failed",
-		jobId: String(job.id),
-		state,
-		error: failedReason || null,
-	};
 };
 
 export const initSearch = async (

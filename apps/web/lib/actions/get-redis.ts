@@ -89,3 +89,14 @@ export const getRedis = async () => {
 		migrationWorkerEvents,
 	};
 };
+
+export const getSmtpQueue = async () => {
+	const redisConnection = getRedisConnection();
+	const smtpQueue = silenceRedisErrors(
+		new Queue("smtp-worker", redisConnection),
+	);
+
+	await smtpQueue.waitUntilReady();
+
+	return { smtpQueue };
+};

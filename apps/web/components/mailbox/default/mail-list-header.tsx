@@ -86,6 +86,13 @@ function MailListHeader({
 			try {
 				setReloading(true);
 				const result = await deltaFetch({ identityId });
+				if (!result.success || !result.jobId) {
+					toast.error(result.error ?? "Sync konnte nicht gestartet werden.", {
+						id: toastId,
+						position: "bottom-left",
+					});
+					return;
+				}
 				toast.loading("Sync läuft im Hintergrund…", {
 					id: toastId,
 					position: "bottom-left",
