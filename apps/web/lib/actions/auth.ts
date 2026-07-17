@@ -18,10 +18,15 @@ const initProviders = async (userId: string) => {
 			host: REDIS_HOST || "redis",
 			port: Number(REDIS_PORT || 6379),
 			password: REDIS_PASSWORD,
+			maxRetriesPerRequest: 1,
+			enableOfflineQueue: false,
+			retryStrategy: () => null,
 		},
 	};
 	const commonWorkerQueue = new Queue("common-worker", redisConnection);
 	const commonWorkerEvents = new QueueEvents("common-worker", redisConnection);
+	commonWorkerQueue.on("error", () => {});
+	commonWorkerEvents.on("error", () => {});
 	await commonWorkerEvents.waitUntilReady();
 
 	const job = await commonWorkerQueue.add("sync-providers", { userId });
