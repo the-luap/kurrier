@@ -14,6 +14,7 @@ function getRedisClient() {
 		maxRetriesPerRequest: 1,
 		lazyConnect: true,
 		enableOfflineQueue: false,
+		retryStrategy: () => null,
 	});
 
 	redis.on("error", () => {
@@ -21,6 +22,12 @@ function getRedisClient() {
 	});
 
 	return redis;
+}
+
+function dropRedisClient() {
+	if (!redis) return;
+	redis.disconnect();
+	redis = null;
 }
 
 export async function withServerCache<T>(
@@ -40,6 +47,7 @@ export async function withServerCache<T>(
 			return JSON.parse(cached) as T;
 		}
 	} catch {
+		dropRedisClient();
 		return loader();
 	}
 
@@ -48,6 +56,7 @@ export async function withServerCache<T>(
 	try {
 		await client.set(key, JSON.stringify(value), "EX", ttlSeconds);
 	} catch {
+		dropRedisClient();
 		// Best-effort cache write.
 	}
 
