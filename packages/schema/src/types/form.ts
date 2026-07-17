@@ -1,4 +1,4 @@
-import { ReactNode } from "react";
+import type { ReactNode } from "react";
 
 export type SelectOption = { label: string; value: string };
 export type SelectGroupOption = { group: string; items: SelectOption[] };
@@ -48,12 +48,19 @@ function toMessage(e: unknown): string {
 	}
 }
 
-export async function handleAction<T extends FormState<any>>(
+function isNextRedirectError(e: unknown): boolean {
+	if (!e || typeof e !== "object") return false;
+	const digest = (e as { digest?: unknown }).digest;
+	return typeof digest === "string" && digest.startsWith("NEXT_REDIRECT");
+}
+
+export async function handleAction<T extends FormState<unknown>>(
 	fn: () => Promise<T>,
 ): Promise<T> {
 	try {
 		return await fn();
 	} catch (e) {
+		if (isNextRedirectError(e)) throw e;
 		return {
 			success: false,
 			error: toMessage(e),

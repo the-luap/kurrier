@@ -1,6 +1,13 @@
-import { createServerClient } from "@supabase/ssr";
-import { NextResponse, type NextRequest } from "next/server";
 import { getEnv } from "@schema";
+import { createServerClient } from "@supabase/ssr";
+import { type NextRequest, NextResponse } from "next/server";
+
+type ResponseCookies = ReturnType<typeof NextResponse.next>["cookies"];
+type CookieToSet = {
+	name: string;
+	value: string;
+	options?: Parameters<ResponseCookies["set"]>[2];
+};
 
 export async function updateSession(request: NextRequest) {
 	let supabaseResponse = NextResponse.next({
@@ -8,25 +15,24 @@ export async function updateSession(request: NextRequest) {
 	});
 
 	const {
-		public: { API_URL },
-		server: { SERVICE_ROLE_KEY },
+		public: { ANON_KEY, API_URL },
 	} = getEnv();
 
-	const supabase = createServerClient(API_URL, SERVICE_ROLE_KEY, {
+	const supabase = createServerClient(API_URL, ANON_KEY, {
 		cookies: {
 			getAll() {
 				return request.cookies.getAll();
 			},
-			setAll(cookiesToSet) {
-				cookiesToSet.forEach(({ name, value, options }) =>
-					request.cookies.set(name, value),
-				);
+			setAll(cookiesToSet: CookieToSet[]) {
+				cookiesToSet.forEach(({ name, value }) => {
+					request.cookies.set(name, value);
+				});
 				supabaseResponse = NextResponse.next({
 					request,
 				});
-				cookiesToSet.forEach(({ name, value, options }) =>
-					supabaseResponse.cookies.set(name, value, options),
-				);
+				cookiesToSet.forEach(({ name, value, options }) => {
+					supabaseResponse.cookies.set(name, value, options);
+				});
 			},
 		},
 	});
@@ -37,21 +43,7 @@ export async function updateSession(request: NextRequest) {
 
 	// IMPORTANT: DO NOT REMOVE auth.getUser()
 
-	// const {
-	//     data: { user },
-	// } = await supabase.auth.getUser()
-	//
-	// if (
-	//     !user &&
-	//     !request.nextUrl.pathname.startsWith('/login') &&
-	//     !request.nextUrl.pathname.startsWith('/auth') &&
-	//     !request.nextUrl.pathname.startsWith('/error')
-	// ) {
-	//     // no user, potentially respond by redirecting the user to the login page
-	//     const url = request.nextUrl.clone()
-	//     url.pathname = '/login'
-	//     return NextResponse.redirect(url)
-	// }
+	await supabase.auth.getUser();
 
 	// IMPORTANT: You *must* return the supabaseResponse object as it is.
 	// If you're creating a new response object with NextResponse.next() make sure to:

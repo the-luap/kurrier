@@ -41,22 +41,23 @@ import {
 	SYSTEM_MAILBOXES,
 } from "@schema";
 import slugify from "@sindresorhus/slugify";
+import type { AuthSession } from "@supabase/supabase-js";
 import { decode } from "decode-formdata";
 import { and, count, desc, eq, gte, sql } from "drizzle-orm";
 import type { PgColumn, PgTable } from "drizzle-orm/pg-core";
 import { nanoid } from "nanoid";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import type { AuthSession } from "@supabase/supabase-js";
 import { v4 as uuidv4 } from "uuid";
 import type { z } from "zod";
 import { currentSession, isSignedIn } from "@/lib/actions/auth";
 import { rlsClient } from "@/lib/actions/clients";
 import { getRedis } from "@/lib/actions/get-redis";
 import { backfillMailboxes, clearImapClients } from "@/lib/actions/mailbox";
+import { withServerCache } from "@/lib/server-cache";
 import { parseSecret } from "@/lib/utils";
 
-const DASHBOARD_PATH = "/dashboard/providers";
+const DASHBOARD_PATH = "/dashboard/platform/providers";
 const CURRENT_API_VERSION = 1;
 type AiProvider = "ollama" | "lmstudio";
 
@@ -1199,40 +1200,49 @@ export type FetchUserIdentitiesResult = Awaited<
 
 export const getDashboardStats = async () => {
 	return handleAction(async () => {
+		const session = requireSession(await currentSession());
 		const rls = await rlsClient();
 
-		const data = await rls(async (tx) => {
-			const [[mp], [sa], [vd], [ai], [epTotal], [ep24h]] = await Promise.all([
-				tx.select({ count: count() }).from(providers),
-				tx.select({ count: count() }).from(smtpAccounts),
-				tx
-					.select({ count: count() })
-					.from(identities)
-					.where(
-						and(
-							eq(identities.kind, "domain"),
-							eq(identities.status, "verified"),
-						),
-					),
-				tx
-					.select({ count: count() })
-					.from(identities)
-					.where(eq(identities.kind, "email")),
-				tx.select({ count: count() }).from(messages),
-				tx
-					.select({ count: count() })
-					.from(messages)
-					.where(gte(messages.createdAt, sql`now() - interval '24 hours'`)),
-			]);
+		const data = await withServerCache(
+			`dashboard-stats:${session.user.id}`,
+			30,
+			() =>
+				rls(async (tx) => {
+					const [[mp], [sa], [vd], [ai], [epTotal], [ep24h]] =
+						await Promise.all([
+							tx.select({ count: count() }).from(providers),
+							tx.select({ count: count() }).from(smtpAccounts),
+							tx
+								.select({ count: count() })
+								.from(identities)
+								.where(
+									and(
+										eq(identities.kind, "domain"),
+										eq(identities.status, "verified"),
+									),
+								),
+							tx
+								.select({ count: count() })
+								.from(identities)
+								.where(eq(identities.kind, "email")),
+							tx.select({ count: count() }).from(messages),
+							tx
+								.select({ count: count() })
+								.from(messages)
+								.where(
+									gte(messages.createdAt, sql`now() - interval '24 hours'`),
+								),
+						]);
 
-			return {
-				connectedProviders: (mp?.count ?? 0) + (sa?.count ?? 0),
-				verifiedDomains: vd?.count ?? 0,
-				activeIdentities: ai?.count ?? 0,
-				emailsProcessedTotal: epTotal?.count ?? 0,
-				emailsProcessed24h: ep24h?.count ?? 0,
-			};
-		});
+					return {
+						connectedProviders: (mp?.count ?? 0) + (sa?.count ?? 0),
+						verifiedDomains: vd?.count ?? 0,
+						activeIdentities: ai?.count ?? 0,
+						emailsProcessedTotal: epTotal?.count ?? 0,
+						emailsProcessed24h: ep24h?.count ?? 0,
+					};
+				}),
+		);
 
 		return { success: true, message: "OK", data };
 	});
@@ -1395,7 +1405,7 @@ export async function addNewVolume(_prev: FormState, formData: FormData) {
 				}),
 			);
 		} else {
-			throw new Error("Failed to create volume: " + bucket.message);
+			throw new Error(`Failed to create volume: ${bucket.message}`);
 		}
 
 		revalidatePath("/dashboard/platform/storage");

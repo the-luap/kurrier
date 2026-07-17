@@ -1,14 +1,15 @@
 "use server";
 
-import { FormState, getServerEnv, getPublicEnv } from "@schema";
-import { formDataToJson } from "@/lib/utils";
-import { createClient } from "@/lib/supabase/server";
-import { redirect } from "next/navigation";
-import { AuthSession } from "@supabase/supabase-js";
 import * as crypto from "node:crypto";
-import { Queue, QueueEvents } from "bullmq";
-import { getRedis } from "@/lib/actions/get-redis";
 import { APP_VERSION } from "@common";
+import { type FormState, getPublicEnv, getServerEnv } from "@schema";
+import type { AuthSession } from "@supabase/supabase-js";
+import { Queue, QueueEvents } from "bullmq";
+import { redirect } from "next/navigation";
+import { cache } from "react";
+import { getRedis } from "@/lib/actions/get-redis";
+import { createClient } from "@/lib/supabase/server";
+import { formDataToJson } from "@/lib/utils";
 
 const initProviders = async (userId: string) => {
 	const { REDIS_PASSWORD, REDIS_HOST, REDIS_PORT } = getServerEnv();
@@ -73,7 +74,7 @@ const applyPendingMigrations = async (userId: string) => {
 };
 
 export async function signup(
-	prev: FormState,
+	_prev: FormState,
 	formData: FormData,
 ): Promise<FormState> {
 	// Check if signup is disabled
@@ -110,7 +111,7 @@ export async function signup(
 	return { success: true, message: "Welcome!", data };
 }
 
-export const isSignedIn = async () => {
+export const isSignedIn = cache(async () => {
 	const client = await createClient();
 	try {
 		const {
@@ -121,9 +122,9 @@ export const isSignedIn = async () => {
 		console.warn("Unable to load authenticated user", error);
 		return null;
 	}
-};
+});
 
-export const currentSession = async (): Promise<AuthSession | null> => {
+export const currentSession = cache(async (): Promise<AuthSession | null> => {
 	const client = await createClient();
 	try {
 		const {
@@ -134,7 +135,7 @@ export const currentSession = async (): Promise<AuthSession | null> => {
 		console.warn("Unable to load auth session", error);
 		return null;
 	}
-};
+});
 
 export const signOut = async (redirectUrl?: string) => {
 	const client = await createClient();
