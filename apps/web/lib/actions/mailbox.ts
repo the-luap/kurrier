@@ -84,37 +84,50 @@ export const fetchMailbox = cache(
 				.from(identities)
 				.where(eq(identities.publicId, identityPublicId)),
 		);
-		const [activeMailbox] = await rls((tx) =>
-			tx
-				.select()
-				.from(mailboxes)
-				.where(
-					and(
-						eq(mailboxes.identityId, identity.id),
-						eq(mailboxes.slug, mailboxSlug),
-					),
-				),
-		);
-		const mailboxList = await rls((tx) =>
-			tx.select().from(mailboxes).where(eq(mailboxes.identityId, identity.id)),
-		);
-		const [messagesCount] = activeMailbox?.id
-			? await rls((tx) =>
-					tx
-						.select({ count: count() })
-						.from(mailboxThreads)
-						.where(eq(mailboxThreads.mailboxId, activeMailbox.id)),
-				)
-			: [{ count: 0 }];
 
-		const [sync] = activeMailbox
-			? await rls((tx) => {
-					return tx
-						.select()
-						.from(mailboxSync)
-						.where(eq(mailboxSync.mailboxId, activeMailbox.id));
-				})
-			: [null];
+		if (!identity) {
+			redirect("/dashboard/mail");
+		}
+
+		const [activeMailboxRows, mailboxList] = await Promise.all([
+			rls((tx) =>
+				tx
+					.select()
+					.from(mailboxes)
+					.where(
+						and(
+							eq(mailboxes.identityId, identity.id),
+							eq(mailboxes.slug, mailboxSlug),
+						),
+					),
+			),
+			rls((tx) =>
+				tx
+					.select()
+					.from(mailboxes)
+					.where(eq(mailboxes.identityId, identity.id)),
+			),
+		]);
+		const activeMailbox = activeMailboxRows[0];
+
+		const [messagesCountRows, syncRows] = activeMailbox?.id
+			? await Promise.all([
+					rls((tx) =>
+						tx
+							.select({ count: count() })
+							.from(mailboxThreads)
+							.where(eq(mailboxThreads.mailboxId, activeMailbox.id)),
+					),
+					rls((tx) =>
+						tx
+							.select()
+							.from(mailboxSync)
+							.where(eq(mailboxSync.mailboxId, activeMailbox.id)),
+					),
+				])
+			: [[{ count: 0 }], [null]];
+		const messagesCount = messagesCountRows[0] ?? { count: 0 };
+		const sync = syncRows[0] ?? null;
 
 		return {
 			activeMailbox,
@@ -1800,7 +1813,7 @@ export const clearImapClients = async (identityId: string) => {
 	);
 };
 
-export const fetchScheduledDraftCounts = async () => {
+const fetchScheduledDraftCountsUncached = async () => {
 	const rls = await rlsClient();
 	const rows = await rls((tx) =>
 		tx
@@ -1810,6 +1823,15 @@ export const fetchScheduledDraftCounts = async () => {
 	);
 	return rows;
 };
+
+export const fetchScheduledDraftCounts = cache(async () => {
+	const user = await isSignedIn();
+	if (!user?.id) return fetchScheduledDraftCountsUncached();
+
+	return withServerCache(`scheduled-draft-counts:${user.id}`, 15, () =>
+		fetchScheduledDraftCountsUncached(),
+	);
+});
 
 export const fetchScheduledDrafts = async (identityPublicId: string) => {
 	const rls = await rlsClient();
@@ -1882,7 +1904,7 @@ export async function snoozeThread(input: {
 	});
 }
 
-export const fetchIdentitySnoozedThreads = async (
+const fetchIdentitySnoozedThreadsUncached = async (
 	identityPublicId?: string,
 ) => {
 	if (!identityPublicId) return { threads: [] };
@@ -1909,6 +1931,21 @@ export const fetchIdentitySnoozedThreads = async (
 
 	return { threads };
 };
+
+export const fetchIdentitySnoozedThreads = cache(
+	async (identityPublicId?: string) => {
+		if (!identityPublicId) return { threads: [] };
+
+		const user = await isSignedIn();
+		if (!user?.id) return fetchIdentitySnoozedThreadsUncached(identityPublicId);
+
+		return withServerCache(
+			`snoozed-threads:${user.id}:${identityPublicId}`,
+			15,
+			() => fetchIdentitySnoozedThreadsUncached(identityPublicId),
+		);
+	},
+);
 
 function subscriptionKeyFromHeadersJson(headersJson: any) {
 	const list = headersJson?.list ?? null;

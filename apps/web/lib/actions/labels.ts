@@ -1,26 +1,28 @@
 "use server";
 
-import { FormState, handleAction, LabelScope } from "@schema";
-import { rlsClient } from "@/lib/actions/clients";
+import { PAGE_SIZE } from "@common/mail-client";
 import {
 	contactLabels,
-	LabelCreate,
-	LabelEntity,
+	type LabelCreate,
+	type LabelEntity,
 	LabelInsertSchema,
 	labels,
-	MailboxThreadLabelEntity,
+	type MailboxThreadLabelEntity,
 	mailboxThreadLabels,
 	mailboxThreads,
 } from "@db";
-import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
-import { decode } from "decode-formdata";
+import { type FormState, handleAction, type LabelScope } from "@schema";
 import slugify from "@sindresorhus/slugify";
+import { decode } from "decode-formdata";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
-import { PAGE_SIZE } from "@common/mail-client";
+import { cache } from "react";
+import { isSignedIn } from "@/lib/actions/auth";
+import { rlsClient } from "@/lib/actions/clients";
 import type { FetchMailboxThreadsResult } from "@/lib/actions/mailbox";
+import { withServerCache } from "@/lib/server-cache";
 
-export const fetchLabels = async (scope?: LabelScope) => {
-	const selectedScope = scope || "thread";
+const fetchLabelsUncached = async (selectedScope: LabelScope) => {
 	const rls = await rlsClient();
 	const globalLabels = await rls((tx) =>
 		tx
@@ -32,7 +34,17 @@ export const fetchLabels = async (scope?: LabelScope) => {
 	return globalLabels as LabelEntity[];
 };
 
-export const fetchLabelsWithCounts = async () => {
+export const fetchLabels = cache(async (scope?: LabelScope) => {
+	const selectedScope = scope || "thread";
+	const user = await isSignedIn();
+	if (!user?.id) return fetchLabelsUncached(selectedScope);
+
+	return withServerCache(`labels:${user.id}:${selectedScope}`, 30, () =>
+		fetchLabelsUncached(selectedScope),
+	);
+});
+
+const fetchLabelsWithCountsUncached = async () => {
 	const rls = await rlsClient();
 
 	const allLabels = await rls((tx) =>
@@ -64,12 +76,21 @@ export const fetchLabelsWithCounts = async () => {
 	}));
 };
 
+export const fetchLabelsWithCounts = cache(async () => {
+	const user = await isSignedIn();
+	if (!user?.id) return fetchLabelsWithCountsUncached();
+
+	return withServerCache(`labels-with-counts:${user.id}:thread`, 30, () =>
+		fetchLabelsWithCountsUncached(),
+	);
+});
+
 export type FetchLabelsWithCountResult = Awaited<
 	ReturnType<typeof fetchLabelsWithCounts>
 >;
 export type FetchLabelsResult = Awaited<ReturnType<typeof fetchLabels>>;
 
-export const fetchContactLabelsWithCounts = async () => {
+const fetchContactLabelsWithCountsUncached = async () => {
 	const rls = await rlsClient();
 
 	const allLabels = await rls((tx) =>
@@ -100,6 +121,15 @@ export const fetchContactLabelsWithCounts = async () => {
 		contactCount: countsById.get(l.id) ?? 0,
 	}));
 };
+
+export const fetchContactLabelsWithCounts = cache(async () => {
+	const user = await isSignedIn();
+	if (!user?.id) return fetchContactLabelsWithCountsUncached();
+
+	return withServerCache(`labels-with-counts:${user.id}:contact`, 30, () =>
+		fetchContactLabelsWithCountsUncached(),
+	);
+});
 
 export type FetchContactLabelsWithCountResult = Awaited<
 	ReturnType<typeof fetchContactLabelsWithCounts>
