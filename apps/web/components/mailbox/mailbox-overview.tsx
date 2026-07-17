@@ -2,6 +2,7 @@ import type { MailboxThreadEntity } from "@db";
 import dayjs from "dayjs";
 import { Inbox, Mail, Paperclip } from "lucide-react";
 import Link from "next/link";
+import SyncAllMailboxesButton from "@/components/mailbox/sync-all-mailboxes-button";
 import { Badge } from "@/components/ui/badge";
 import {
 	Card,
@@ -71,7 +72,7 @@ export default function MailboxOverview({ overview }: MailboxOverviewProps) {
 							Kurzer Überblick pro Account — nur Inbox und neue Mails.
 						</p>
 					</div>
-					<div className="flex gap-2 text-sm">
+					<div className="flex flex-wrap items-center gap-2 text-sm">
 						<Badge
 							className="border-primary/20 bg-primary/5 text-foreground hover:bg-primary/10 dark:border-primary/30 dark:bg-primary/15"
 							variant="outline"
@@ -87,6 +88,7 @@ export default function MailboxOverview({ overview }: MailboxOverviewProps) {
 						>
 							{inboxUnread} new
 						</Badge>
+						<SyncAllMailboxesButton disabled={overview.length === 0} />
 					</div>
 				</div>
 			</div>

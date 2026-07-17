@@ -743,6 +743,75 @@ export const deltaFetch = async ({ identityId }: { identityId: string }) => {
 	}
 };
 
+export const deltaFetchAllMailboxes = async () => {
+	try {
+		const rls = await rlsClient();
+		const rows = await rls((tx) =>
+			tx
+				.select({ identityId: identities.id })
+				.from(identities)
+				.innerJoin(mailboxes, eq(mailboxes.identityId, identities.id))
+				.innerJoin(mailboxSync, eq(mailboxSync.mailboxId, mailboxes.id))
+				.where(eq(identities.kind, "email")),
+		);
+		const identityIds = Array.from(
+			new Set(rows.map((row) => row.identityId).filter(Boolean)),
+		);
+
+		if (identityIds.length === 0) {
+			return {
+				success: true,
+				queued: 0,
+				failed: 0,
+				jobIds: [] as string[],
+				error: null,
+			};
+		}
+
+		const { smtpQueue } = await getSmtpQueue();
+		const startedAt = Date.now();
+		const settled = await Promise.allSettled(
+			identityIds.map((identityId, index) =>
+				smtpQueue.add(
+					"delta-fetch",
+					{ identityId },
+					{
+						jobId: `delta-fetch-${identityId}-${startedAt}-${index}`,
+						removeOnComplete: { age: 300 },
+						removeOnFail: { age: 900 },
+					},
+				),
+			),
+		);
+		const jobIds = settled.flatMap((result) =>
+			result.status === "fulfilled" ? [String(result.value.id)] : [],
+		);
+		const failed = settled.length - jobIds.length;
+
+		revalidatePath("/dashboard/mail");
+
+		return {
+			success: failed === 0,
+			queued: jobIds.length,
+			failed,
+			jobIds,
+			error:
+				failed > 0
+					? `${failed} sync job${failed === 1 ? "" : "s"} could not be queued.`
+					: null,
+		};
+	} catch (error) {
+		console.error("Failed to enqueue all mailbox sync jobs", error);
+		return {
+			success: false,
+			queued: 0,
+			failed: 0,
+			jobIds: [] as string[],
+			error: "Sync queue is unavailable. Please retry in a moment.",
+		};
+	}
+};
+
 export const getDeltaFetchStatus = async ({ jobId }: { jobId: string }) => {
 	try {
 		const { smtpQueue } = await getSmtpQueue();
