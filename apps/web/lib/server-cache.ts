@@ -35,6 +35,10 @@ export async function withServerCache<T>(
 	ttlSeconds: number,
 	loader: () => Promise<T>,
 ): Promise<T> {
+	if (process.env.ENABLE_SERVER_CACHE !== "true") {
+		return loader();
+	}
+
 	const client = getRedisClient();
 
 	try {
