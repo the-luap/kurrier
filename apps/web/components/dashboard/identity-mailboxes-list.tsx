@@ -119,7 +119,7 @@ export default function IdentityMailboxesList({
 	onComplete,
 }: {
 	identityMailboxes: FetchIdentityMailboxListResult;
-	scheduledDrafts: DraftMessageEntity[];
+	scheduledDrafts: Pick<DraftMessageEntity, "id" | "identityId" | "status">[];
 	snoozedThreads: MailboxThreadEntity[];
 	onComplete?: () => void;
 }) {
@@ -249,8 +249,14 @@ export default function IdentityMailboxesList({
 				const tree = buildTree(mailboxes as MailboxEntity[]);
 
 				const scheduledCounts = scheduledDrafts.filter(
-					(draft) => draft.identityId === identity.id,
+					(draft) =>
+						draft.identityId === identity.id && draft.status === "scheduled",
 				).length;
+				const draftCounts = scheduledDrafts.filter(
+					(draft) =>
+						draft.identityId === identity.id && draft.status === "draft",
+				).length;
+				const isActiveIdentity = params.identityPublicId === identity.publicId;
 				const snoozedCounts = snoozedThreads.filter(
 					(snoozed) => snoozed.identityId === identity.id,
 				).length;
@@ -270,11 +276,24 @@ export default function IdentityMailboxesList({
 								/>
 							))}
 						</div>
+						{draftCounts > 0 && (
+							<Link
+								href={`/dashboard/mail/${identity.publicId}/unsent`}
+								prefetch={false}
+								className={`my-2 rounded hover:dark:bg-neutral-800 ${isActiveIdentity && currentSlug === "unsent" ? "dark:bg-neutral-800 dark:text-brand-foreground bg-brand-200 text-brand" : ""} flex justify-start gap-1 w-full p-1.5 items-center`}
+							>
+								<FileText size={16} />
+								<span className={"font-normal text-sm"}>
+									Drafts ({draftCounts})
+								</span>
+							</Link>
+						)}
+
 						{scheduledCounts > 0 && (
 							<Link
-								href={`/dashboard/mail/${params.identityPublicId}/scheduled`}
+								href={`/dashboard/mail/${identity.publicId}/scheduled`}
 								prefetch={false}
-								className={`my-2 rounded hover:dark:bg-neutral-800 ${currentSlug === "scheduled" ? "dark:bg-neutral-800 dark:text-brand-foreground bg-brand-200 text-brand" : ""} flex justify-start gap-1 w-full p-1.5`}
+								className={`my-2 rounded hover:dark:bg-neutral-800 ${isActiveIdentity && currentSlug === "scheduled" ? "dark:bg-neutral-800 dark:text-brand-foreground bg-brand-200 text-brand" : ""} flex justify-start gap-1 w-full p-1.5`}
 							>
 								<IconMailFast size={22} />
 								<span className={"font-normal text-sm"}>
@@ -285,13 +304,13 @@ export default function IdentityMailboxesList({
 
 						{snoozedCounts > 0 && (
 							<Link
-								href={`/dashboard/mail/${params.identityPublicId}/snoozed`}
+								href={`/dashboard/mail/${identity.publicId}/snoozed`}
 								prefetch={false}
-								className={`my-2 rounded hover:dark:bg-neutral-800 ${currentSlug === "snoozed" ? "dark:bg-neutral-800 dark:text-brand-foreground bg-brand-200 text-brand" : ""} flex justify-start gap-1 w-full p-1.5 items-center`}
+								className={`my-2 rounded hover:dark:bg-neutral-800 ${isActiveIdentity && currentSlug === "snoozed" ? "dark:bg-neutral-800 dark:text-brand-foreground bg-brand-200 text-brand" : ""} flex justify-start gap-1 w-full p-1.5 items-center`}
 							>
 								<Clock4 size={16} />
 								<span className={"font-normal text-sm"}>
-									Snoozed ({snoozedThreads.length})
+									Snoozed ({snoozedCounts})
 								</span>
 							</Link>
 						)}

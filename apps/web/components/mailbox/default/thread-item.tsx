@@ -9,6 +9,7 @@ import { getMessageAddress, getMessageName } from "@common/mail-client";
 import { Container } from "@/components/common/containers";
 import RenderInvite from "@/components/mailbox/default/render-invite";
 import {fetchEventPreviewItems} from "@/lib/actions/calendar";
+import { createClient } from "@/lib/supabase/server";
 
 export default async function ThreadItem({
 	message,
@@ -49,7 +50,37 @@ export default async function ThreadItem({
 			subject: headers.subject,
 		},
 	} as unknown as MessageEntity;
-	const bodyMessage = { id: message.id, html, text } as MessageEntity;
+	const bodyMessage = {
+		id: message.id,
+		html,
+		text,
+		from: message.from,
+	} as MessageEntity;
+
+	// Inline images ("cid:" references) are stored as attachments: resolve
+	// them to signed URLs and don't list them a second time as attachments.
+	const lowerHtml = (html ?? "").toLowerCase();
+	const cleanCid = (cid: string) => cid.replace(/^<|>$/g, "").toLowerCase();
+	const inlineAttachments = attachments.filter(
+		(a) => a.cid && lowerHtml.includes(`cid:${cleanCid(a.cid)}`),
+	);
+	const cidUrls: Record<string, string> = {};
+	if (inlineAttachments.length > 0) {
+		const supabase = await createClient();
+		const { data } = await supabase.storage
+			.from("attachments")
+			.createSignedUrls(
+				inlineAttachments.map((a) => String(a.path)),
+				60 * 60,
+			);
+		inlineAttachments.forEach((a, i) => {
+			const url = data?.[i]?.signedUrl;
+			if (url && a.cid) cidUrls[cleanCid(a.cid)] = url;
+		});
+	}
+	const visibleAttachments = attachments.filter(
+		(a) => !inlineAttachments.includes(a),
+	);
 
 	return (
 		<>
@@ -74,14 +105,14 @@ export default async function ThreadItem({
 							threadIndex={threadIndex}
 							numberOfMessages={numberOfMessages}
 							message={headerMessage}
-							attachments={attachments}
+							attachments={visibleAttachments}
 							publicConfig={publicConfig}
 							threadId={threadId}
 							markSmtp={markSmtp}
 							activeMailboxId={activeMailboxId}
                             mailSubscription={mailSubscription}
 						>
-							<EmailViewer message={bodyMessage} />
+							<EmailViewer message={bodyMessage} cidUrls={cidUrls} />
 						</EmailRenderer>
 					</div>
 				</div>

@@ -24,10 +24,14 @@ import type React from "react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import EditorAttachmentItem from "@/components/mailbox/default/editor/editor-attachment-item";
-import type { EmailEditorHandle } from "@/components/mailbox/default/editor/email-editor";
+import type {
+	EmailEditorHandle,
+	InitialDraft,
+} from "@/components/mailbox/default/editor/email-editor";
 import MailUnsubscriber from "@/components/mailbox/default/mail-unsubscriber";
 import {
 	type FetchThreadMailSubsResult,
+	fetchDraftForMessage,
 	fetchMailbox,
 	markAsRead,
 	markAsUnread,
@@ -157,6 +161,7 @@ function EmailRenderer({
 	);
 	const [signatureHtml, setSignatureHtml] = useState<string>("");
 	const [isOpeningEditor, setIsOpeningEditor] = useState(false);
+	const [initialDraft, setInitialDraft] = useState<InitialDraft>(null);
 	const params = useParams();
 	const fetchSentMailbox = async () => {
 		if (sentMailboxId) return sentMailboxId;
@@ -173,11 +178,29 @@ function EmailRenderer({
 	// The sent mailbox and signature must be known before the editor mounts:
 	// the editor reads them once, and a late signature would wipe the draft.
 	const openEditor = async (mode: "reply" | "forward") => {
+		if (showEditor) {
+			// Switching mode starts a fresh editor (not the stored draft).
+			setInitialDraft(null);
+			setShowEditorMode(mode);
+			return;
+		}
 		setShowEditorMode(mode);
-		if (showEditor) return;
 		setIsOpeningEditor(true);
 		try {
-			await fetchSentMailbox();
+			const [, draft] = await Promise.all([
+				fetchSentMailbox(),
+				fetchDraftForMessage(String(message.id)).catch(() => null),
+			]);
+			if (draft) {
+				setInitialDraft({ id: draft.id, payload: draft.payload as any });
+				const draftMode = (draft.payload as any)?.mode;
+				if (draftMode === "reply" || draftMode === "forward") {
+					setShowEditorMode(draftMode);
+				}
+				toast.info("Restored your draft", { position: "bottom-left" });
+			} else {
+				setInitialDraft(null);
+			}
 			setShowEditor(true);
 		} catch (error) {
 			toast.error(
@@ -624,7 +647,15 @@ function EmailRenderer({
 					<EmailEditor
 						// Remount when switching reply <-> forward so recipients,
 						// subject and mode are rebuilt for the new mode.
-						key={showEditorMode}
+						key={`${showEditorMode}:${initialDraft?.id ?? "new"}`}
+						initialDraft={initialDraft}
+						originalAttachments={attachments
+							.filter((a) => !a.isInline)
+							.map((a) => ({
+								id: String(a.id),
+								filenameOriginal: a.filenameOriginal,
+								sizeBytes: a.sizeBytes,
+							}))}
 						sentMailboxId={sentMailboxId ?? ""}
 						ref={editorRef}
 						publicConfig={publicConfig}

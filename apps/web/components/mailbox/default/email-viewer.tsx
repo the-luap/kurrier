@@ -6,6 +6,7 @@ import DOMPurify from "dompurify";
 import type { MessageEntity } from "@db";
 import { ActionIcon } from "@mantine/core";
 import { Ellipsis } from "lucide-react";
+import { getMessageAddress } from "@common/mail-client";
 
 const BASE_CSS = `
 :host {
@@ -208,25 +209,125 @@ function prepareHtml(html: string) {
 	return `${styles}<div class="email-body"${bodyStyle ? ` style="${bodyStyle.replace(/"/g, "&quot;")}"` : ""}>${bodyInner.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "")}</div>`;
 }
 
-export function sanitizeEmail(message: MessageEntity) {
-	const html = message.html?.trim() ? message.html : "";
-	const rawHtml = html
-		? prepareHtml(html)
-		: plainTextToHtml(String(message.text || "No content"));
-	return DOMPurify.sanitize(rawHtml, {
-		USE_PROFILES: { html: true },
-		// Keep leading <style> blocks inside the fragment instead of hoisting
-		// them into a discarded <head>.
-		FORCE_BODY: true,
-		ADD_TAGS: ["style"],
-		ADD_ATTR: ["target"],
-		FORBID_TAGS: ["form", "input", "button", "textarea", "select"],
+const REMOTE_URL = /^\s*(https?:)?\/\//i;
+const CSS_REMOTE_URL = /url\(\s*(['"]?)\s*(https?:)?\/\/[^)]*\)/gi;
+
+// Replace "cid:" references (inline images) with their resolved URLs.
+function resolveCids(html: string, cidUrls: Record<string, string>) {
+	if (!/cid:/i.test(html)) return html;
+	return html.replace(/cid:([^"'()\s>]+)/gi, (match, cid: string) => {
+		const url = cidUrls[cid.replace(/^<|>$/g, "").toLowerCase()];
+		return url ?? match;
 	});
 }
 
-export default function EmailViewer({ message }: { message: MessageEntity }) {
+export function sanitizeEmail(
+	message: Pick<MessageEntity, "html" | "text">,
+	{
+		cidUrls = {},
+		blockRemote = false,
+	}: { cidUrls?: Record<string, string>; blockRemote?: boolean } = {},
+): { html: string; blockedRemote: number } {
+	const html = message.html?.trim() ? message.html : "";
+	const rawHtml = html
+		? resolveCids(prepareHtml(html), cidUrls)
+		: plainTextToHtml(String(message.text || "No content"));
+
+	// Remote images / CSS backgrounds load from the sender's servers and are
+	// commonly used as tracking pixels: strip them unless allowed.
+	const allowed = new Set(Object.values(cidUrls));
+	let blockedRemote = 0;
+	const isBlocked = (url: string | null) =>
+		!!url && REMOTE_URL.test(url) && !allowed.has(url.trim());
+	const hook = (node: Element) => {
+		if (!blockRemote || !node.getAttribute) return;
+		for (const attr of ["src", "background", "poster"]) {
+			if (isBlocked(node.getAttribute(attr))) {
+				node.removeAttribute(attr);
+				blockedRemote++;
+			}
+		}
+		const srcset = node.getAttribute("srcset");
+		if (srcset && /(https?:)?\/\//i.test(srcset)) {
+			node.removeAttribute("srcset");
+			blockedRemote++;
+		}
+		const style = node.getAttribute("style");
+		if (style) {
+			const stripped = style.replace(CSS_REMOTE_URL, "none");
+			if (stripped !== style) {
+				node.setAttribute("style", stripped);
+				blockedRemote++;
+			}
+		}
+		if (node.nodeName === "STYLE" && node.textContent) {
+			const css = node.textContent;
+			const stripped = css.replace(CSS_REMOTE_URL, "none");
+			if (stripped !== css) {
+				node.textContent = stripped;
+				blockedRemote++;
+			}
+		}
+	};
+
+	DOMPurify.addHook("afterSanitizeAttributes", hook);
+	try {
+		const safe = DOMPurify.sanitize(rawHtml, {
+			USE_PROFILES: { html: true },
+			// Keep leading <style> blocks inside the fragment instead of hoisting
+			// them into a discarded <head>.
+			FORCE_BODY: true,
+			ADD_TAGS: ["style"],
+			ADD_ATTR: ["target"],
+			FORBID_TAGS: ["form", "input", "button", "textarea", "select"],
+		});
+		return { html: safe, blockedRemote };
+	} finally {
+		DOMPurify.removeHook("afterSanitizeAttributes");
+	}
+}
+
+const TRUSTED_SENDERS_KEY = "kurrier:trusted-image-senders";
+
+function readTrustedSenders(): string[] {
+	try {
+		const raw = window.localStorage.getItem(TRUSTED_SENDERS_KEY);
+		const list = raw ? JSON.parse(raw) : [];
+		return Array.isArray(list) ? list : [];
+	} catch {
+		return [];
+	}
+}
+
+function trustSender(address: string) {
+	try {
+		const list = new Set(readTrustedSenders());
+		list.add(address.toLowerCase());
+		window.localStorage.setItem(
+			TRUSTED_SENDERS_KEY,
+			JSON.stringify(Array.from(list)),
+		);
+	} catch {}
+}
+
+export default function EmailViewer({
+	message,
+	cidUrls,
+}: {
+	message: MessageEntity;
+	cidUrls?: Record<string, string>;
+}) {
 	const hostRef = useRef<HTMLDivElement>(null);
 	const [hideQuotes, setHideQuotes] = useState(true);
+
+	const senderAddress = getMessageAddress(message, "from")?.toLowerCase() ?? "";
+	const [allowRemote, setAllowRemote] = useState(false);
+	const [blockedRemote, setBlockedRemote] = useState(0);
+	useEffect(() => {
+		if (senderAddress && readTrustedSenders().includes(senderAddress)) {
+			setAllowRemote(true);
+		}
+	}, [senderAddress]);
 
 	const [hasQuotes, setHasQuotes] = useState(false);
 	const quoteStyleRef = useRef<HTMLStyleElement | null>(null);
@@ -238,7 +339,12 @@ export default function EmailViewer({ message }: { message: MessageEntity }) {
 	const { html, text } = message;
 	useEffect(() => {
 		if (!hostRef.current) return;
-		const safeHtml = sanitizeEmail({ html, text } as MessageEntity);
+		const result = sanitizeEmail(
+			{ html, text },
+			{ cidUrls, blockRemote: !allowRemote },
+		);
+		const safeHtml = result.html;
+		setBlockedRemote(result.blockedRemote);
 
 		let shadow = hostRef.current.shadowRoot;
 		if (!shadow) shadow = hostRef.current.attachShadow({ mode: "open" });
@@ -272,7 +378,7 @@ export default function EmailViewer({ message }: { message: MessageEntity }) {
 					hideQuotesRef.current && canCollapse ? QUOTE_HIDE_CSS : "";
 			}
 		}
-	}, [html, text]);
+	}, [html, text, cidUrls, allowRemote]);
 
 	useEffect(() => {
 		if (quoteStyleRef.current) {
@@ -283,6 +389,30 @@ export default function EmailViewer({ message }: { message: MessageEntity }) {
 
 	return (
 		<div className="mb-24 mt-6 overflow-x-hidden">
+			{blockedRemote > 0 && !allowRemote && (
+				<div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+					<span>Remote images are hidden to protect your privacy.</span>
+					<button
+						type="button"
+						className="font-medium text-foreground hover:underline"
+						onClick={() => setAllowRemote(true)}
+					>
+						Show images
+					</button>
+					{senderAddress && (
+						<button
+							type="button"
+							className="font-medium text-foreground hover:underline"
+							onClick={() => {
+								trustSender(senderAddress);
+								setAllowRemote(true);
+							}}
+						>
+							Always show from {senderAddress}
+						</button>
+					)}
+				</div>
+			)}
 			<div ref={hostRef} style={{ display: "block", width: "100%" }} />
 			{hasQuotes && (
 				<ActionIcon

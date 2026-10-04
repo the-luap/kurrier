@@ -30,7 +30,7 @@ import {
 	threads,
 } from "@db";
 import { createMailer } from "@providers";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray, isNotNull } from "drizzle-orm";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 const supabase = createClient(
 	publicConfig.API_URL,
@@ -267,6 +267,7 @@ export default defineNitroPlugin(async (nitroApp) => {
 			const attachmentBlobs = await fetchAttachmentBlobs(
 				supabase,
 				decodedForm.attachments as string,
+				mailbox.identity.ownerId,
 			);
 
 			const data: MailComposeInput = {
@@ -291,7 +292,26 @@ export default defineNitroPlugin(async (nitroApp) => {
 			const { subject, text, html } = await generateMailAttrs({
 				data,
 				orig: origRow,
+				ownerId: mailbox.identity.ownerId,
 			});
+
+			// Forwarding: include the attachments of the original message the
+			// user kept in the editor.
+			if (data.mode === "forward" && origRow?.message) {
+				const forwardIds = String(decodedForm.forwardAttachmentIds ?? "")
+					.split(",")
+					.map((v) => v.trim())
+					.filter(Boolean);
+				if (forwardIds.length > 0) {
+					attachmentBlobs.push(
+						...(await fetchForwardedAttachments(
+							origRow.message.id,
+							forwardIds,
+							mailbox.identity.ownerId,
+						)),
+					);
+				}
+			}
 
 			const mailboxIdForMessage = String(decodedForm.sentMailboxId);
 
@@ -404,9 +424,11 @@ export default defineNitroPlugin(async (nitroApp) => {
 	const generateMailAttrs = async ({
 		data,
 		orig,
+		ownerId,
 	}: {
 		data: MailComposeInput;
 		orig: GetOriginalMessageType | null;
+		ownerId: string;
 	}) => {
 		if (!orig) {
 			return {
@@ -443,7 +465,13 @@ export default defineNitroPlugin(async (nitroApp) => {
 				})
 			: "";
 
-		const origHtml = hasOrig ? origMsg!.html || origMsg!.textAsHtml || "" : "";
+		const origHtml = hasOrig
+			? await inlineCidImages(
+					origMsg!.html || origMsg!.textAsHtml || "",
+					origMsg!.id,
+					ownerId,
+				)
+			: "";
 		const origText = hasOrig ? origMsg!.text || "" : "";
 
 		// Subject
@@ -465,7 +493,7 @@ export default defineNitroPlugin(async (nitroApp) => {
 		const quotedText = hasOrig
 			? `${attribution}\n${origText
 					.split(/\r?\n/)
-					.map((line) => (line ? `> ${line}` : ">"))
+					.map((line: string) => (line ? `> ${line}` : ">"))
 					.join("\n")}`
 			: "";
 
@@ -494,9 +522,91 @@ ${origHtml ? extractBodyHtml(origHtml) : `<pre style="white-space:pre-wrap;margi
 		return { subject, text, html };
 	};
 
+	// Inline images of stored messages reference their attachment via "cid:".
+	// Quoted in a reply/forward those references would break, so embed them
+	// as data URIs (bounded, so huge mails do not explode).
+	async function inlineCidImages(
+		html: string,
+		messageId: string,
+		ownerId: string,
+	): Promise<string> {
+		if (!html || !/cid:/i.test(html)) return html;
+		const rows = await db
+			.select()
+			.from(messageAttachments)
+			.where(
+				and(
+					eq(messageAttachments.messageId, messageId),
+					eq(messageAttachments.ownerId, ownerId),
+					isNotNull(messageAttachments.cid),
+				),
+			);
+		let budget = 8 * 1024 * 1024;
+		let out = html;
+		for (const row of rows) {
+			const cid = String(row.cid).replace(/^<|>$/g, "");
+			if (!cid || !(row.sizeBytes ?? 0) || (row.sizeBytes ?? 0) > budget) continue;
+			const { data: blob } = await supabase.storage
+				.from(String(row.bucketId || "attachments"))
+				.download(String(row.path));
+			if (!blob) continue;
+			budget -= blob.size;
+			const b64 = Buffer.from(await blob.arrayBuffer()).toString("base64");
+			const uri = `data:${row.contentType || "application/octet-stream"};base64,${b64}`;
+			const escaped = cid.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+			out = out.replace(new RegExp(`cid:${escaped}`, "gi"), uri);
+		}
+		return out;
+	}
+
+	async function fetchForwardedAttachments(
+		originalMessageId: string,
+		ids: string[],
+		ownerId: string,
+	): Promise<AttachmentDownload[]> {
+		const rows = await db
+			.select()
+			.from(messageAttachments)
+			.where(
+				and(
+					eq(messageAttachments.messageId, originalMessageId),
+					eq(messageAttachments.ownerId, ownerId),
+					inArray(messageAttachments.id, ids),
+				),
+			);
+		return Promise.all(
+			rows.map(async (row): Promise<AttachmentDownload> => {
+				const { data: blob, error } = await supabase.storage
+					.from(String(row.bucketId || "attachments"))
+					.download(String(row.path));
+				if (error || !blob) {
+					throw new Error(
+						`Could not load attachment "${row.filenameOriginal ?? row.path}" to forward`,
+					);
+				}
+				const item = MessageAttachmentInsertSchema.parse({
+					bucketId: row.bucketId,
+					path: row.path,
+					filenameOriginal: row.filenameOriginal,
+					contentType: row.contentType,
+					sizeBytes: row.sizeBytes,
+					checksum: row.checksum,
+					disposition: "attachment",
+				});
+				return {
+					item,
+					blob,
+					name: String(row.filenameOriginal || "attachment"),
+					sizeBytes: Number(row.sizeBytes ?? blob.size),
+				};
+			}),
+		);
+	}
+
 	async function fetchAttachmentBlobs(
 		supabase: SupabaseClient,
 		attachmentsString: string,
+		ownerId: string,
 	): Promise<AttachmentDownload[]> {
 		let attachments: unknown = [];
 		try {
@@ -510,7 +620,21 @@ ${origHtml ? extractBodyHtml(origHtml) : `<pre style="white-space:pre-wrap;margi
 
 		if (candidates.length === 0) return [];
 
-		try {
+		// The list comes from the browser and is downloaded with the service
+		// role: only allow files from the sender's own upload folder.
+		const ownPrefix = `private/${ownerId}/`;
+		for (const a of candidates as any[]) {
+			const path = String(a.path);
+			if (
+				String(a.bucketId) !== "attachments" ||
+				!path.startsWith(ownPrefix) ||
+				path.includes("..")
+			) {
+				throw new Error("Invalid attachment");
+			}
+		}
+
+		{
 			const downloads = await Promise.all(
 				candidates.map(async (attachment: any): Promise<AttachmentDownload> => {
 					const { data: blob, error } = await supabase.storage
@@ -537,10 +661,8 @@ ${origHtml ? extractBodyHtml(origHtml) : `<pre style="white-space:pre-wrap;margi
 				}),
 			);
 
+			// A failed download aborts sending instead of silently dropping it.
 			return downloads;
-		} catch (e) {
-			console.error("fetchAttachmentBlobs error:", e);
-			return [];
 		}
 	}
 

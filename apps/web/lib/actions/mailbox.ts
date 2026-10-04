@@ -279,6 +279,8 @@ export async function sendMail(
 	}
 
 	const rls = await rlsClient();
+	const draftId = decodedForm.draftId ? String(decodedForm.draftId) : "";
+	delete decodedForm.draftId;
 	const scheduledAtRaw = decodedForm.scheduledAt
 		? String(decodedForm.scheduledAt)
 		: "";
@@ -327,6 +329,7 @@ export async function sendMail(
 		if (!row?.id || !row.scheduledAt) {
 			return { success: false, error: "Failed to schedule your mail." };
 		}
+		if (draftId) await deleteDraft(draftId);
 
 		const { sendMailQueue } = await getRedis();
 		const delay = Math.max(
@@ -358,6 +361,7 @@ export async function sendMail(
 			error: error instanceof Error ? error.message : "Failed to send email.",
 		};
 	}
+	if (result?.success && draftId) await deleteDraft(draftId);
 	// Show the sent reply in the open thread and the Sent folder.
 	revalidatePath("/dashboard/mail");
 	return result;
@@ -1360,13 +1364,135 @@ export const clearImapClients = async (identityId: string) => {
 
 export const fetchScheduledDraftCounts = async () => {
 	const rls = await rlsClient();
+	// Only the columns the sidebar counts need; payloads can be large.
 	const rows = await rls((tx) =>
+		tx
+			.select({
+				id: draftMessages.id,
+				identityId: draftMessages.identityId,
+				status: draftMessages.status,
+			})
+			.from(draftMessages)
+			.where(inArray(draftMessages.status, ["scheduled", "draft"])),
+	);
+	return rows;
+};
+
+export type DraftPayload = {
+	mode?: "reply" | "forward" | "compose";
+	to?: string;
+	cc?: string;
+	bcc?: string;
+	subject?: string;
+	bodyHtml?: string;
+	text?: string;
+	attachments?: string;
+	originalMessageId?: string;
+	threadUrl?: string;
+};
+
+// Autosaved, not yet sent messages (status "draft").
+export async function saveDraft(input: {
+	draftId?: string | null;
+	sentMailboxId: string;
+	payload: DraftPayload;
+}): Promise<{ draftId: string | null; error?: string }> {
+	if (!input.sentMailboxId) return { draftId: input.draftId ?? null };
+	const rls = await rlsClient();
+	try {
+		return await rls(async (tx) => {
+			const [mailbox] = await tx
+				.select({ identityId: mailboxes.identityId })
+				.from(mailboxes)
+				.where(eq(mailboxes.id, input.sentMailboxId));
+			if (!mailbox) return { draftId: input.draftId ?? null };
+
+			const values = {
+				mailboxId: input.sentMailboxId,
+				identityId: mailbox.identityId,
+				payload: input.payload as Record<string, any>,
+				updatedAt: new Date(),
+			};
+
+			if (input.draftId) {
+				const [updated] = await tx
+					.update(draftMessages)
+					.set(values)
+					.where(
+						and(
+							eq(draftMessages.id, input.draftId),
+							eq(draftMessages.status, "draft"),
+						),
+					)
+					.returning({ id: draftMessages.id });
+				// Gone (sent or discarded meanwhile): do not resurrect it.
+				return { draftId: updated?.id ?? null };
+			}
+
+			const [created] = await tx
+				.insert(draftMessages)
+				.values({ ...values, status: "draft" })
+				.returning({ id: draftMessages.id });
+			return { draftId: created?.id ?? null };
+		});
+	} catch (error) {
+		return {
+			draftId: input.draftId ?? null,
+			error: error instanceof Error ? error.message : "Could not save draft",
+		};
+	}
+}
+
+export async function deleteDraft(draftId: string) {
+	if (!draftId) return;
+	const rls = await rlsClient();
+	await rls((tx) =>
+		tx
+			.delete(draftMessages)
+			.where(
+				and(eq(draftMessages.id, draftId), eq(draftMessages.status, "draft")),
+			),
+	);
+	revalidatePath("/dashboard/mail");
+}
+
+export async function fetchDraftForMessage(originalMessageId: string) {
+	const rls = await rlsClient();
+	const [row] = await rls((tx) =>
 		tx
 			.select()
 			.from(draftMessages)
-			.where(eq(draftMessages.status, "scheduled")),
+			.where(
+				and(
+					eq(draftMessages.status, "draft"),
+					sql`${draftMessages.payload}->>'originalMessageId' = ${originalMessageId}`,
+				),
+			)
+			.orderBy(desc(draftMessages.updatedAt))
+			.limit(1),
 	);
-	return rows;
+	return row ?? null;
+}
+
+export const fetchDrafts = async (identityPublicId: string) => {
+	const rls = await rlsClient();
+	return rls(async (tx) => {
+		const [identity] = await tx
+			.select({ id: identities.id })
+			.from(identities)
+			.where(eq(identities.publicId, identityPublicId));
+		if (!identity) return [];
+		return tx
+			.select()
+			.from(draftMessages)
+			.where(
+				and(
+					eq(draftMessages.status, "draft"),
+					eq(draftMessages.identityId, identity.id),
+				),
+			)
+			.orderBy(desc(draftMessages.updatedAt));
+	});
 };
 
 export const fetchScheduledDrafts = async (identityPublicId: string) => {
@@ -1441,8 +1567,8 @@ export async function snoozeThread(input: {
 }
 
 export const fetchIdentitySnoozedThreads = async (identityPublicId?: string) => {
-	if (!identityPublicId) return { threads: [] };
-
+	// Without an identity, return the snoozed threads of all identities
+	// (the sidebar counts them per identity).
 	const rls = await rlsClient();
 	const now = new Date();
 
@@ -1452,7 +1578,9 @@ export const fetchIdentitySnoozedThreads = async (identityPublicId?: string) => 
 			.from(mailboxThreads)
 			.where(
 				and(
-					eq(mailboxThreads.identityPublicId, identityPublicId),
+					identityPublicId
+						? eq(mailboxThreads.identityPublicId, identityPublicId)
+						: undefined,
 					isNotNull(mailboxThreads.snoozedUntil),
 					gt(mailboxThreads.snoozedUntil, now),
 				),

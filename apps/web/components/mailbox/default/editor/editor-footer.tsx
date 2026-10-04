@@ -1,6 +1,10 @@
 import React, { useRef, useState } from "react";
 import { ActionIcon, Button, Popover, Progress } from "@mantine/core";
-import { Baseline, Paperclip, X as IconX } from "lucide-react";
+import { Baseline, Paperclip, Trash2, X as IconX } from "lucide-react";
+import type {
+	ForwardableAttachment,
+	InitialDraft,
+} from "@/components/mailbox/default/editor/email-editor";
 import { RichTextEditor } from "@mantine/tiptap";
 import { useDynamicContext } from "@/hooks/use-dynamic-context";
 import { createClient } from "@/lib/supabase/client";
@@ -38,10 +42,39 @@ export default function EditorFooter() {
 		publicConfig: PublicConfig;
 		isPending: boolean;
 		message: MessageEntity;
+		initialDraft?: InitialDraft;
+		originalAttachments?: ForwardableAttachment[];
+		currentMode?: "reply" | "forward" | "compose";
+		discardDraft?: () => Promise<void>;
 	}>();
 	const inputRef = useRef<HTMLInputElement | null>(null);
-	const [uploads, setUploads] = useState<UploadItem[]>([]);
-	const [attachments, setAttachments] = useState<Record<any, any>[]>([]);
+
+	// Attachments already uploaded for a restored draft.
+	const [attachments, setAttachments] = useState<Record<any, any>[]>(() => {
+		try {
+			const parsed = JSON.parse(state.initialDraft?.payload.attachments || "[]");
+			return Array.isArray(parsed) ? parsed : [];
+		} catch {
+			return [];
+		}
+	});
+	const [uploads, setUploads] = useState<UploadItem[]>(() =>
+		attachments.map((a) => ({
+			name: String(a.filenameOriginal ?? "attachment"),
+			path: String(a.path),
+			size: Number(a.sizeBytes ?? 0),
+			progress: 100,
+			status: "done" as const,
+		})),
+	);
+
+	// Forwarding includes the original attachments unless removed here.
+	const originalAttachments = state.originalAttachments ?? [];
+	const [removedForwardIds, setRemovedForwardIds] = useState<string[]>([]);
+	const forwardAttachments =
+		state.currentMode === "forward"
+			? originalAttachments.filter((a) => !removedForwardIds.includes(a.id))
+			: [];
 
 	const newMessageId = useRef(uuidv4());
 
@@ -143,7 +176,11 @@ export default function EditorFooter() {
 		const bucket = "attachments";
 
 		for (const file of Array.from(files)) {
-			const path = `private/${userId}/${newMessageId.current}/${uuidv4()}.${extension(file.type)}`;
+			const ext =
+				extension(file.type) ||
+				(file.name.includes(".") ? file.name.split(".").pop() : "") ||
+				"bin";
+			const path = `private/${userId}/${newMessageId.current}/${uuidv4()}.${ext}`;
 
 			setUploads((prev) => [
 				...prev,
@@ -179,10 +216,49 @@ export default function EditorFooter() {
 
 	const removeUpload = (path: string) => {
 		setUploads((prev) => prev.filter((u) => u.path !== path));
+		// Also drop it from what gets sent (it used to stay attached).
+		setAttachments((prev) => prev.filter((a) => a.path !== path));
 	};
 
 	return (
 		<>
+			{forwardAttachments.length > 0 && (
+				<div className="w-full rounded-md px-2 pt-2 flex flex-wrap gap-2">
+					{forwardAttachments.map((a) => (
+						<div
+							key={a.id}
+							className="flex items-center gap-2 rounded bg-zinc-100 dark:bg-neutral-800 px-3 py-1 text-sm"
+							title="Attachment of the forwarded message"
+						>
+							<Paperclip size={14} />
+							<span className="truncate max-w-[14rem]">
+								{a.filenameOriginal || "attachment"}
+							</span>
+							{a.sizeBytes ? (
+								<span className="text-xs text-muted-foreground">
+									({formatBytes(a.sizeBytes)})
+								</span>
+							) : null}
+							<ActionIcon
+								size="xs"
+								variant="subtle"
+								color="gray"
+								title="Don't forward this attachment"
+								onClick={() =>
+									setRemovedForwardIds((prev) => [...prev, a.id])
+								}
+							>
+								<IconX size={12} />
+							</ActionIcon>
+						</div>
+					))}
+				</div>
+			)}
+			<input
+				type="hidden"
+				name="forwardAttachmentIds"
+				value={forwardAttachments.map((a) => a.id).join(",")}
+			/>
 			{uploads.length > 0 && (
 				<div className="w-full rounded-md p-2 flex flex-col gap-2">
 					{uploads.map((u) => {
@@ -190,7 +266,7 @@ export default function EditorFooter() {
 						return (
 							<div
 								key={u.path}
-								className="flex justify-between items-center w-full max-w-xl bg-zinc-100 rounded px-4 py-2"
+								className="flex justify-between items-center w-full max-w-xl bg-zinc-100 dark:bg-neutral-800 rounded px-4 py-2"
 							>
 								<div className="flex items-center gap-2 min-w-0">
 									<a
@@ -201,7 +277,7 @@ export default function EditorFooter() {
 									>
 										{u.name}
 									</a>
-									<span className="text-sm text-zinc-700">
+									<span className="text-sm text-zinc-700 dark:text-zinc-300">
 										({formatBytes(u.size)})
 									</span>
 								</div>
@@ -294,6 +370,19 @@ export default function EditorFooter() {
 				>
 					<Paperclip size={18} />
 				</ActionIcon>
+
+				{state.discardDraft && (
+					<ActionIcon
+						onClick={() => void state.discardDraft?.()}
+						variant="transparent"
+						color="gray"
+						className="ml-auto mr-2"
+						aria-label="Discard draft"
+						title="Discard draft"
+					>
+						<Trash2 size={18} />
+					</ActionIcon>
+				)}
 
 				{state?.message && (
 					<input
