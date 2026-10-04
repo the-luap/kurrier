@@ -45,10 +45,16 @@ function formatWhen(d: Date) {
 		});
 }
 
+// Empty paragraphs from the editor ("<p></p>") collapse to zero height in
+// most mail clients, so blank lines typed by the user would disappear.
+function toEmailHtml(html: string) {
+	return html.trim().replace(/<p([^>]*)><\/p>/g, "<p$1><br></p>");
+}
+
 export const TextEditor = forwardRef<TextEditorHandle, TextEditorProps>(
 	({ name, defaultValue = "", onChange }, ref) => {
 		const containerRef = useRef<HTMLDivElement>(null);
-		const [value, setValue] = useState(defaultValue);
+		const [value, setValue] = useState(() => toEmailHtml(defaultValue));
 		const [textValue, setTextValue] = useState("");
 
 		const editor = useEditor({
@@ -58,15 +64,25 @@ export const TextEditor = forwardRef<TextEditorHandle, TextEditorProps>(
 			content: defaultValue,
 			onUpdate: ({ editor }) => {
 				setTextValue(editor.getText().trim());
-				setValue(editor.getHTML().trim());
+				setValue(toEmailHtml(editor.getHTML()));
 			},
 		});
 
+		// Re-apply defaultValue (e.g. the signature after switching sender) only
+		// while the user has not typed anything, otherwise the draft is lost.
+		const appliedHtmlRef = useRef<string | null>(null);
 		useEffect(() => {
-			if (!editor || !defaultValue) return;
-			editor.commands.setContent(defaultValue);
+			if (!editor) return;
+			const current = editor.getHTML();
+			const pristine =
+				appliedHtmlRef.current === null
+					? true
+					: current === appliedHtmlRef.current || editor.isEmpty;
+			if (!pristine) return;
+			editor.commands.setContent(defaultValue || "");
+			appliedHtmlRef.current = editor.getHTML();
 			setTextValue(editor.getText().trim());
-			setValue(editor.getHTML().trim());
+			setValue(toEmailHtml(editor.getHTML()));
 		}, [defaultValue, editor]);
 
 		useImperativeHandle(

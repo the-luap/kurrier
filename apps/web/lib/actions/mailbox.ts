@@ -74,51 +74,44 @@ function getTypeSenseClient(): Client {
 export const fetchMailbox = cache(
 	async (identityPublicId: string, mailboxSlug = "inbox") => {
 		const rls = await rlsClient();
-		const [identity] = await rls((tx) =>
-			tx
+		// One transaction instead of five: every rls() call is its own
+		// BEGIN/set_config/COMMIT round trip.
+		return rls(async (tx) => {
+			const [identity] = await tx
 				.select()
 				.from(identities)
-				.where(eq(identities.publicId, identityPublicId)),
-		);
-		const [activeMailbox] = await rls((tx) =>
-			tx
-				.select()
-				.from(mailboxes)
-				.where(
-					and(
-						eq(mailboxes.identityId, identity.id),
-						eq(mailboxes.slug, mailboxSlug),
-					),
-				),
-		);
-		const mailboxList = await rls((tx) =>
-			tx.select().from(mailboxes).where(eq(mailboxes.identityId, identity.id)),
-		);
-		const [messagesCount] = activeMailbox?.id
-			? await rls((tx) =>
-					tx
+				.where(eq(identities.publicId, identityPublicId));
+
+			const mailboxList = identity
+				? await tx
+						.select()
+						.from(mailboxes)
+						.where(eq(mailboxes.identityId, identity.id))
+				: [];
+			const activeMailbox = mailboxList.find((m) => m.slug === mailboxSlug);
+
+			const [messagesCount] = activeMailbox?.id
+				? await tx
 						.select({ count: count() })
 						.from(mailboxThreads)
-						.where(eq(mailboxThreads.mailboxId, activeMailbox.id)),
-				)
-			: [{ count: 0 }];
+						.where(eq(mailboxThreads.mailboxId, activeMailbox.id))
+				: [{ count: 0 }];
 
-		const [sync] = activeMailbox
-			? await rls((tx) => {
-					return tx
+			const [sync] = activeMailbox
+				? await tx
 						.select()
 						.from(mailboxSync)
-						.where(eq(mailboxSync.mailboxId, activeMailbox.id));
-				})
-			: [null];
+						.where(eq(mailboxSync.mailboxId, activeMailbox.id))
+				: [null];
 
-		return {
-			activeMailbox,
-			mailboxList,
-			identity,
-			count: Number(messagesCount.count),
-			mailboxSync: sync,
-		};
+			return {
+				activeMailbox,
+				mailboxList,
+				identity,
+				count: Number(messagesCount?.count ?? 0),
+				mailboxSync: sync,
+			};
+		});
 	},
 );
 
@@ -347,12 +340,27 @@ export async function sendMail(
 			{ jobId: row.id, delay },
 		);
 		revalidatePath("/dashboard/mail");
-		return { success: true, data: { draftMessageId: row.id } };
+		return {
+			success: true,
+			message: "Message scheduled",
+			data: { draftMessageId: row.id },
+		};
 	}
 
 	const { sendMailQueue, sendMailEvents } = await getRedis();
 	const job = await sendMailQueue.add("send-and-reconcile", decodedForm);
-	return await job.waitUntilFinished(sendMailEvents);
+	let result: FormState;
+	try {
+		result = await job.waitUntilFinished(sendMailEvents);
+	} catch (error) {
+		return {
+			success: false,
+			error: error instanceof Error ? error.message : "Failed to send email.",
+		};
+	}
+	// Show the sent reply in the open thread and the Sent folder.
+	revalidatePath("/dashboard/mail");
+	return result;
 }
 
 export const deltaFetch = async ({ identityId }: { identityId: string }) => {
@@ -534,8 +542,8 @@ export const fetchAdjacentMailboxThreads = cache(
 			or(isNull(mailboxThreads.snoozedUntil), lte(mailboxThreads.snoozedUntil, now)),
 		);
 
-		const [current] = await rls((tx) =>
-			tx
+		return rls(async (tx) => {
+			const [current] = await tx
 				.select({
 					threadId: mailboxThreads.threadId,
 					effectiveActivityAt,
@@ -543,26 +551,24 @@ export const fetchAdjacentMailboxThreads = cache(
 				})
 				.from(mailboxThreads)
 				.where(and(visibleInMailbox, eq(mailboxThreads.threadId, threadId)))
-				.limit(1),
-		);
+				.limit(1);
 
-		if (!current) {
-			return { previousThreadId: null, nextThreadId: null };
-		}
+			if (!current) {
+				return { previousThreadId: null, nextThreadId: null };
+			}
 
-		const cursorEffectiveActivityAt =
-			current.effectiveActivityAt instanceof Date
+			const cursorEffectiveActivityAt =
+				current.effectiveActivityAt instanceof Date
 				? current.effectiveActivityAt.toISOString()
 				: String(current.effectiveActivityAt);
-		const cursorLastActivityAt =
-			current.lastActivityAt instanceof Date
+			const cursorLastActivityAt =
+				current.lastActivityAt instanceof Date
 				? current.lastActivityAt.toISOString()
 				: String(current.lastActivityAt);
-		const cursorThreadId = String(current.threadId);
-		const cursor = sql`(${cursorEffectiveActivityAt}::timestamptz, ${cursorLastActivityAt}::timestamptz, ${cursorThreadId}::uuid)`;
+			const cursorThreadId = String(current.threadId);
+			const cursor = sql`(${cursorEffectiveActivityAt}::timestamptz, ${cursorLastActivityAt}::timestamptz, ${cursorThreadId}::uuid)`;
 
-		const [previous] = await rls((tx) =>
-			tx
+			const [previous] = await tx
 				.select({ threadId: mailboxThreads.threadId })
 				.from(mailboxThreads)
 				.where(
@@ -576,11 +582,9 @@ export const fetchAdjacentMailboxThreads = cache(
 					),
 				)
 				.orderBy(asc(effectiveActivityAt), asc(mailboxThreads.lastActivityAt), asc(mailboxThreads.threadId))
-				.limit(1),
-		);
+				.limit(1);
 
-		const [next] = await rls((tx) =>
-			tx
+			const [next] = await tx
 				.select({ threadId: mailboxThreads.threadId })
 				.from(mailboxThreads)
 				.where(
@@ -594,13 +598,13 @@ export const fetchAdjacentMailboxThreads = cache(
 					),
 				)
 				.orderBy(desc(effectiveActivityAt), desc(mailboxThreads.lastActivityAt), desc(mailboxThreads.threadId))
-				.limit(1),
-		);
+				.limit(1);
 
-		return {
-			previousThreadId: previous?.threadId ?? null,
-			nextThreadId: next?.threadId ?? null,
-		};
+			return {
+				previousThreadId: previous?.threadId ?? null,
+				nextThreadId: next?.threadId ?? null,
+			};
+		});
 	},
 );
 

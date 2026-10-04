@@ -38,9 +38,16 @@ function EditorHeader({ focusOnSubject }: { focusOnSubject?: () => void }) {
 		[],
 	);
 
+	// Replies go to Reply-To when the sender set one; forwards start empty.
 	const toEmail = useMemo(() => {
-		return getMessageAddress(state?.message, "from") || "";
-	}, [state.message]);
+		if (!state?.message || mode === "forward") return "";
+		const replyTo = (state.message as any).replyTo;
+		const replyToAddress =
+			typeof replyTo === "string"
+				? replyTo
+				: (replyTo?.value?.[0]?.address ?? null);
+		return replyToAddress || getMessageAddress(state.message, "from") || "";
+	}, [state.message, mode]);
 
 	const renderOption: SelectProps["renderOption"] = ({ option }) => {
 		const ItemIcon =
@@ -61,7 +68,8 @@ function EditorHeader({ focusOnSubject }: { focusOnSubject?: () => void }) {
 
 		const original = state.message.subject?.trim() || "";
 
-		const cleaned = original.replace(/^(re|fwd)\s*:\s*/gi, "");
+		// Strip any chain of reply/forward prefixes ("Re: AW: Fwd: ...").
+		const cleaned = original.replace(/^((re|aw|fwd?|wg)\s*:\s*)+/i, "");
 
 		if (mode === "reply") return `Re: ${cleaned}`;
 		if (mode === "forward") return `Fwd: ${cleaned}`;
@@ -114,14 +122,9 @@ function EditorHeader({ focusOnSubject }: { focusOnSubject?: () => void }) {
 						To
 					</span>
 					<EmailHeaderContacts
+						key={`to-${mode}`}
 						name={"to"}
-						maxTags={1}
 						toEmail={toEmail}
-						onChange={(value) => {
-							if (value.length > 0) {
-								setSubjectFocus(true);
-							}
-						}}
 					/>
 				</div>
 
@@ -158,12 +161,6 @@ function EditorHeader({ focusOnSubject }: { focusOnSubject?: () => void }) {
 					</span>
 					<EmailHeaderContacts
 						name={"cc"}
-						toEmail={toEmail}
-						onChange={(value) => {
-							if (value.length > 0) {
-								setSubjectFocus(true);
-							}
-						}}
 					/>
 				</div>
 			)}
@@ -175,12 +172,6 @@ function EditorHeader({ focusOnSubject }: { focusOnSubject?: () => void }) {
 					</span>
 					<EmailHeaderContacts
 						name={"bcc"}
-						toEmail={toEmail}
-						onChange={(value) => {
-							if (value.length > 0) {
-								setSubjectFocus(true);
-							}
-						}}
 					/>
 				</div>
 			)}
@@ -230,14 +221,9 @@ function EditorHeader({ focusOnSubject }: { focusOnSubject?: () => void }) {
 						<div className="flex items-center gap-2">
 							<span className="text-sm text-muted-foreground">To</span>
 							<EmailHeaderContacts
+								key={`to-${mode}`}
 								name={"to"}
-								maxTags={1}
 								toEmail={toEmail}
-								onChange={(value) => {
-									if (value.length > 0) {
-										setSubjectFocus(true);
-									}
-								}}
 							/>
 						</div>
 
@@ -246,12 +232,6 @@ function EditorHeader({ focusOnSubject }: { focusOnSubject?: () => void }) {
 								<span className="text-sm text-muted-foreground">Cc</span>
 								<EmailHeaderContacts
 									name={"cc"}
-									toEmail={toEmail}
-									onChange={(value) => {
-										if (value.length > 0) {
-											setSubjectFocus(true);
-										}
-									}}
 								/>
 							</div>
 						)}
@@ -261,12 +241,6 @@ function EditorHeader({ focusOnSubject }: { focusOnSubject?: () => void }) {
 								<span className="text-sm text-muted-foreground">Bcc</span>
 								<EmailHeaderContacts
 									name={"bcc"}
-									toEmail={toEmail}
-									onChange={(value) => {
-										if (value.length > 0) {
-											setSubjectFocus(true);
-										}
-									}}
 								/>
 							</div>
 						)}

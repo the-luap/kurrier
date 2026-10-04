@@ -55,7 +55,7 @@ export default async function SearchPage({
 
 	const threadIds = pageItems.map((i) => i.threadId);
 	const { threads } =
-		threadIds.length > 0
+		activeMailbox && threadIds.length > 0
 			? await fetchMailboxThreadsList(activeMailbox.id, threadIds)
 			: { threads: [] };
 

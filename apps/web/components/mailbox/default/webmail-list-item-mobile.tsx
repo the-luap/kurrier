@@ -137,7 +137,7 @@ export default function WebmailListItemMobile({
 						e.target.checked
 							? next.add(mailboxThreadItem.threadId)
 							: next.delete(mailboxThreadItem.threadId);
-						setState({ selectedThreadIds: next });
+						setState((prev) => ({ ...prev, selectedThreadIds: next }));
 					}}
 					aria-label={`Select ${mailboxThreadItem.subject}`}
 					className="h-4 w-4 rounded border-muted-foreground/40"

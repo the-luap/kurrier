@@ -33,6 +33,24 @@ export default async function ThreadItem({
 	const publicConfig = getPublicEnv();
     const preview = await fetchEventPreviewItems(attachments, identityPublicId)
 
+	// Only serialize what the client components need: the body goes to the
+	// viewer once, and the (often huge) raw headers / textAsHtml copies stay
+	// on the server. This keeps the RSC payload of long threads small.
+	const { html, text, textAsHtml: _textAsHtml, headersJson, ...meta } = message;
+	const headers = (headersJson ?? {}) as Record<string, any>;
+	const headerMessage = {
+		...meta,
+		html: null,
+		text: null,
+		textAsHtml: null,
+		headersJson: {
+			from: headers.from?.text ? { text: headers.from.text } : undefined,
+			to: headers.to?.text ? { text: headers.to.text } : undefined,
+			subject: headers.subject,
+		},
+	} as unknown as MessageEntity;
+	const bodyMessage = { id: message.id, html, text } as MessageEntity;
+
 	return (
 		<>
 			<Container variant="wide">
@@ -55,7 +73,7 @@ export default async function ThreadItem({
 						<EmailRenderer
 							threadIndex={threadIndex}
 							numberOfMessages={numberOfMessages}
-							message={message}
+							message={headerMessage}
 							attachments={attachments}
 							publicConfig={publicConfig}
 							threadId={threadId}
@@ -63,7 +81,7 @@ export default async function ThreadItem({
 							activeMailboxId={activeMailboxId}
                             mailSubscription={mailSubscription}
 						>
-							<EmailViewer message={message} />
+							<EmailViewer message={bodyMessage} />
 						</EmailRenderer>
 					</div>
 				</div>

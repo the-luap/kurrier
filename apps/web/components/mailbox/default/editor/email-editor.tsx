@@ -15,8 +15,22 @@ import {
 	TextEditor,
 	type TextEditorHandle,
 } from "@/components/mailbox/default/editor/rich-text-editor";
-import { DynamicContextProvider } from "@/hooks/use-dynamic-context";
+import {
+	DynamicContextProvider,
+	useDynamicContext,
+} from "@/hooks/use-dynamic-context";
 import { sendMail } from "@/lib/actions/mailbox";
+
+// DynamicContextProvider only reads initialState once; keep the pending flag
+// of the send action in sync so the send button shows progress and cannot be
+// clicked twice.
+function SyncPendingState({ isPending }: { isPending: boolean }) {
+	const { setState } = useDynamicContext<{ isPending: boolean }>();
+	useEffect(() => {
+		setState((prev) => ({ ...prev, isPending }));
+	}, [isPending, setState]);
+	return null;
+}
 
 export type EmailEditorHandle = {
 	focus: () => void;
@@ -66,9 +80,16 @@ const EmailEditor = forwardRef<EmailEditorHandle, Props>(
 			[],
 		);
 
+		// Only notify once: callers pass inline callbacks (scroll + focus) that
+		// must not re-run on every parent render.
+		const readyCalledRef = useRef(false);
 		useEffect(() => {
+			if (readyCalledRef.current) return;
 			const el = textEditorRef.current?.getElement();
-			if (el) onReady?.(el);
+			if (el) {
+				readyCalledRef.current = true;
+				onReady?.(el);
+			}
 		}, [onReady]);
 
 		const [formState, formAction, isPending] = useActionState<
@@ -83,9 +104,7 @@ const EmailEditor = forwardRef<EmailEditorHandle, Props>(
 				});
 			} else if (formState.success) {
 				handleClose();
-				toast.success("Success", {
-					description: formState.success,
-				});
+				toast.success(formState.message || "Message sent");
 			}
 		}, [formState]);
 
@@ -95,6 +114,7 @@ const EmailEditor = forwardRef<EmailEditorHandle, Props>(
 					<DynamicContextProvider
 						initialState={{ isPending, message, publicConfig, showEditorMode }}
 					>
+						<SyncPendingState isPending={isPending} />
 						<Form action={formAction}>
 							<input
 								type={"hidden"}

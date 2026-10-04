@@ -123,8 +123,8 @@ export default function ComposeMail({
 				activeIdentityPublicId,
 				"sent",
 			);
-			setSentMailboxId(String(activeMailbox.id));
-			setSignatureHtml(identity.signatureHtml ?? "");
+			if (activeMailbox) setSentMailboxId(String(activeMailbox.id));
+			setSignatureHtml(identity?.signatureHtml ?? "");
 		}
 	};
 

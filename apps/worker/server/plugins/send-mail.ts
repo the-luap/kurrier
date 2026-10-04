@@ -30,7 +30,6 @@ import {
 	threads,
 } from "@db";
 import { createMailer } from "@providers";
-import { toArray } from "drizzle-orm/mysql-core";
 import { and, eq } from "drizzle-orm";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 const supabase = createClient(
@@ -64,8 +63,8 @@ export default defineNitroPlugin(async (nitroApp) => {
 					await processDraft(job.data);
 					return { success: true };
 				case "send-and-reconcile":
-					await send(job.data);
-					return { success: true };
+					// Propagate provider errors to the UI instead of reporting success.
+					return (await send(job.data)) ?? { success: true };
 				default:
 					return { success: true };
 			}
@@ -112,6 +111,45 @@ export default defineNitroPlugin(async (nitroApp) => {
 		return t.id;
 	}
 
+	// Form fields arrive as comma separated strings (Mantine TagsInput) or arrays.
+	// Parse them with addressparser so "Name, Jr. <a@b.c>" stays one recipient.
+	// Only bare addresses go to the providers (some reject unencoded names).
+	function toArray(input: unknown): string[] {
+		const list = Array.isArray(input) ? input : [input];
+		const out: string[] = [];
+		for (const entry of list) {
+			const str = String(entry ?? "").trim();
+			if (!str) continue;
+			for (const p of addressparser(str)) {
+				if (p.address) out.push(p.address);
+			}
+		}
+		return Array.from(new Set(out));
+	}
+
+	function escapeHtml(value: string) {
+		return value
+			.replace(/&/g, "&amp;")
+			.replace(/</g, "&lt;")
+			.replace(/>/g, "&gt;")
+			.replace(/"/g, "&quot;");
+	}
+
+	// Stored messages may be complete HTML documents. Only the <body> content
+	// can be nested inside a <blockquote>; the original <style> blocks are
+	// dropped because they would also restyle the new reply text.
+	function extractBodyHtml(html: string) {
+		const bodyMatch = html.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i);
+		let body = bodyMatch ? bodyMatch[1] : html;
+		if (!bodyMatch) {
+			body = body
+				.replace(/<!doctype[^>]*>/gi, "")
+				.replace(/<head\b[^>]*>[\s\S]*?<\/head>/gi, "")
+				.replace(/<\/?html\b[^>]*>/gi, "");
+		}
+		return body.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "");
+	}
+
 	function toAddressObj(
 		input: string | string[] | null | undefined,
 	): AddressObjectJSON {
@@ -156,7 +194,10 @@ export default defineNitroPlugin(async (nitroApp) => {
 		if (claimed.length === 0) return;
 
 		try {
-			await send(draft.payload);
+			const result = await send(draft.payload);
+			if (result && result.success === false) {
+				throw new Error(result.error || "Failed to send email");
+			}
 
 			await db
 				.update(draftMessages)
@@ -306,6 +347,8 @@ export default defineNitroPlugin(async (nitroApp) => {
 
 			const mailerResponse = await mailer.sendEmail(data.to, {
 				from: mailbox.identity.value,
+				cc: data.cc,
+				bcc: data.bcc,
 				subject: String(newMessageBody.subject),
 				text: newMessageBody.text ?? "",
 				html: newMessageBody.html ?? "",
@@ -345,10 +388,13 @@ export default defineNitroPlugin(async (nitroApp) => {
 					{ messageId: newMessage.id },
 					{ removeOnComplete: true },
 				);
-			} else if (mailerResponse.error) {
+			} else {
+				// Some providers only return { success: false } without details.
 				return {
 					success: false,
-					error: `Failed to send email: ${mailerResponse.error}`,
+					error: mailerResponse.error
+						? `Failed to send email: ${mailerResponse.error}`
+						: "Failed to send email. Check the provider settings of this identity.",
 				};
 			}
 			return { success: true };
@@ -401,29 +447,35 @@ export default defineNitroPlugin(async (nitroApp) => {
 		const origText = hasOrig ? origMsg!.text || "" : "";
 
 		// Subject
+		// The compose form pre-fills "Re:"/"Fwd:" subjects; honour user edits.
 		const baseSubj = (data.subject ?? "").trim();
 		let subject = baseSubj;
-		if (isReply && hasOrig) {
+		if (!baseSubj && isReply && hasOrig) {
 			const s = (origMsg!.subject ?? "").trim();
-			subject = s.startsWith("Re:") ? s : `Re: ${s || "(no subject)"}`;
-		} else if (isForward && hasOrig) {
+			subject = /^re\s*:/i.test(s) ? s : `Re: ${s || "(no subject)"}`;
+		} else if (!baseSubj && isForward && hasOrig) {
 			const s = (origMsg!.subject ?? "").trim();
-			subject = s.startsWith("Fwd:") ? s : `Fwd: ${s || "(no subject)"}`;
+			subject = /^(fwd?|wg)\s*:/i.test(s) ? s : `Fwd: ${s || "(no subject)"}`;
 		} else if (!baseSubj) {
 			subject = "(no subject)";
 		}
 
 		// Quoted blocks (only with original)
+		const attribution = `On ${origDateLabel}, ${fromNameStr ? `${fromNameStr} ` : ""}<${fromAddrStr}> wrote:`;
 		const quotedText = hasOrig
-			? `On ${origDateLabel}, ${fromNameStr} <${fromAddrStr}> wrote:\n${origText}`
+			? `${attribution}\n${origText
+					.split(/\r?\n/)
+					.map((line) => (line ? `> ${line}` : ">"))
+					.join("\n")}`
 			: "";
 
 		const quotedHtml = hasOrig
-			? `<hr>
-<p>On ${origDateLabel}, ${fromNameStr} &lt;${fromAddrStr}&gt; wrote:</p>
-<blockquote style="border-left:2px solid #ccc;margin:0;padding-left:8px;">
-  ${origHtml || `<pre style="white-space:pre-wrap;margin:0;">${origText}</pre>`}
-</blockquote>`
+			? `<br><div class="kurrier_quote">
+<p>${escapeHtml(attribution)}</p>
+<blockquote type="cite" style="border-left:2px solid #ccc;margin:0 0 0 0.8ex;padding-left:1ex;">
+${origHtml ? extractBodyHtml(origHtml) : `<pre style="white-space:pre-wrap;margin:0;font-family:inherit;">${escapeHtml(origText)}</pre>`}
+</blockquote>
+</div>`
 			: "";
 
 		// Bodies
