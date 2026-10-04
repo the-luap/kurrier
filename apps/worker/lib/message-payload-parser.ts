@@ -342,7 +342,10 @@ export async function parseAndStoreEmail(
 	const { ownerId, mailboxId, rawStorageKey } = opts;
 	const mode = opts.mode ?? "live";
 
-	const parsed = await simpleParser(rawEmail);
+	// Keep "cid:" references instead of inlining images as base64 data URIs:
+	// inline images are stored as attachments and resolved by the web app,
+	// which keeps the stored HTML (and every thread payload) small.
+	const parsed = await simpleParser(rawEmail, { keepCidLinks: true });
 	const headers = parsed.headers as Map<string, any>;
 
 	const encoder = new TextEncoder();

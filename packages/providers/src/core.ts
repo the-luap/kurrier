@@ -137,6 +137,8 @@ export interface Mailer {
 			text: string;
 			html: string;
 			from: string;
+			cc?: string[];
+			bcc?: string[];
 			inReplyTo: string;
 			references: string[];
 			attachments?: { name: string; content: Blob; contentType: string }[];

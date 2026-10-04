@@ -237,7 +237,7 @@ export default function WebmailListItem({
 								} else {
 									newSet.delete(mailboxThreadItem.threadId);
 								}
-								setState({ selectedThreadIds: newSet });
+								setState((prev) => ({ ...prev, selectedThreadIds: newSet }));
 							}}
 							checked={state?.selectedThreadIds?.has(
 								mailboxThreadItem.threadId,

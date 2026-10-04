@@ -378,6 +378,8 @@ export class PostmarkMailer implements Mailer {
 			text: string;
 			html: string;
 			from: string;
+			cc?: string[];
+			bcc?: string[];
 			inReplyTo: string;
 			references: string[];
 			attachments?: { name: string; content: Blob; contentType: string }[];
@@ -408,6 +410,8 @@ export class PostmarkMailer implements Mailer {
 			const res = await this.serverClient.sendEmail({
 				From: opts.from,
 				To: to.join(","), // Postmark accepts comma-separated list
+				Cc: opts.cc?.length ? opts.cc.join(",") : undefined,
+				Bcc: opts.bcc?.length ? opts.bcc.join(",") : undefined,
 				Subject: opts.subject,
 				TextBody: opts.text || undefined,
 				HtmlBody: opts.html || undefined,

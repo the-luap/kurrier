@@ -867,6 +867,8 @@ export class SesMailer implements Mailer {
 			text: string;
 			html: string;
 			from: string;
+			cc?: string[];
+			bcc?: string[];
 			inReplyTo: string;
 			references: string[];
 			attachments?: { name: string; content: Blob; contentType: string }[];
@@ -937,7 +939,11 @@ export class SesMailer implements Mailer {
 			const { MessageId } = await this.v2.send(
 				new SendEmailCommandV2({
 					FromEmailAddress: opts.from,
-					Destination: { ToAddresses: to },
+					Destination: {
+						ToAddresses: to,
+						...(opts.cc?.length ? { CcAddresses: opts.cc } : {}),
+						...(opts.bcc?.length ? { BccAddresses: opts.bcc } : {}),
+					},
 					// Source: opts.from,
 					Content: {
 						Simple: {

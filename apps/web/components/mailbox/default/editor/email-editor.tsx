@@ -15,8 +15,37 @@ import {
 	TextEditor,
 	type TextEditorHandle,
 } from "@/components/mailbox/default/editor/rich-text-editor";
-import { DynamicContextProvider } from "@/hooks/use-dynamic-context";
-import { sendMail } from "@/lib/actions/mailbox";
+import {
+	DynamicContextProvider,
+	useDynamicContext,
+} from "@/hooks/use-dynamic-context";
+import {
+	type DraftPayload,
+	deleteDraft,
+	saveDraft,
+	sendMail,
+} from "@/lib/actions/mailbox";
+
+export type InitialDraft = { id: string; payload: DraftPayload } | null;
+
+export type ForwardableAttachment = {
+	id: string;
+	filenameOriginal: string | null;
+	sizeBytes: number | null;
+};
+
+const AUTOSAVE_DELAY_MS = 1500;
+
+// DynamicContextProvider only reads initialState once; keep the pending flag
+// of the send action in sync so the send button shows progress and cannot be
+// clicked twice.
+function SyncPendingState({ isPending }: { isPending: boolean }) {
+	const { setState } = useDynamicContext<{ isPending: boolean }>();
+	useEffect(() => {
+		setState((prev) => ({ ...prev, isPending }));
+	}, [isPending, setState]);
+	return null;
+}
 
 export type EmailEditorHandle = {
 	focus: () => void;
@@ -38,6 +67,8 @@ type Props = {
 	}[];
 	onSentMailboxChange?: (sentMailboxId: string) => void;
 	handleClose: () => void;
+	initialDraft?: InitialDraft;
+	originalAttachments?: ForwardableAttachment[];
 };
 
 const EmailEditor = forwardRef<EmailEditorHandle, Props>(
@@ -52,6 +83,8 @@ const EmailEditor = forwardRef<EmailEditorHandle, Props>(
 			senderOptions = [],
 			onSentMailboxChange,
 			handleClose,
+			initialDraft = null,
+			originalAttachments = [],
 		},
 		ref,
 	) => {
@@ -66,9 +99,16 @@ const EmailEditor = forwardRef<EmailEditorHandle, Props>(
 			[],
 		);
 
+		// Only notify once: callers pass inline callbacks (scroll + focus) that
+		// must not re-run on every parent render.
+		const readyCalledRef = useRef(false);
 		useEffect(() => {
+			if (readyCalledRef.current) return;
 			const el = textEditorRef.current?.getElement();
-			if (el) onReady?.(el);
+			if (el) {
+				readyCalledRef.current = true;
+				onReady?.(el);
+			}
 		}, [onReady]);
 
 		const [formState, formAction, isPending] = useActionState<
@@ -76,16 +116,131 @@ const EmailEditor = forwardRef<EmailEditorHandle, Props>(
 			FormData
 		>(sendMail, {});
 
+		// ---- Draft autosave -------------------------------------------------
+		// The form is snapshotted after every input and stored server side as a
+		// "draft" row, so closing the editor (or Escape) never loses content.
+		const formRef = useRef<HTMLFormElement>(null);
+		const draftIdRef = useRef<string | null>(initialDraft?.id ?? null);
+		const [draftId, setDraftId] = React.useState<string | null>(
+			initialDraft?.id ?? null,
+		);
+		const lastSavedRef = useRef<string>(
+			initialDraft ? JSON.stringify(initialDraft.payload) : "",
+		);
+		const snapshotRef = useRef<{ payload: DraftPayload; mailbox: string } | null>(
+			null,
+		);
+		const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+		const saveChainRef = useRef<Promise<unknown>>(Promise.resolve());
+		const sendingRef = useRef(false);
+
+		const takeSnapshot = () => {
+			const form = formRef.current;
+			if (!form) return;
+			const fd = new FormData(form);
+			const get = (k: string) => String(fd.get(k) ?? "");
+			const payload: DraftPayload = {
+				mode: (get("mode") || (message ? "reply" : "compose")) as DraftPayload["mode"],
+				to: get("to"),
+				cc: get("cc"),
+				bcc: get("bcc"),
+				subject: get("subject"),
+				bodyHtml: textEditorRef.current?.getHTML() ?? "",
+				text: textEditorRef.current?.getText() ?? "",
+				attachments: get("attachments"),
+				originalMessageId: message?.id ? String(message.id) : undefined,
+				threadUrl: message ? window.location.pathname : undefined,
+			};
+			snapshotRef.current = { payload, mailbox: get("sentMailboxId") };
+		};
+
+		const isEmptyPayload = (p: DraftPayload) => {
+			let attachmentCount = 0;
+			try {
+				attachmentCount = JSON.parse(p.attachments || "[]").length;
+			} catch {}
+			return (
+				!p.to && !p.cc && !p.bcc && !p.text?.trim() && attachmentCount === 0 &&
+				// a pre-filled reply subject alone is not worth a draft
+				(!!message || !p.subject?.trim())
+			);
+		};
+
+		const persistDraft = (): boolean => {
+			const snap = snapshotRef.current;
+			if (!snap || sendingRef.current) return false;
+			const json = JSON.stringify(snap.payload);
+			if (json === lastSavedRef.current) return false;
+			if (!draftIdRef.current && isEmptyPayload(snap.payload)) return false;
+			lastSavedRef.current = json;
+			// Serialize saves so a slow first save cannot create two rows.
+			saveChainRef.current = saveChainRef.current.then(async () => {
+				if (sendingRef.current) return;
+				const res = await saveDraft({
+					draftId: draftIdRef.current,
+					sentMailboxId: snap.mailbox,
+					payload: snap.payload,
+				}).catch(() => null);
+				if (res?.draftId) {
+					draftIdRef.current = res.draftId;
+					setDraftId(res.draftId);
+				}
+			});
+			return true;
+		};
+
+		const scheduleSave = () => {
+			// Hidden inputs (recipients, attachments) update after React renders.
+			requestAnimationFrame(() => {
+				takeSnapshot();
+				if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+				saveTimerRef.current = setTimeout(persistDraft, AUTOSAVE_DELAY_MS);
+			});
+		};
+
+		// biome-ignore lint/correctness/useExhaustiveDependencies: mount-only; the helpers only read refs
+		useEffect(() => {
+			// Safety net for changes that do not emit input events.
+			const interval = setInterval(() => {
+				takeSnapshot();
+				persistDraft();
+			}, 10_000);
+			return () => {
+				clearInterval(interval);
+				if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+				// Flush the last snapshot when the editor is closed.
+				const flushed = persistDraft();
+				if (flushed || (draftIdRef.current && !sendingRef.current)) {
+					toast.info("Draft saved", { position: "bottom-left" });
+				}
+			};
+		}, []);
+
+		const discardDraft = async () => {
+			sendingRef.current = true;
+			if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+			await saveChainRef.current;
+			if (draftIdRef.current) await deleteDraft(draftIdRef.current);
+			draftIdRef.current = null;
+			handleClose();
+			toast.success("Draft discarded", { position: "bottom-left" });
+		};
+
 		useEffect(() => {
 			if (formState.error) {
+				sendingRef.current = false;
 				toast.error("Error", {
 					description: formState.error,
 				});
 			} else if (formState.success) {
-				handleClose();
-				toast.success("Success", {
-					description: formState.success,
+				// The server deletes the submitted draft; also remove one that a
+				// save still in flight may have created meanwhile.
+				void saveChainRef.current.then(() => {
+					if (draftIdRef.current) void deleteDraft(draftIdRef.current);
+					draftIdRef.current = null;
 				});
+				handleClose();
+				toast.success(formState.message || "Message sent");
 			}
 		}, [formState]);
 
@@ -93,9 +248,30 @@ const EmailEditor = forwardRef<EmailEditorHandle, Props>(
 			<>
 				<div className="mt-4" tabIndex={-1}>
 					<DynamicContextProvider
-						initialState={{ isPending, message, publicConfig, showEditorMode }}
+						initialState={{
+							isPending,
+							message,
+							publicConfig,
+							showEditorMode,
+							initialDraft,
+							originalAttachments,
+							discardDraft,
+						}}
 					>
-						<Form action={formAction}>
+						<SyncPendingState isPending={isPending} />
+						<Form
+							action={formAction}
+							ref={formRef}
+							onInputCapture={scheduleSave}
+							onChangeCapture={scheduleSave}
+							onKeyUpCapture={scheduleSave}
+							onSubmitCapture={() => {
+								// Block autosave while sending; re-enabled on error.
+								sendingRef.current = true;
+								if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+							}}
+						>
+							<input type="hidden" name="draftId" value={draftId ?? ""} />
 							<input
 								type={"hidden"}
 								name={"messageMailboxId"}
@@ -144,11 +320,8 @@ const EmailEditor = forwardRef<EmailEditorHandle, Props>(
 							<TextEditor
 								name={"html"}
 								ref={textEditorRef}
-								defaultValue={
-									signatureHtml
-										? `<p></p><div class="kurrier-signature">${signatureHtml}</div>`
-										: ""
-								}
+								defaultValue={initialDraft?.payload.bodyHtml ?? ""}
+								signatureHtml={signatureHtml}
 							/>
 						</Form>
 					</DynamicContextProvider>

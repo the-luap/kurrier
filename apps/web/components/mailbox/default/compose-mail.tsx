@@ -10,7 +10,12 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import EmailEditor, {
 	type EmailEditorHandle,
+	type InitialDraft,
 } from "@/components/mailbox/default/editor/email-editor";
+import {
+	OPEN_DRAFT_EVENT,
+	type OpenDraftDetail,
+} from "@/components/mailbox/default/draft-list";
 import { Button } from "@/components/ui/button";
 import {
 	type FetchIdentityMailboxListResult,
@@ -53,6 +58,9 @@ export default function ComposeMail({
 		{ value: string; label: string; email: string; signatureHtml: string }[]
 	>([]);
 	const [showEditorMode, setShowEditorMode] = useState<string>("compose");
+	const [initialDraft, setInitialDraft] = useState<InitialDraft>(null);
+	const [editorKey, setEditorKey] = useState(0);
+	const preferredMailboxRef = useRef<string | null>(null);
 	const editorRef = useRef<EmailEditorHandle>(null);
 	const params = useParams();
 	const isMobile = useMediaQuery("(max-width: 768px)");
@@ -96,6 +104,16 @@ export default function ComposeMail({
 
 		setSenderOptions(options);
 
+		// A restored draft keeps the sender it was written from.
+		const preferred = preferredMailboxRef.current;
+		if (preferred && options.some((o) => o.value === preferred)) {
+			setSentMailboxId(preferred);
+			setSignatureHtml(
+				options.find((o) => o.value === preferred)?.signatureHtml ?? "",
+			);
+			return;
+		}
+
 		const activeIdentityPublicId = params.identityPublicId
 			? String(params.identityPublicId)
 			: null;
@@ -123,8 +141,8 @@ export default function ComposeMail({
 				activeIdentityPublicId,
 				"sent",
 			);
-			setSentMailboxId(String(activeMailbox.id));
-			setSignatureHtml(identity.signatureHtml ?? "");
+			if (activeMailbox) setSentMailboxId(String(activeMailbox.id));
+			setSignatureHtml(identity?.signatureHtml ?? "");
 		}
 	};
 
@@ -146,7 +164,29 @@ export default function ComposeMail({
 		};
 	}, [open]);
 
+	useEffect(() => {
+		const onOpenDraft = (event: Event) => {
+			const detail = (event as CustomEvent<OpenDraftDetail>).detail;
+			if (!detail) return;
+			preferredMailboxRef.current = detail.mailboxId;
+			setInitialDraft({ id: detail.id, payload: detail.payload });
+			setEditorKey((k) => k + 1);
+			setMinimized(false);
+			if (open) {
+				void loadSenders();
+			} else {
+				setSentMailboxId(undefined);
+				setOpen(true);
+			}
+		};
+		window.addEventListener(OPEN_DRAFT_EVENT, onOpenDraft);
+		return () => window.removeEventListener(OPEN_DRAFT_EVENT, onOpenDraft);
+	});
+
 	const handleOpen = () => {
+		preferredMailboxRef.current = null;
+		setInitialDraft(null);
+		setEditorKey((k) => k + 1);
 		setOpen(true);
 		setMinimized(false);
 		setExpanded(false);
@@ -208,7 +248,9 @@ export default function ComposeMail({
 
 							<div className="flex-1 min-h-0 overflow-auto px-0 pb-[env(safe-area-inset-bottom)]">
 								<EmailEditor
-									sentMailboxId={String(sentMailboxId)}
+									key={editorKey}
+									initialDraft={initialDraft}
+									sentMailboxId={sentMailboxId ?? ""}
 									senderOptions={senderOptions}
 									onSentMailboxChange={(value) => {
 										setSentMailboxId(value);
@@ -275,7 +317,9 @@ export default function ComposeMail({
 							>
 								<div className="min-h-0">
 									<EmailEditor
-										sentMailboxId={String(sentMailboxId)}
+										key={editorKey}
+									initialDraft={initialDraft}
+									sentMailboxId={sentMailboxId ?? ""}
 										senderOptions={senderOptions}
 										onSentMailboxChange={(value) => {
 											setSentMailboxId(value);

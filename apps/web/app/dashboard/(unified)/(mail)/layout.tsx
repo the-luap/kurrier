@@ -20,16 +20,20 @@ export default async function DashboardLayout({
 	children: React.ReactNode;
 }) {
 	const publicConfig = getPublicEnv();
-	const [identityMailboxes, user, globalLabels, scheduledDrafts] =
-		await Promise.all([
-			fetchIdentityMailboxList(),
-			isSignedIn(),
-			fetchLabelsWithCounts(),
-			fetchScheduledDraftCounts(),
-		]);
-	const { threads: snoozedThreads } = await fetchIdentitySnoozedThreads(
-		identityMailboxes[0]?.identity?.publicId,
-	);
+	const [
+		identityMailboxes,
+		user,
+		globalLabels,
+		scheduledDrafts,
+		{ threads: snoozedThreads },
+	] = await Promise.all([
+		fetchIdentityMailboxList(),
+		isSignedIn(),
+		fetchLabelsWithCounts(),
+		fetchScheduledDraftCounts(),
+		fetchIdentitySnoozedThreads(),
+	]);
+
 
 	return (
 		<>

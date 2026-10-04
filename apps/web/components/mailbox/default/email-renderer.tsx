@@ -24,10 +24,14 @@ import type React from "react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import EditorAttachmentItem from "@/components/mailbox/default/editor/editor-attachment-item";
-import type { EmailEditorHandle } from "@/components/mailbox/default/editor/email-editor";
+import type {
+	EmailEditorHandle,
+	InitialDraft,
+} from "@/components/mailbox/default/editor/email-editor";
 import MailUnsubscriber from "@/components/mailbox/default/mail-unsubscriber";
 import {
 	type FetchThreadMailSubsResult,
+	fetchDraftForMessage,
 	fetchMailbox,
 	markAsRead,
 	markAsUnread,
@@ -45,6 +49,25 @@ const EmailEditor = dynamic(
 		),
 	},
 );
+
+function formatAddressList(
+	message: MessageEntity,
+	field: "to" | "cc",
+): string {
+	const value = (message as any)?.[field];
+	if (!value) return "";
+	if (typeof value === "string") return value;
+	const list: { name?: string | null; address?: string | null }[] =
+		value.value ?? [];
+	return list
+		.map((v) =>
+			v.name && v.address
+				? `${v.name} <${v.address}>`
+				: (v.address ?? v.name ?? ""),
+		)
+		.filter(Boolean)
+		.join(", ");
+}
 
 function getScrollParent(el: HTMLElement): HTMLElement {
 	let p: HTMLElement | null = el.parentElement;
@@ -137,6 +160,8 @@ function EmailRenderer({
 		undefined,
 	);
 	const [signatureHtml, setSignatureHtml] = useState<string>("");
+	const [isOpeningEditor, setIsOpeningEditor] = useState(false);
+	const [initialDraft, setInitialDraft] = useState<InitialDraft>(null);
 	const params = useParams();
 	const fetchSentMailbox = async () => {
 		if (sentMailboxId) return sentMailboxId;
@@ -144,10 +169,47 @@ function EmailRenderer({
 			String(params.identityPublicId),
 			"sent",
 		);
-		setSignatureHtml(identity.signatureHtml ?? "");
+		setSignatureHtml(identity?.signatureHtml ?? "");
 		const id = activeMailbox?.id ? String(activeMailbox.id) : undefined;
 		setSentMailboxId(id);
 		return id;
+	};
+
+	// The sent mailbox and signature must be known before the editor mounts:
+	// the editor reads them once, and a late signature would wipe the draft.
+	const openEditor = async (mode: "reply" | "forward") => {
+		if (showEditor) {
+			// Switching mode starts a fresh editor (not the stored draft).
+			setInitialDraft(null);
+			setShowEditorMode(mode);
+			return;
+		}
+		setShowEditorMode(mode);
+		setIsOpeningEditor(true);
+		try {
+			const [, draft] = await Promise.all([
+				fetchSentMailbox(),
+				fetchDraftForMessage(String(message.id)).catch(() => null),
+			]);
+			if (draft) {
+				setInitialDraft({ id: draft.id, payload: draft.payload as any });
+				const draftMode = (draft.payload as any)?.mode;
+				if (draftMode === "reply" || draftMode === "forward") {
+					setShowEditorMode(draftMode);
+				}
+				toast.info("Restored your draft", { position: "bottom-left" });
+			} else {
+				setInitialDraft(null);
+			}
+			setShowEditor(true);
+		} catch (error) {
+			toast.error(
+				error instanceof Error ? error.message : "Could not open editor",
+				{ position: "bottom-left" },
+			);
+		} finally {
+			setIsOpeningEditor(false);
+		}
 	};
 
 	useEffect(() => {
@@ -233,7 +295,11 @@ function EmailRenderer({
 					}
 					if (data) {
 						data.text().then((raw) => {
-							setEmailString(raw.slice(0, 10000));
+							setEmailString(
+								raw.length > 200_000
+									? `${raw.slice(0, 200_000)}\n\n… truncated, use "Download" for the full message.`
+									: raw,
+							);
 						});
 					}
 				});
@@ -241,7 +307,7 @@ function EmailRenderer({
 	}, [opened]);
 
 	useEffect(() => {
-		const instant = Temporal.Instant.from(receivedAt.toISOString());
+		const instant = Temporal.Instant.from(new Date(receivedAt).toISOString());
 		setFormatted(
 			instant
 				.toZonedDateTimeISO(Temporal.Now.timeZoneId())
@@ -297,7 +363,7 @@ function EmailRenderer({
 							From
 						</div>
 						<div className="px-3 py-2">
-							{String(message?.headersJson?.from?.text)}
+							{message?.headersJson?.from?.text ?? ""}
 						</div>
 					</div>
 
@@ -307,7 +373,7 @@ function EmailRenderer({
 						</div>
 						{/*<div className="px-3 py-2">suisse@dinebot.io</div>*/}
 						<div className="px-3 py-2">
-							{String(message?.headersJson?.to?.text)}
+							{message?.headersJson?.to?.text ?? ""}
 						</div>
 					</div>
 
@@ -409,11 +475,17 @@ function EmailRenderer({
 						>{`<${getMessageAddress(message, "from") ?? getMessageName(message, "from")}>`}</div>
 					</div>
 					<div className={"flex gap-1 items-center"}>
-						<div className={"text-xs"}>
-							to{" "}
-							{`<${getMessageAddress(message, "to") ?? getMessageName(message, "to")}>`}
+						<div className={"text-xs break-all"}>
+							to {formatAddressList(message, "to") || "undisclosed recipients"}
 						</div>
 					</div>
+					{formatAddressList(message, "cc") && (
+						<div className={"flex gap-1 items-center"}>
+							<div className={"text-xs break-all"}>
+								cc {formatAddressList(message, "cc")}
+							</div>
+						</div>
+					)}
 				</div>
 
 				{/*<div className={"col-span-6 my-1"}>*/}
@@ -455,8 +527,11 @@ function EmailRenderer({
 						</ActionIcon>
 						<ActionIcon
 							variant={"transparent"}
+							disabled={isOpeningEditor}
+							title="Reply"
 							onClick={() => {
-								setShowEditor(!showEditor);
+								if (showEditor) setShowEditor(false);
+								else void openEditor("reply");
 							}}
 						>
 							<Reply size={18} />
@@ -496,19 +571,13 @@ function EmailRenderer({
 									<Menu.Divider />
 									<Menu.Item
 										leftSection={<Reply size={14} />}
-										onClick={() => {
-											setShowEditorMode("reply");
-											setShowEditor(true);
-										}}
+										onClick={() => void openEditor("reply")}
 									>
 										Reply
 									</Menu.Item>
 									<Menu.Item
 										leftSection={<Forward size={14} />}
-										onClick={() => {
-											setShowEditorMode("forward");
-											setShowEditor(true);
-										}}
+										onClick={() => void openEditor("forward")}
 									>
 										Forward
 									</Menu.Item>
@@ -553,11 +622,8 @@ function EmailRenderer({
 			{threadIndex === numberOfMessages - 1 && !showEditor && (
 				<div className={"flex gap-6"}>
 					<Button
-						onClick={async () => {
-							setShowEditor(!showEditor);
-							setShowEditorMode("reply");
-							void fetchSentMailbox();
-						}}
+						onClick={() => void openEditor("reply")}
+						loading={isOpeningEditor && showEditorMode === "reply"}
 						leftSection={<Reply />}
 						variant={"outline"}
 						radius={"xl"}
@@ -565,11 +631,8 @@ function EmailRenderer({
 						Reply
 					</Button>
 					<Button
-						onClick={async () => {
-							setShowEditor(!showEditor);
-							setShowEditorMode("forward");
-							void fetchSentMailbox();
-						}}
+						onClick={() => void openEditor("forward")}
+						loading={isOpeningEditor && showEditorMode === "forward"}
 						rightSection={<Forward />}
 						variant={"outline"}
 						radius={"xl"}
@@ -582,7 +645,18 @@ function EmailRenderer({
 			{showEditor && (
 				<div>
 					<EmailEditor
-						sentMailboxId={String(sentMailboxId)}
+						// Remount when switching reply <-> forward so recipients,
+						// subject and mode are rebuilt for the new mode.
+						key={`${showEditorMode}:${initialDraft?.id ?? "new"}`}
+						initialDraft={initialDraft}
+						originalAttachments={attachments
+							.filter((a) => !a.isInline)
+							.map((a) => ({
+								id: String(a.id),
+								filenameOriginal: a.filenameOriginal,
+								sizeBytes: a.sizeBytes,
+							}))}
+						sentMailboxId={sentMailboxId ?? ""}
 						ref={editorRef}
 						publicConfig={publicConfig}
 						message={message}

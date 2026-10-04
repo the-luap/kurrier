@@ -306,11 +306,13 @@ export class MailgunMailer implements Mailer {
 			text: string;
 			html: string;
 			from: string;
+			cc?: string[];
+			bcc?: string[];
 			inReplyTo: string;
 			references: string[];
 			attachments?: { name: string; content: Blob; contentType: string }[];
 		},
-	): Promise<{ success: boolean; MessageId?: string }> {
+	): Promise<{ success: boolean; MessageId?: string; error?: string }> {
 		try {
 			const domain = String(opts.from.split("@")[1] || "").trim();
 
@@ -335,6 +337,8 @@ export class MailgunMailer implements Mailer {
 			const payload: any = {
 				from: opts.from,
 				to, // array is fine
+				...(opts.cc?.length ? { cc: opts.cc } : {}),
+				...(opts.bcc?.length ? { bcc: opts.bcc } : {}),
 				subject: opts.subject,
 				text: opts.text || undefined,
 				html: opts.html || undefined,
@@ -353,7 +357,10 @@ export class MailgunMailer implements Mailer {
 			return { success: true, MessageId: id };
 		} catch (err) {
 			console.error("mailgun sendEmail error", err);
-			return { success: false };
+			return {
+				success: false,
+				error: err instanceof Error ? err.message : String(err),
+			};
 		}
 	}
 }

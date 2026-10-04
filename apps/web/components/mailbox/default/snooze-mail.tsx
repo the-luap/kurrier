@@ -37,28 +37,41 @@ export default function SnoozeMail({
 	const [presetsOpened, presetsDisclosure] = useDisclosure(false);
 	const [pickerOpened, pickerDisclosure] = useDisclosure(false);
 
-	const localTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-	const tzs = getTimeZones();
-	const tzName = tzs.find((tz) => tz.group.includes(localTz));
-	const dayjsTz = getDayjsTz(localTz);
+	// This component is rendered once per mailbox row: keep the render cheap
+	// and only build the timezone data / presets while the dialog is open.
+	const localTz = useMemo(
+		() => Intl.DateTimeFormat().resolvedOptions().timeZone,
+		[],
+	);
+	const dayjsTz = useMemo(() => getDayjsTz(localTz), [localTz]);
+	const tzName = useMemo(
+		() =>
+			presetsOpened
+				? getTimeZones().find((tz) => tz.group.includes(localTz))
+				: undefined,
+		[presetsOpened, localTz],
+	);
 
 	const presets = useMemo(
-		() => [
-			{ label: "Later today", date: dayjsTz().add(2, "h") },
-			{
-				label: "Tomorrow morning",
-				date: dayjsTz().endOf("d").add(8, "h").add(1, "m"),
-			},
-			{
-				label: "Tomorrow afternoon",
-				date: dayjsTz().endOf("d").add(13, "h").add(1, "m"),
-			},
-			{
-				label: "Monday morning",
-				date: dayjsTz().endOf("w").add(8, "h").add(1, "m"),
-			},
-		],
-		[dayjsTz],
+		() =>
+			!presetsOpened
+				? []
+				: [
+						{ label: "Later today", date: dayjsTz().add(2, "h") },
+						{
+							label: "Tomorrow morning",
+							date: dayjsTz().endOf("d").add(8, "h").add(1, "m"),
+						},
+						{
+							label: "Tomorrow afternoon",
+							date: dayjsTz().endOf("d").add(13, "h").add(1, "m"),
+						},
+						{
+							label: "Monday morning",
+							date: dayjsTz().endOf("w").add(8, "h").add(1, "m"),
+						},
+					],
+		[dayjsTz, presetsOpened],
 	);
 
 	const [pickerValue, setPickerValue] = useState<Dayjs>(() => dayjsTz());

@@ -9,6 +9,7 @@ import { getMessageAddress, getMessageName } from "@common/mail-client";
 import { Container } from "@/components/common/containers";
 import RenderInvite from "@/components/mailbox/default/render-invite";
 import {fetchEventPreviewItems} from "@/lib/actions/calendar";
+import { createClient } from "@/lib/supabase/server";
 
 export default async function ThreadItem({
 	message,
@@ -33,6 +34,54 @@ export default async function ThreadItem({
 	const publicConfig = getPublicEnv();
     const preview = await fetchEventPreviewItems(attachments, identityPublicId)
 
+	// Only serialize what the client components need: the body goes to the
+	// viewer once, and the (often huge) raw headers / textAsHtml copies stay
+	// on the server. This keeps the RSC payload of long threads small.
+	const { html, text, textAsHtml: _textAsHtml, headersJson, ...meta } = message;
+	const headers = (headersJson ?? {}) as Record<string, any>;
+	const headerMessage = {
+		...meta,
+		html: null,
+		text: null,
+		textAsHtml: null,
+		headersJson: {
+			from: headers.from?.text ? { text: headers.from.text } : undefined,
+			to: headers.to?.text ? { text: headers.to.text } : undefined,
+			subject: headers.subject,
+		},
+	} as unknown as MessageEntity;
+	const bodyMessage = {
+		id: message.id,
+		html,
+		text,
+		from: message.from,
+	} as MessageEntity;
+
+	// Inline images ("cid:" references) are stored as attachments: resolve
+	// them to signed URLs and don't list them a second time as attachments.
+	const lowerHtml = (html ?? "").toLowerCase();
+	const cleanCid = (cid: string) => cid.replace(/^<|>$/g, "").toLowerCase();
+	const inlineAttachments = attachments.filter(
+		(a) => a.cid && lowerHtml.includes(`cid:${cleanCid(a.cid)}`),
+	);
+	const cidUrls: Record<string, string> = {};
+	if (inlineAttachments.length > 0) {
+		const supabase = await createClient();
+		const { data } = await supabase.storage
+			.from("attachments")
+			.createSignedUrls(
+				inlineAttachments.map((a) => String(a.path)),
+				60 * 60,
+			);
+		inlineAttachments.forEach((a, i) => {
+			const url = data?.[i]?.signedUrl;
+			if (url && a.cid) cidUrls[cleanCid(a.cid)] = url;
+		});
+	}
+	const visibleAttachments = attachments.filter(
+		(a) => !inlineAttachments.includes(a),
+	);
+
 	return (
 		<>
 			<Container variant="wide">
@@ -55,15 +104,15 @@ export default async function ThreadItem({
 						<EmailRenderer
 							threadIndex={threadIndex}
 							numberOfMessages={numberOfMessages}
-							message={message}
-							attachments={attachments}
+							message={headerMessage}
+							attachments={visibleAttachments}
 							publicConfig={publicConfig}
 							threadId={threadId}
 							markSmtp={markSmtp}
 							activeMailboxId={activeMailboxId}
                             mailSubscription={mailSubscription}
 						>
-							<EmailViewer message={message} />
+							<EmailViewer message={bodyMessage} cidUrls={cidUrls} />
 						</EmailRenderer>
 					</div>
 				</div>

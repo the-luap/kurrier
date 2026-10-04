@@ -9,6 +9,7 @@ import * as crypto from "node:crypto";
 import { Queue, QueueEvents } from "bullmq";
 import { getRedis } from "@/lib/actions/get-redis";
 import { APP_VERSION } from "@common";
+import { cache } from "react";
 
 const initProviders = async (userId: string) => {
 	const { REDIS_PASSWORD, REDIS_HOST, REDIS_PORT } = getServerEnv();
@@ -110,21 +111,28 @@ export async function signup(
 	return { success: true, message: "Welcome!", data };
 }
 
-export const isSignedIn = async () => {
+// Layouts, pages and data helpers all ask for the user/session during a
+// single render. getUser() is a network round trip to the auth server, so
+// dedupe both lookups per request with React's cache().
+const getCachedUser = cache(async () => {
 	const client = await createClient();
 	const {
 		data: { user },
 	} = await client.auth.getUser();
 	return user;
-};
+});
 
-export const currentSession = async () => {
+const getCachedSession = cache(async () => {
 	const client = await createClient();
 	const {
 		data: { session },
 	} = await client.auth.getSession();
 	return session as AuthSession;
-};
+});
+
+export const isSignedIn = async () => getCachedUser();
+
+export const currentSession = async () => getCachedSession();
 
 export const signOut = async (redirectUrl?: string) => {
 	const client = await createClient();

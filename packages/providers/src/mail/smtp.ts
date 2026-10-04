@@ -142,11 +142,13 @@ export class SmtpMailer implements Mailer {
 			text: string;
 			html: string;
 			from: string;
+			cc?: string[];
+			bcc?: string[];
 			inReplyTo: string;
 			references: string[];
 			attachments?: { name: string; content: Blob; contentType: string }[];
 		},
-	): Promise<{ success: boolean; MessageId?: string }> {
+	): Promise<{ success: boolean; MessageId?: string; error?: string }> {
 		try {
 			// convert Blob attachments -> Nodemailer format (Buffer)
 			const attachments = await Promise.all(
@@ -165,6 +167,8 @@ export class SmtpMailer implements Mailer {
 			const info = await this.transporter.sendMail({
 				from: opts.from,
 				to, // array is fine; Nodemailer will join
+				cc: opts.cc?.length ? opts.cc : undefined,
+				bcc: opts.bcc?.length ? opts.bcc : undefined,
 				subject: opts.subject,
 				text: opts.text || undefined,
 				html: opts.html || undefined,
@@ -174,8 +178,11 @@ export class SmtpMailer implements Mailer {
 
 			return { success: true, MessageId: String(info.messageId || "") };
 		} catch (err) {
-			// You can add logging here if desired
-			return { success: false };
+			console.error("smtp sendEmail error", err);
+			return {
+				success: false,
+				error: err instanceof Error ? err.message : String(err),
+			};
 		}
 	}
 
