@@ -101,8 +101,11 @@ const getAiDefaults = (provider: AiProvider) =>
 				model: getServerEnv().OLLAMA_MODEL || DEFAULT_OLLAMA_MODEL,
 			};
 
-const toAiBaseUrl = (provider: AiProvider, value: string) =>
-	normalizeAiBaseUrl(value?.trim() || getAiDefaults(provider).baseUrl);
+const toAiBaseUrl = (
+	provider: AiProvider,
+	value: string,
+	opts?: { resolveHost?: boolean },
+) => normalizeAiBaseUrl(value?.trim() || getAiDefaults(provider).baseUrl, opts);
 
 const fetchAiModelsForProvider = async ({
 	provider,
@@ -238,6 +241,7 @@ export async function saveAiSettings(
 		const baseUrl = await toAiBaseUrl(
 			provider,
 			String(formData.get("baseUrl") ?? defaults.baseUrl),
+			{ resolveHost: false },
 		);
 		const model = String(formData.get("model") ?? defaults.model).trim();
 		const submittedApiKey = String(formData.get("apiKey") ?? "").trim();

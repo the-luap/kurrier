@@ -44,7 +44,8 @@ type QueuePair = { queue: Queue; events?: QueueEvents };
 const globalQueues = globalThis as unknown as {
 	__kurrierQueues?: Map<QueueName, QueuePair>;
 };
-const queues = (globalQueues.__kurrierQueues ??= new Map());
+if (!globalQueues.__kurrierQueues) globalQueues.__kurrierQueues = new Map();
+const queues = globalQueues.__kurrierQueues;
 
 function dropQueue(name: QueueName, pair: QueuePair) {
 	if (queues.get(name) !== pair) return;
@@ -61,6 +62,8 @@ function getPair(name: QueueName): QueuePair {
 		};
 		// Redis-backed queues are best-effort at render time; callers surface failures.
 		created.queue.on("error", () => dropQueue(name, created));
+		// A clean socket close (e.g. Redis restart) emits no "error".
+		created.queue.on("ioredis:close", () => dropQueue(name, created));
 		queues.set(name, created);
 		pair = created;
 	}
@@ -76,6 +79,7 @@ export async function getQueueEvents(name: QueueName): Promise<QueueEvents> {
 	if (!pair.events) {
 		const events = new QueueEvents(name, getRedisConnection());
 		events.on("error", () => dropQueue(name, pair));
+		events.on("ioredis:close", () => dropQueue(name, pair));
 		pair.events = events;
 	}
 	try {

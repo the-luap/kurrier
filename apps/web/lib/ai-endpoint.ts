@@ -21,7 +21,10 @@ const isLinkLocalOrUnspecified = (address: string) => {
 	);
 };
 
-export async function normalizeAiBaseUrl(value: string): Promise<string> {
+export async function normalizeAiBaseUrl(
+	value: string,
+	{ resolveHost = true }: { resolveHost?: boolean } = {},
+): Promise<string> {
 	let url: URL;
 	try {
 		url = new URL(value.trim());
@@ -44,6 +47,12 @@ export async function normalizeAiBaseUrl(value: string): Promise<string> {
 		throw new Error("This AI base URL is not allowed.");
 	}
 
+	// Saving settings must work while the AI host is offline; the address
+	// check runs again before every request.
+	if (!resolveHost && !isIP(hostname)) {
+		return toComparableUrl(url);
+	}
+
 	const addresses = isIP(hostname)
 		? [hostname]
 		: await lookup(hostname, { all: true })
@@ -55,8 +64,19 @@ export async function normalizeAiBaseUrl(value: string): Promise<string> {
 		throw new Error("This AI base URL is not allowed.");
 	}
 
-	return `${url.origin}${url.pathname}`.replace(/\/+$/, "");
+	return toComparableUrl(url);
 }
+
+const toComparableUrl = (url: URL) =>
+	`${url.origin}${url.pathname}`.replace(/\/+$/, "");
+
+const normalizeSavedUrl = (value: string) => {
+	try {
+		return toComparableUrl(new URL(value.trim()));
+	} catch {
+		return value.trim().replace(/\/+$/, "");
+	}
+};
 
 export async function fetchAiEndpoint(
 	url: string,
@@ -91,10 +111,7 @@ export const resolveAiApiKey = (
 	normalizedBaseUrl: string,
 ) => {
 	if (submittedKey?.trim()) return submittedKey.trim();
-	if (
-		saved?.apiKey &&
-		saved.baseUrl.trim().replace(/\/+$/, "") === normalizedBaseUrl
-	) {
+	if (saved?.apiKey && normalizeSavedUrl(saved.baseUrl) === normalizedBaseUrl) {
 		return saved.apiKey;
 	}
 	return null;
