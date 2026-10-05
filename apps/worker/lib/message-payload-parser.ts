@@ -768,10 +768,23 @@ async function ingestMailSubscriptionFromMessage(opts: {
 		String(headers.get("list-id") ?? (headersJson as any)?.["list-id"] ?? "")
 			.trim() || null;
 
-	const unsubscribeUrl =
+	// Only http(s) links are stored (the UI opens / one-click POSTs them);
+	// javascript:, data: and the like are dropped.
+	const unsubscribeUrlRaw =
 		(list?.unsubscribe?.url as string | undefined) ||
 		(list?.unsubscribe?.href as string | undefined) ||
 		null;
+	let unsubscribeUrl: string | null = null;
+	if (unsubscribeUrlRaw) {
+		try {
+			const u = new URL(String(unsubscribeUrlRaw).trim());
+			if (u.protocol === "http:" || u.protocol === "https:") {
+				unsubscribeUrl = u.toString();
+			}
+		} catch {
+			unsubscribeUrl = null;
+		}
+	}
 
 	const unsubscribePost =
 		String(list?.["unsubscribe-post"]?.name ?? "").toLowerCase() || null;

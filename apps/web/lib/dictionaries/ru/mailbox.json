@@ -15,6 +15,7 @@
 	"emptyBinNow": "Очистить корзину",
 	"emptyBinConfirmTitle": "Вы уверены?",
 	"emptyBinConfirmDescription": "Это действие нельзя отменить. Все письма в корзине будут удалены безвозвратно.",
+	"deleteForeverSelectedConfirmDescription": "Это действие нельзя отменить. Выбранные цепочки будут удалены безвозвратно.",
 	"continue": "Продолжить",
 	"agoPrefix": "",
 	"daysAbbr": " дн. назад",

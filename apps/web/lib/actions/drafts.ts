@@ -67,6 +67,24 @@ const isUuid = (value: string) =>
 const field = (value: unknown, max = MAX_FIELD_LENGTH) =>
 	typeof value === "string" ? value.slice(0, max) : "";
 
+/**
+ * Same-origin absolute path: no protocol-relative ("//", "/\\") forms, no
+ * backslashes (browsers treat them as "/") and no control characters (URL
+ * parsers strip tabs/newlines, so "/\t/evil" would become "//evil").
+ */
+function isSafeAppPath(value: string) {
+	if (!value.startsWith("/") || value.startsWith("//")) return false;
+	if (value.includes("\\")) return false;
+	// biome-ignore lint/suspicious/noControlCharactersInRegex: rejecting them
+	if (/[\u0000-\u001f\u007f]/.test(value)) return false;
+	try {
+		const base = "http://kurrier.invalid";
+		return new URL(value, base).origin === base;
+	} catch {
+		return false;
+	}
+}
+
 /** Only known string fields, bounded, so a draft cannot grow without limit. */
 function sanitizePayload(payload: DraftPayload): DraftPayload {
 	const mode = DRAFT_MODES.includes(payload?.mode as DraftMode)
@@ -91,7 +109,7 @@ function sanitizePayload(payload: DraftPayload): DraftPayload {
 				: undefined,
 		// Same-origin app paths only (the drafts list navigates to it).
 		threadUrl:
-			mode !== "compose" && threadUrl.startsWith("/") && !threadUrl.startsWith("//")
+			mode !== "compose" && isSafeAppPath(threadUrl)
 				? threadUrl
 				: undefined,
 	};

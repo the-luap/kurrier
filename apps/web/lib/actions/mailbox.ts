@@ -256,11 +256,23 @@ export const fetchMailbox = cache(
 
 			if (!activeMailbox) throw new Error("Mailbox not found");
 
+			// Same rows as fetchMailboxThreads paginates: threads, without the
+			// currently snoozed ones.
+			const now = new Date();
 			const [[messagesCountRow], [sync]] = await Promise.all([
 				tx
 					.select({ count: count() })
-					.from(messages)
-					.where(eq(messages.mailboxId, activeMailbox.id)),
+					.from(mailboxThreads)
+					.where(
+						and(
+							eq(mailboxThreads.identityPublicId, identity.publicId),
+							eq(mailboxThreads.mailboxSlug, mailboxSlug),
+							or(
+								isNull(mailboxThreads.snoozedUntil),
+								lte(mailboxThreads.snoozedUntil, now),
+							),
+						),
+					),
 				tx
 					.select()
 					.from(mailboxSync)
@@ -668,6 +680,8 @@ export async function sendMail(
 	// queued/scheduled payload.
 	const draftId = String(decodedForm.draftId ?? "").trim();
 	delete decodedForm.draftId;
+	// Only the worker's own API routes may fix the stored message id.
+	delete decodedForm.apiMessageId;
 
 	const user = await isSignedIn();
 	if (!user?.id) {

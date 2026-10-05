@@ -54,7 +54,8 @@ async function initializeJmapIdentity(
                 delay: 1000,
             },
             removeOnComplete: true,
-            removeOnFail: false,
+            // Deterministic jobId: a kept failed job would block every retry.
+            removeOnFail: true,
         },
     );
 }

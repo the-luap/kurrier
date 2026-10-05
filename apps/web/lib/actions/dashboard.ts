@@ -743,7 +743,7 @@ export const initializeMailboxes = async (clientIdentity: IdentityEntity, _userI
 	await rls(async (tx) => {
 		await tx.insert(mailboxes).values(rows).onConflictDoNothing().returning();
 		// Server-side values only: the arguments come from the caller.
-		await getQueue("dav-worker").add("dav:create-identity", { identityId: emailIdentity.id, userId: sessionUser.id, workspaceId: emailIdentity.workspaceId }, { jobId: `identity-dav-bootstrap-${emailIdentity.id}`, removeOnComplete: true, removeOnFail: { age: 7 * 24 * 3600 } });
+		await getQueue("dav-worker").add("dav:create-identity", { identityId: emailIdentity.id, userId: sessionUser.id, workspaceId: emailIdentity.workspaceId }, { jobId: `identity-dav-bootstrap-${emailIdentity.id}`, removeOnComplete: true, removeOnFail: true });
 		return
 	});
 	return rows;

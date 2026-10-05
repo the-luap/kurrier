@@ -178,7 +178,8 @@ export async function queueImapBackfill(
 			attempts: 3,
 			backoff: { type: "exponential", delay: 1000 },
 			removeOnComplete: true,
-			removeOnFail: { age: 24 * 3600 },
+			// Deterministic jobId: a kept failed job would block every retry.
+			removeOnFail: true,
 		},
 	);
 	await queueImapBackfillAccount(identityId);
@@ -227,7 +228,7 @@ export async function queueGmailBackfill(
 		{
 			jobId: `gmail-backfill-account-${identityId}`,
 			removeOnComplete: true,
-			removeOnFail: false,
+			removeOnFail: true,
 		},
 	);
 }

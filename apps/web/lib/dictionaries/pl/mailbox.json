@@ -15,6 +15,7 @@
 	"emptyBinNow": "Opróżnij kosz teraz",
 	"emptyBinConfirmTitle": "Czy na pewno chcesz kontynuować?",
 	"emptyBinConfirmDescription": "Tej czynności nie można cofnąć. Wiadomości w koszu zostaną trwale usunięte.",
+	"deleteForeverSelectedConfirmDescription": "Tej czynności nie można cofnąć. Zaznaczone wątki zostaną trwale usunięte.",
 	"continue": "Kontynuuj",
 	"agoPrefix": "",
 	"daysAbbr": " d temu",

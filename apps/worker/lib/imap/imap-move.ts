@@ -227,7 +227,7 @@ type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
  * source row is recomputed from what is left there, or removed when nothing
  * is left.
  */
-async function moveSingleMessageSummary(
+export async function moveSingleMessageSummary(
 	tx: Tx,
 	{
 		threadId,

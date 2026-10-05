@@ -1,5 +1,5 @@
 import { db, messages } from "@db";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { defineEventHandler, getQuery } from "h3";
 import {
 	API_SCOPES,
@@ -65,7 +65,11 @@ export default defineEventHandler(async (event) => {
 					: undefined,
 			),
 		)
-		.orderBy(desc(messages.date), desc(messages.createdAt), desc(messages.id))
+		.orderBy(
+			sql`${messages.date} desc nulls last`,
+			desc(messages.createdAt),
+			desc(messages.id),
+		)
 		.limit(page.limit + 1)
 		.offset(page.offset);
 

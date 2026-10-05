@@ -72,7 +72,9 @@ const applyPendingMigrations = async (
 				delay: 3000,
 			},
 			removeOnComplete: { age: 60 },
-			removeOnFail: false,
+			// Deterministic jobId: a kept failed job would block the retry on
+			// the next sign-in.
+			removeOnFail: true,
 			jobId: `migration:${userId}:${APP_VERSION}`,
 		},
 	);

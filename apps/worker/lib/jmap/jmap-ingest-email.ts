@@ -60,9 +60,8 @@ export async function ingestJmapEmail({
         email.blobId,
     );
 
-    const rawMime = Buffer
-        .from(raw)
-        .toString("utf8");
+    // Raw bytes: parseAndStoreEmail decodes the charsets itself.
+    const rawMime = Buffer.from(raw);
 
     await parseAndStoreEmail(
         rawMime,

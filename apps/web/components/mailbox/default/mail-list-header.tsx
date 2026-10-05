@@ -235,12 +235,18 @@ function MailListHeader({
 			dict?.mailbox?.movedToSpam ?? "Moved to Spam",
 		);
 
+	// In the Trash, "delete" is permanent: confirm first (like Empty Bin).
+	const [confirmDeleteForever, setConfirmDeleteForever] = useState(false);
+
+	const deleteThreadsForever = () =>
+		runBulk(
+			(ids) => deleteForever(ids, mailboxId, markImap, true),
+			dict?.mailbox?.threadDeletedForever ?? "Thread deleted forever",
+		);
+
 	const deleteThreads = () => {
 		if (mailboxKind === "trash") {
-			runBulk(
-				(ids) => deleteForever(ids, mailboxId, markImap, true),
-				dict?.mailbox?.threadDeletedForever ?? "Thread deleted forever",
-			);
+			setConfirmDeleteForever(true);
 			return;
 		}
 		runBulk(
@@ -396,6 +402,32 @@ function MailListHeader({
 					</div>
 				</div>
 			</div>
+
+			<AlertDialog
+				open={confirmDeleteForever}
+				onOpenChange={setConfirmDeleteForever}
+			>
+				<AlertDialogContent>
+					<AlertDialogHeader>
+						<AlertDialogTitle>
+							{dict?.mailbox?.emptyBinConfirmTitle ??
+								"Are you absolutely sure?"}
+						</AlertDialogTitle>
+						<AlertDialogDescription>
+							{dict?.mailbox?.deleteForeverSelectedConfirmDescription ??
+								"This action cannot be undone. The selected threads will be permanently deleted."}
+						</AlertDialogDescription>
+					</AlertDialogHeader>
+					<AlertDialogFooter>
+						<AlertDialogCancel>
+							{dict?.common?.cancel ?? "Cancel"}
+						</AlertDialogCancel>
+						<AlertDialogAction onClick={deleteThreadsForever}>
+							{dict?.mailbox?.deleteForever ?? "Delete forever"}
+						</AlertDialogAction>
+					</AlertDialogFooter>
+				</AlertDialogContent>
+			</AlertDialog>
 
 			{mailboxKind === "trash" && (
 				<div

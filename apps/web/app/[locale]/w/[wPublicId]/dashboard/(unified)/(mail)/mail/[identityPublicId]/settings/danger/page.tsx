@@ -1,31 +1,59 @@
-import { Button } from "@mantine/core";
-import { Trash2 } from "lucide-react";
-import React from "react";
+import { identities } from "@db";
+import { eq } from "drizzle-orm";
+import DeleteIdentityButton from "@/components/mailbox/settings/delete-identity-button";
 import SectionCard from "@/components/mailbox/settings/settings-section-card";
+import { getWorkspacePublicId, rlsClient } from "@/lib/actions/clients";
 import { getDictionary, type Locale } from "@/lib/dictionaries";
 
-async function Page({ params }: { params: Promise<{ locale: Locale }> }) {
-	const { locale } = await params;
-	const dict = await getDictionary(locale);
+async function Page({
+	params,
+}: {
+	params: Promise<{ locale: Locale; identityPublicId: string }>;
+}) {
+	const { locale, identityPublicId } = await params;
+	const [dict, rls, workspacePublicId] = await Promise.all([
+		getDictionary(locale),
+		rlsClient(),
+		getWorkspacePublicId(),
+	]);
+
+	const [identity] = await rls((tx) =>
+		tx
+			.select({ id: identities.id, value: identities.value })
+			.from(identities)
+			.where(eq(identities.publicId, identityPublicId))
+			.limit(1),
+	);
 
 	return (
-		<>
-			<SectionCard
-				title={dict.mailbox.dangerZoneTitle}
-				description={dict.mailbox.dangerZoneDescription}
-				footer={
+		<SectionCard
+			title={dict.mailbox.dangerZoneTitle}
+			description={dict.mailbox.dangerZoneDescription}
+			footer={
+				identity ? (
 					<div className="flex items-center justify-end">
-						<Button color="red" leftSection={<Trash2 size={16} />}>
-							{dict.mailbox.deleteIdentity}
-						</Button>
+						<DeleteIdentityButton
+							identityId={identity.id}
+							identityValue={identity.value}
+							redirectTo={`/w/${workspacePublicId}/dashboard/platform/identities`}
+							labels={{
+								button: dict.mailbox.deleteIdentity,
+								title: dict.platform.deleteIdentity,
+								confirmPrefix: dict.platform.confirmDeleteIdentityPrefix,
+								confirmSuffix: dict.platform.confirmDeleteIdentitySuffix,
+								confirm: dict.platform.delete,
+								cancel: dict.platform.cancel,
+								failed: dict.platform.failedToDeleteIdentity,
+							}}
+						/>
 					</div>
-				}
-			>
-				<div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-100">
-					{dict.mailbox.deletingIdentityWarning}
-				</div>
-			</SectionCard>
-		</>
+				) : null
+			}
+		>
+			<div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-100">
+				{dict.mailbox.deletingIdentityWarning}
+			</div>
+		</SectionCard>
 	);
 }
 

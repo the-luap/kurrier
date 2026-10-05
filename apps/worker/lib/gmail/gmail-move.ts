@@ -1,5 +1,7 @@
 import { and, eq, sql } from "drizzle-orm";
 import { db, mailboxes, messages, mailboxThreads } from "@db";
+import { upsertMailboxThreadItem } from "@common";
+import { moveSingleMessageSummary } from "../imap/imap-move";
 import {gmailClientForIdentity} from "@providers";
 import {getRedis} from "../../lib/get-redis";
 
@@ -262,6 +264,46 @@ export async function moveGmailMail(args: MoveGmailMailArgs) {
                     updatedAt: new Date(),
                 } as any)
                 .where(eq(messages.id, row.id));
+        }
+
+        // One message of the thread: merge it into the destination row and
+        // recompute (or drop) the source row, as imap-move does.
+        if (args.messageId) {
+            if (targetRows.length > 0) {
+                await moveSingleMessageSummary(tx, {
+                    threadId: args.threadId,
+                    fromMailboxId: args.mailboxId,
+                    messageId: args.messageId,
+                });
+            }
+            return;
+        }
+
+        // The destination may already hold a row for this thread (part of it
+        // was moved there before): (thread_id, mailbox_id) is the primary
+        // key, so merge into that row instead of renaming onto it.
+        const [destRow] = await tx
+            .select({ threadId: mailboxThreads.threadId })
+            .from(mailboxThreads)
+            .where(
+                and(
+                    eq(mailboxThreads.threadId, args.threadId),
+                    eq(mailboxThreads.mailboxId, toMailbox.id),
+                ),
+            )
+            .limit(1);
+
+        if (destRow && targetRows.length > 0) {
+            await tx
+                .delete(mailboxThreads)
+                .where(
+                    and(
+                        eq(mailboxThreads.threadId, args.threadId),
+                        eq(mailboxThreads.mailboxId, args.mailboxId),
+                    ),
+                );
+            await upsertMailboxThreadItem(targetRows[0].id, tx);
+            return;
         }
 
         await tx

@@ -162,11 +162,16 @@ export const RETRY_JOB_OPTS = {
 	backoff: { type: "exponential", delay: 1500 },
 } satisfies JobsOptions;
 
-/** Default options for fire-and-forget jobs (retried, removed when done). */
+/**
+ * Default options for fire-and-forget jobs (retried, removed when done).
+ * Failed jobs are removed too: many callers use deterministic jobIds
+ * (refresh-<thread>, move:...) and a kept failed job with the same id would
+ * silently swallow every later add. Concurrently waiting jobs still dedupe.
+ */
 export const DEFAULT_JOB_OPTS = {
 	...RETRY_JOB_OPTS,
 	removeOnComplete: true,
-	removeOnFail: false,
+	removeOnFail: true,
 } satisfies JobsOptions;
 
 /** Re-index threads in Typesense (deduplicated per thread by jobId). */

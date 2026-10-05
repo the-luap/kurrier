@@ -283,8 +283,24 @@ export default defineNitroPlugin(async (nitroApp) => {
 				.leftJoin(smtpAccounts, eq(identities.smtpAccountId, smtpAccounts.id))
 				.where(eq(mailboxes.id, String(decodedForm.sentMailboxId)));
 
-			if (!mailbox) {
+			if (!mailbox?.identity) {
 				throw new Error("Mailbox not found");
+			}
+
+			// Routing comes from the DB, not from the payload: the sent mailbox
+			// must belong to the sending identity (when the payload names one)
+			// and to the identity's workspace. Sender address, owner and
+			// workspace are always the identity's (see below).
+			if (
+				decodedForm.identityId !== undefined &&
+				decodedForm.identityId !== null &&
+				decodedForm.identityId !== "" &&
+				String(decodedForm.identityId) !== mailbox.identity.id
+			) {
+				throw new Error("Sent mailbox does not belong to the sending identity");
+			}
+			if (mailbox.mailbox.workspaceId !== mailbox.identity.workspaceId) {
+				throw new Error("Sent mailbox is not in the identity's workspace");
 			}
 
 			const providerType =
@@ -404,7 +420,7 @@ export default defineNitroPlugin(async (nitroApp) => {
 				workspaceId: mailbox.identity.workspaceId,
 			});
 
-			const mailboxIdForMessage = String(decodedForm.sentMailboxId);
+			const mailboxIdForMessage = mailbox.mailbox.id;
 
 			let threadIdForMessage: string;
 
@@ -457,8 +473,13 @@ export default defineNitroPlugin(async (nitroApp) => {
 				ownerId: mailbox.identity.ownerId,
 				seen: true,
 			});
-			if (decodedForm.apiMessageId) {
-				newMessageBody.id = String(decodedForm.apiMessageId);
+			if (
+				typeof decodedForm.apiMessageId === "string" &&
+				/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+					decodedForm.apiMessageId,
+				)
+			) {
+				newMessageBody.id = decodedForm.apiMessageId;
 			}
 
 			const mailerResponse = await mailer.sendEmail(data.to, {

@@ -57,7 +57,8 @@ export default defineEventHandler(async (event) => {
 		);
 	}
 
-	const rawEmail = (await readRawBody(event, false))?.toString("utf8") ?? "";
+	// Raw bytes: parseAndStoreEmail decodes the charsets itself.
+	const rawEmail = (await readRawBody(event, false)) ?? Buffer.alloc(0);
 
 	if (!rawEmail.length) {
 		return apiError(400, "EMPTY_MESSAGE", "Raw RFC822/EML body is required");

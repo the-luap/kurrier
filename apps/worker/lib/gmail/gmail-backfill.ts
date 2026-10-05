@@ -16,9 +16,10 @@ const GMAIL_BACKFILL_DELAY_MS = 1000;
 const gmailQuotaMap = new Map<string, GmailQuota>();
 
 
-function decodeGmailRaw(raw?: string | null) {
-    if (!raw) return "";
-    return Buffer.from(raw.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+// Raw bytes: parseAndStoreEmail decodes the charsets itself.
+function decodeGmailRaw(raw?: string | null): Buffer | null {
+    if (!raw) return null;
+    return Buffer.from(raw.replace(/-/g, "+").replace(/_/g, "/"), "base64");
 }
 
 export async function syncGmailMessage(opts: {
@@ -70,9 +71,9 @@ export async function syncGmailMessage(opts: {
     }
 
     const rawEmail = decodeGmailRaw(gm.raw);
-    if (!rawEmail) return { inserted: 0, skipped: 1, bytes: 0, historyId: gm.historyId };
+    if (!rawEmail?.length) return { inserted: 0, skipped: 1, bytes: 0, historyId: gm.historyId };
 
-    const sizeBytes = Buffer.byteLength(rawEmail, "utf8");
+    const sizeBytes = rawEmail.length;
 
     if (quota && sizeBytes > quota.limit) {
         quota.limit = 0;
