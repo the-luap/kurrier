@@ -14,9 +14,9 @@ import {
 
 export default defineEventHandler(async (event) => {
 	// Admin API key: any account resolves; regular keys only see their own.
-	const ownerId = isAdminApiRequest(event)
+	const auth = isAdminApiRequest(event)
 		? null
-		: (await validateApiKey(event, API_SCOPES.manage)).ownerId;
+		: await validateApiKey(event, API_SCOPES.manage);
 	const id = getRouterParam(event, "id");
 
 	if (!id) {
@@ -25,7 +25,8 @@ export default defineEventHandler(async (event) => {
 
 	const account = await validateSmtpAccountOwnership({
 		accountId: String(id),
-		ownerId,
+		ownerId: auth?.ownerId ?? null,
+		workspaceId: auth?.apiKey.workspaceId,
 	});
 
 	const secret = await getSmtpAccountSecret({

@@ -3,6 +3,7 @@ import { db, decryptAdminSecrets, smtpAccountSecrets, smtpAccounts } from "@db";
 import type { SmtpAccountCreateInput, SmtpAccountUpdateInput } from "@schema";
 import { and, eq } from "drizzle-orm";
 import { createError } from "h3";
+import { UUID_RE } from "./api-helpers";
 
 // Secrets are stored with the same env-style keys the dashboard form
 // produces (see SMTP_SPEC in @schema), so accounts created through the
@@ -122,29 +123,36 @@ export function serializeSmtpAccount(
 }
 
 // ownerId null = admin API key: no ownership filter, any account resolves.
+// workspaceId (regular keys): the account must also live in the key's
+// workspace, not in another workspace of the same user.
 export async function validateSmtpAccountOwnership(opts: {
 	accountId: string;
 	ownerId: string | null;
+	workspaceId?: string;
 }) {
+	const notFound = () =>
+		createError({
+			statusCode: 404,
+			statusMessage: "SMTP account not found or access denied",
+		});
+
+	if (!UUID_RE.test(opts.accountId)) throw notFound();
+
 	const [account] = await db
 		.select()
 		.from(smtpAccounts)
 		.where(
-			opts.ownerId === null
-				? eq(smtpAccounts.id, opts.accountId)
-				: and(
-						eq(smtpAccounts.id, opts.accountId),
-						eq(smtpAccounts.ownerId, opts.ownerId),
-					),
+			and(
+				eq(smtpAccounts.id, opts.accountId),
+				opts.ownerId === null ? undefined : eq(smtpAccounts.ownerId, opts.ownerId),
+				opts.workspaceId
+					? eq(smtpAccounts.workspaceId, opts.workspaceId)
+					: undefined,
+			),
 		)
 		.limit(1);
 
-	if (!account) {
-		throw createError({
-			statusCode: 404,
-			statusMessage: "SMTP account not found or access denied",
-		});
-	}
+	if (!account) throw notFound();
 
 	return account;
 }

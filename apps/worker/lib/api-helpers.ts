@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import net from "node:net";
 import {
 	apiKeys,
 	db,
@@ -6,8 +7,10 @@ import {
 	identities,
 	secretsMeta,
 	users,
+	workspaceMembers,
 	workspaces,
 } from "@db";
+import { httpOutboundPolicy, isBlockedIp } from "@providers/net-guard";
 import type { apiScopeList } from "@schema";
 import { and, eq } from "drizzle-orm";
 import { createError, type H3Event, readRawBody } from "h3";
@@ -79,6 +82,61 @@ function safeEqual(a: string, b: string) {
 	if (ab.length !== bb.length) return false;
 
 	return crypto.timingSafeEqual(ab, bb);
+}
+
+async function isWorkspaceMember(workspaceId: string, userId: string) {
+	const [member] = await db
+		.select({ id: workspaceMembers.id })
+		.from(workspaceMembers)
+		.where(
+			and(
+				eq(workspaceMembers.workspaceId, workspaceId),
+				eq(workspaceMembers.userId, userId),
+			),
+		)
+		.limit(1);
+	if (member) return true;
+
+	const [owned] = await db
+		.select({ id: workspaces.id })
+		.from(workspaces)
+		.where(and(eq(workspaces.id, workspaceId), eq(workspaces.ownerId, userId)))
+		.limit(1);
+	return Boolean(owned);
+}
+
+/**
+ * Validates a user supplied webhook URL at create/update time: absolute
+ * http(s) URL whose host is not a literal internal/metadata address.
+ * Hostnames are resolved and checked again at delivery time.
+ */
+export function assertValidWebhookUrl(value: unknown) {
+	let url: URL | null = null;
+	try {
+		url = new URL(String(value ?? ""));
+	} catch {
+		url = null;
+	}
+	const host = url?.hostname.replace(/^\[|\]$/g, "") ?? "";
+	if (
+		!url ||
+		(url.protocol !== "http:" && url.protocol !== "https:") ||
+		!host ||
+		(net.isIP(host) !== 0 && isBlockedIp(host, httpOutboundPolicy()))
+	) {
+		throw createError({
+			statusCode: 400,
+			statusMessage:
+				"Webhook url must be a public http(s) URL (internal addresses are not allowed)",
+			data: {
+				success: false,
+				error: {
+					code: "INVALID_WEBHOOK_URL",
+					message: "Webhook url must be a public http(s) URL",
+				},
+			},
+		});
+	}
 }
 
 /**
@@ -200,6 +258,16 @@ export async function validateApiKey(
 	}
 
 	assertApiKeyScopes(key.scopes, requiredScopes);
+
+	// Keys are bound to a workspace: once the owner leaves (or is removed
+	// from) it, the key must stop working instead of keeping access to the
+	// workspace's shared identities.
+	if (!(await isWorkspaceMember(key.workspaceId, key.ownerId))) {
+		throw createError({
+			statusCode: 401,
+			statusMessage: "API key owner is not a member of the key's workspace",
+		});
+	}
 
 	return {
 		apiKey: key,

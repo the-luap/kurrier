@@ -3,6 +3,9 @@ import { ParsedContactFields } from "./dav-vcard";
 import { nanoid } from "nanoid";
 import {PutObjectCommand} from "@aws-sdk/client-s3";
 import {s3} from "../../../lib/create-s3-client";
+import { safeHttpRequest } from "@providers/net-guard";
+
+const MAX_PHOTO_BYTES = 5 * 1024 * 1024;
 
 
 export async function davParsePhoto(
@@ -24,9 +27,27 @@ export async function davParsePhoto(
 	if (parsed.photo?.base64) {
 		mainFile = Buffer.from(parsed.photo.base64, "base64");
 	} else if (parsed.photo.url) {
-		const response = await fetch(parsed.photo.url);
-		if (response.ok) {
-			mainFile = Buffer.from(await response.arrayBuffer());
+		// The URL comes from a synced vCard (user/third-party controlled) and
+		// the image is stored readable for the user: guard against SSRF to
+		// internal services / cloud metadata, no redirects, size + time cap.
+		try {
+			const response = await safeHttpRequest(parsed.photo.url, {
+				method: "GET",
+				timeoutMs: 10_000,
+				maxResponseBytes: MAX_PHOTO_BYTES,
+			});
+			const contentType = String(response.headers["content-type"] ?? "");
+			if (
+				response.status >= 200 &&
+				response.status < 300 &&
+				contentType.toLowerCase().startsWith("image/")
+			) {
+				mainFile = response.body;
+			}
+		} catch (err) {
+			console.warn("[dav] contact photo not fetched", {
+				message: (err as Error)?.message,
+			});
 		}
 	}
 

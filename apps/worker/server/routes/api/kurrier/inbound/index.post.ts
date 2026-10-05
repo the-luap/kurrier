@@ -7,6 +7,7 @@ import {
 	API_SCOPES,
 	apiError,
 	apiSuccess,
+	UUID_RE,
 	validateApiKey,
 } from "../../../../../lib/api-helpers";
 import { parseAndStoreEmail } from "../../../../../lib/message-payload-parser";
@@ -23,6 +24,14 @@ export default defineEventHandler(async (event) => {
 	}
 
 	const { apiKey } = await validateApiKey(event, API_SCOPES.manage);
+
+	if (!UUID_RE.test(identityId)) {
+		return apiError(
+			404,
+			"INBOUND_IDENTITY_NOT_FOUND",
+			"Inbound identity not found",
+		);
+	}
 
 	const [row] = await db
 		.select({

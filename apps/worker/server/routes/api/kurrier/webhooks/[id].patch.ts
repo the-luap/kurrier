@@ -2,6 +2,7 @@ import { defineEventHandler, getRouterParam, readBody } from "h3";
 import {
 	API_SCOPES,
 	apiSuccess,
+	assertValidWebhookUrl,
 	apiError,
 	validateApiKey,
 	validateIdentityOwnership,
@@ -52,6 +53,9 @@ export default defineEventHandler(async (event) => {
 		createdAt: _createdAt,
 		...changes
 	} = parsed.data;
+	if (changes.url !== undefined) {
+		assertValidWebhookUrl(changes.url);
+	}
 	if (changes.identityId) {
 		await validateIdentityOwnership({
 			identityId: changes.identityId,

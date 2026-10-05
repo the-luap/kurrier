@@ -88,7 +88,17 @@ Fetch an identity by its ID.
 
 ### `PATCH /identities/{id}`
 
-Partially update an identity.
+Partially update an identity. Only these fields can be changed through the API:
+
+| Field | Description |
+|-------|-------------|
+| **displayName** | Sender display name. |
+| **smtpAccountId** | SMTP account used for sending; must belong to the API key's user and workspace. |
+| **metaData.dailyQuota** | Daily sending quota (positive integer). Other `metaData` keys are rejected. |
+
+Any other field (for example `value`, `kind`, `status`, `providerId`,
+`domainIdentityId`, `sharedWithWorkspace`) is rejected with
+`400 FIELD_NOT_UPDATABLE`; manage those in the dashboard.
 
 ---
 

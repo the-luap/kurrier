@@ -16,8 +16,10 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    # The web app reaches the worker over the compose network (WORKER_URL);
+    # publish it on localhost only so its internal routes are not exposed.
     ports:
-      - "${NITRO_PORT:-3001}:3001"
+      - "127.0.0.1:${NITRO_PORT:-3001}:3001"
     depends_on:
       postgres:
         condition: service_healthy

@@ -36,7 +36,11 @@ export default defineEventHandler(async (event) => {
 		const rawMime = Buffer.from(emailPart.data).toString("utf8");
 		// Permanent rejects resolve with { ok: false } and HTTP 200, so
 		// SendGrid does not retry them; unexpected errors return 5xx.
-		return await storeInboundRawEmail(rawMime, envelopeRecipients);
+		return await storeInboundRawEmail(
+			rawMime,
+			envelopeRecipients,
+			"sendgrid",
+		);
 	} catch (err) {
 		console.error("[Webhook] SendGrid inbound error:", err);
 		throw err;

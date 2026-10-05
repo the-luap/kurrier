@@ -48,7 +48,7 @@ curl https://your-domain.com/api/kurrier/me \
   -H "Authorization: Bearer $KURRIER_API_KEY"
 ```
 
-Revoked and expired keys are rejected with `401`.
+Revoked and expired keys are rejected with `401`, as are keys whose owner is no longer a member of the key's workspace.
 
 ---
 

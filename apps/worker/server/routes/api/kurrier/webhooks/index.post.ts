@@ -2,6 +2,7 @@ import { defineEventHandler, readBody } from "h3";
 import {
 	API_SCOPES,
 	apiSuccess,
+	assertValidWebhookUrl,
 	apiError,
 	validateApiKey,
 	validateIdentityOwnership,
@@ -29,6 +30,7 @@ export default defineEventHandler(async (event) => {
 	if (!data.url) {
 		return apiError(400, "MISSING_URL", "Field `url` is required");
 	}
+	assertValidWebhookUrl(data.url);
 	if (!data.events || data.events.length === 0) {
 		return apiError(
 			400,

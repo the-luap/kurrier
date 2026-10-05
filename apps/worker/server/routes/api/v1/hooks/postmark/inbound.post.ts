@@ -19,6 +19,7 @@ export default defineEventHandler(async (event) => {
 		return await storeInboundRawEmail(
 			rawMime,
 			extractEmailAddresses(body?.OriginalRecipient),
+			"postmark",
 		);
 	} catch (err) {
 		console.error("[Webhook] Postmark inbound error:", err);

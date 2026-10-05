@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
-import { db, identities, mailboxes } from "@db";
-import { getServerEnv } from "@schema";
+import { db, identities, mailboxes, providers } from "@db";
+import { getServerEnv, type Providers } from "@schema";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { createError, getHeader, getQuery, type H3Event } from "h3";
 import { type ParsedMail, simpleParser } from "mailparser";
@@ -160,16 +160,26 @@ export function collectRecipientCandidates(
 
 /**
  * Finds the identity of the first recipient candidate (case-insensitive),
- * optionally restricted to one workspace.
+ * optionally restricted to one workspace and/or to identities wired to a
+ * provider of the given type (directly or through their domain identity).
+ *
+ * Identity values are only unique per workspace, so the same address can
+ * exist in several workspaces. Unverified duplicates must not be able to
+ * capture another tenant's mail: when an address matches identities in more
+ * than one workspace, only a verified one (identity or its domain) is used,
+ * and the message is rejected if that is still ambiguous.
  */
 export async function findIdentityForRecipients(
 	candidates: string[],
 	workspaceId?: string,
+	providerType?: Providers,
 ) {
 	if (!candidates.length) return null;
-	const matches = await db
-		.select()
+
+	const rows = await db
+		.select({ identity: identities, providerType: providers.type })
 		.from(identities)
+		.leftJoin(providers, eq(identities.providerId, providers.id))
 		.where(
 			and(
 				inArray(sql`lower(${identities.value})`, candidates),
@@ -177,11 +187,73 @@ export async function findIdentityForRecipients(
 			),
 		);
 
-	return (
-		candidates
-			.map((addr) => matches.find((m) => m.value.toLowerCase() === addr))
-			.find(Boolean) ?? null
-	);
+	// Domain identities of the matches: their provider and verification.
+	const domainIds = [
+		...new Set(
+			rows
+				.map((r) => r.identity.domainIdentityId)
+				.filter((id): id is string => Boolean(id)),
+		),
+	];
+	const domains = domainIds.length
+		? await db
+				.select({
+					id: identities.id,
+					status: identities.status,
+					providerType: providers.type,
+				})
+				.from(identities)
+				.leftJoin(providers, eq(identities.providerId, providers.id))
+				.where(inArray(identities.id, domainIds))
+		: [];
+	const domainById = new Map(domains.map((d) => [d.id, d]));
+	const withDomain = rows.map((r) => {
+		const domain = r.identity.domainIdentityId
+			? domainById.get(r.identity.domainIdentityId)
+			: undefined;
+		return {
+			...r,
+			domainProviderType: domain?.providerType ?? null,
+			domainStatus: domain?.status ?? null,
+		};
+	});
+
+	const matches = providerType
+		? withDomain.filter(
+				(r) =>
+					r.providerType === providerType ||
+					r.domainProviderType === providerType,
+			)
+		: withDomain;
+
+	for (const addr of candidates) {
+		const forAddr = matches.filter(
+			(m) => m.identity.value.toLowerCase() === addr,
+		);
+		if (!forAddr.length) continue;
+
+		const workspacesForAddr = new Set(
+			forAddr.map((m) => m.identity.workspaceId),
+		);
+		if (workspacesForAddr.size === 1) return forAddr[0].identity;
+
+		const verified = forAddr.filter(
+			(m) =>
+				m.identity.status === "verified" || m.domainStatus === "verified",
+		);
+		const verifiedWorkspaces = new Set(
+			verified.map((m) => m.identity.workspaceId),
+		);
+		if (verifiedWorkspaces.size === 1) return verified[0].identity;
+
+		console.warn(
+			"[InboundWebhook] Recipient matches identities in several workspaces; not delivering",
+			{ recipient: addr, workspaces: workspacesForAddr.size },
+		);
+		return null;
+	}
+
+	return null;
 }
 
 /**
@@ -192,10 +264,13 @@ export async function findIdentityForRecipients(
  *
  * @param envelopeRecipients SMTP envelope recipients reported by the provider;
  *   preferred over the To/Cc headers when present.
+ * @param providerType provider whose webhook delivered the message; only
+ *   identities of that provider type are considered.
  */
 export async function storeInboundRawEmail(
 	rawMime: string,
 	envelopeRecipients: string[] = [],
+	providerType?: Providers,
 ): Promise<InboundStoreResult> {
 	if (!rawMime || typeof rawMime !== "string") {
 		console.warn("[InboundWebhook] Rejecting payload without raw email");
@@ -211,7 +286,14 @@ export async function storeInboundRawEmail(
 		return { ok: false, reason: "Inbound email has no recipient" };
 	}
 
-	const identity = await findIdentityForRecipients(candidates);
+	// Only identities wired to the provider whose webhook delivered the mail:
+	// a Mailgun webhook cannot drop mail into an SMTP/Gmail/other-provider
+	// identity that merely shares the address.
+	const identity = await findIdentityForRecipients(
+		candidates,
+		undefined,
+		providerType,
+	);
 
 	if (!identity) {
 		console.warn("[InboundWebhook] No identity found for recipients", {

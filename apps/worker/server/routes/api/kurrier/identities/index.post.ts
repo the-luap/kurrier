@@ -131,6 +131,7 @@ export default defineEventHandler(async (event) => {
 	const account = await validateSmtpAccountOwnership({
 		accountId: data.smtpAccountId,
 		ownerId,
+		workspaceId,
 	});
 
 	const [duplicate] = await db

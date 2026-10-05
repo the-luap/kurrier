@@ -1,5 +1,6 @@
 import { db, driveEntries, driveVolumes } from "@db";
 import { and, eq, like, or } from "drizzle-orm";
+import { safePathSegments } from "./safe-local-path";
 
 const trimSlashes = (s: string) => s.replace(/^\/+|\/+$/g, "");
 const stripQueryHash = (s: string) =>
@@ -31,6 +32,13 @@ export const deletePath = async (opts: {
 	if (!ownerId) throw new Error("deletePath: missing ownerId");
 	if (!volumeId) throw new Error("deletePath: missing volumeId");
 	if (!href.startsWith("/")) throw new Error("deletePath: invalid href");
+	// "..", "%2e%2e" etc. would let the DAV DELETE leave the user's home
+	// (new URL() normalizes them after the prefix check below).
+	try {
+		safePathSegments(stripQueryHash(href));
+	} catch {
+		throw new Error("deletePath: invalid href");
+	}
 
 	const [vol] = await db
 		.select()

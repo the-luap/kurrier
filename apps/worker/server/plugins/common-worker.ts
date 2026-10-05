@@ -86,9 +86,8 @@ export default defineNitroPlugin(async (nitroApp) => {
 					return { success: true };
 				}
 				case "webhook:message.received": {
-					const { messageId, rawStorageKey } = job.data as {
+					const { messageId } = job.data as {
 						messageId: string;
-						rawStorageKey: string | null;
 					};
 
 					const [message] = await db
@@ -100,6 +99,10 @@ export default defineNitroPlugin(async (nitroApp) => {
 					if (!message) {
 						return { success: false, reason: "message-not-found" };
 					}
+
+					// Use the message's own key, not the one in the job payload,
+					// so a job can never attach another object of the bucket.
+					const rawStorageKey = message.rawStorageKey;
 
 					// The raw source is missing when its upload failed during
 					// ingestion: deliver the webhook without it.

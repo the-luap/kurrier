@@ -8,12 +8,15 @@ import {
 } from "../core";
 import { ImapFlow } from "imapflow";
 import SMTPTransport from "nodemailer/lib/smtp-transport";
+import { assertHostAllowed, mailHostPolicy } from "../net-guard";
 
 export class SmtpMailer implements Mailer {
 	private transporter: Transporter;
 	private imapConfig: SmtpVerifyInput["imap"] | null;
+	private host: string;
 
 	private constructor(cfg: SmtpVerifyInput) {
+		this.host = cfg.host;
 		this.transporter = nodemailer.createTransport({
 			host: cfg.host,
 			port: cfg.port,
@@ -39,10 +42,14 @@ export class SmtpMailer implements Mailer {
 		};
 
 		try {
+			// User supplied host: never connect to cloud metadata / link-local
+			// (or private ranges with MAIL_HOST_BLOCK_PRIVATE_NETWORKS=true).
+			await assertHostAllowed(this.host, mailHostPolicy());
 			const ok = await this.transporter.verify();
 			meta.send = !!ok;
 
 			if (this.imapConfig) {
+				await assertHostAllowed(this.imapConfig.host, mailHostPolicy());
 				const imapClient = new ImapFlow({
 					host: this.imapConfig.host,
 					port: this.imapConfig.port,
@@ -102,6 +109,7 @@ export class SmtpMailer implements Mailer {
 		},
 	): Promise<boolean> {
 		try {
+			await assertHostAllowed(this.host, mailHostPolicy());
 			await this.transporter.sendMail({
 				from: (this.transporter.options as any).auth.user,
 				to,
@@ -184,6 +192,7 @@ export class SmtpMailer implements Mailer {
 		error?: string;
 	}> {
 		try {
+			await assertHostAllowed(this.host, mailHostPolicy());
 			const attachments = await Promise.all(
 				(opts.attachments ?? []).map(async (attachment) => ({
 					filename: attachment.name,

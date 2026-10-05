@@ -1,4 +1,5 @@
 import { db, decryptAdminSecrets, identities, smtpAccountSecrets } from "@db";
+import { assertHostAllowed, mailHostPolicy } from "@providers/net-guard";
 import { eq } from "drizzle-orm";
 import { ImapFlow } from "imapflow";
 
@@ -83,6 +84,10 @@ async function connectClient(
 		const credentials = secrets?.vault?.decrypted_secret
 			? JSON.parse(secrets.vault.decrypted_secret)
 			: {};
+
+		// User supplied host: refuse cloud metadata / link-local (and private
+		// ranges with MAIL_HOST_BLOCK_PRIVATE_NETWORKS=true).
+		await assertHostAllowed(String(credentials.IMAP_HOST ?? ""), mailHostPolicy());
 
 		const client = new ImapFlow({
 			host: credentials.IMAP_HOST,

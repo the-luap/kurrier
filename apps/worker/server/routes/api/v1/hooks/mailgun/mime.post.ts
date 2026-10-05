@@ -46,6 +46,7 @@ export default defineEventHandler(async (event) => {
 		return await storeInboundRawEmail(
 			String(rawMime || ""),
 			extractEmailAddresses(fields.recipient),
+			"mailgun",
 		);
 	} catch (err) {
 		console.error("[Webhook] Mailgun inbound error", err);
