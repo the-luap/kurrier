@@ -5,6 +5,7 @@ import { APP_VERSION } from "@common";
 import { db, identities, users, workspaceMembers, workspaces } from "@db";
 import {type FormState, getPublicEnv, getServerEnv, handleAction} from "@schema";
 import argon2 from "argon2";
+import bcrypt from "bcryptjs";
 import { decode } from "decode-formdata";
 import { eq, sql } from "drizzle-orm";
 import { type JWTPayload, jwtVerify, SignJWT } from "jose";
@@ -66,6 +67,44 @@ const applyPendingMigrations = async (
 		},
 	);
 };
+
+/**
+ * Users imported from the old Supabase-based fork have no argon2 hash yet,
+ * only GoTrue's bcrypt hash in auth.users.encrypted_password. Verify that
+ * once and store an argon2 hash, so the next login takes the normal path.
+ */
+async function verifyLegacySupabasePassword(userId: string, password: string) {
+	let encryptedPassword: string | null | undefined;
+	try {
+		const rows = (await db.execute(sql`
+			select encrypted_password
+			from auth.users
+			where id = ${userId} and encrypted_password is not null
+			limit 1
+		`)) as unknown as Array<{ encrypted_password: string | null }>;
+		encryptedPassword = rows[0]?.encrypted_password;
+	} catch (error) {
+		// Installations that never ran on Supabase have no such column.
+		if (
+			error instanceof Error &&
+			/encrypted_password.*does not exist/i.test(
+				`${error.message} ${String((error as { cause?: unknown }).cause ?? "")}`,
+			)
+		) {
+			return false;
+		}
+		throw error;
+	}
+
+	if (!encryptedPassword) return false;
+	if (!(await bcrypt.compare(password, encryptedPassword))) return false;
+
+	await db
+		.update(users)
+		.set({ passwordHash: await argon2.hash(password) })
+		.where(eq(users.id, userId));
+	return true;
+}
 
 async function signToken(userId: string) {
 	const { JWT_SECRET } = getServerEnv();
@@ -173,11 +212,13 @@ export async function login(
 			.limit(1);
 	}
 
-	if (!user || !user.passwordHash) {
+	if (!user) {
 		return { error: "auth.invalidCredentials" };
 	}
 
-	const valid = await argon2.verify(user.passwordHash, password);
+	const valid = user.passwordHash
+		? await argon2.verify(user.passwordHash, password)
+		: await verifyLegacySupabasePassword(user.id, password);
 
 	if (!valid) {
 		return { error: "auth.invalidCredentials" };

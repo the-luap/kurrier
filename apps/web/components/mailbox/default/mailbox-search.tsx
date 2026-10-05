@@ -52,12 +52,16 @@ export default function MailboxSearch({
 	React.useEffect(() => {
 		const q = query.trim();
 		if (!q) {
+			setLoading(false);
 			setItems([]);
 			setTotalThreads(0);
 			setTotalMessages(0);
 			return;
 		}
 
+		// Only the latest request may update the results: a slow earlier
+		// search must not overwrite newer ones.
+		let cancelled = false;
 		const t = setTimeout(async () => {
 			try {
 				setLoading(true);
@@ -73,19 +77,24 @@ export default function MailboxSearch({
 					1,
 				);
 
+				if (cancelled) return;
 				setItems(res.items || []);
 				setTotalThreads(res.totalThreads ?? res.items?.length ?? 0);
 				setTotalMessages(res.totalMessages ?? res.items?.length ?? 0);
 			} catch {
+				if (cancelled) return;
 				setItems([]);
 				setTotalThreads(0);
 				setTotalMessages(0);
 			} finally {
-				setLoading(false);
+				if (!cancelled) setLoading(false);
 			}
 		}, DEBOUNCE_MS);
 
-		return () => clearTimeout(t);
+		return () => {
+			cancelled = true;
+			clearTimeout(t);
+		};
 	}, [
 		query,
 		hasAttachment,
