@@ -1,18 +1,18 @@
-import { SidebarInset } from "@/components/ui/sidebar";
+import { getPublicEnv, type LabelScope } from "@schema";
+import type * as React from "react";
+import IdentityMailboxesList from "@/components/dashboard/identity-mailboxes-list";
+import LabelHome from "@/components/dashboard/labels/label-home";
+import ComposeMail from "@/components/mailbox/default/compose-mail";
 import { AppSidebar } from "@/components/ui/dashboards/unified/default/app-sidebar";
+import { SidebarInset } from "@/components/ui/sidebar";
+import { DynamicContextProvider } from "@/hooks/use-dynamic-context";
+import { isSignedIn } from "@/lib/actions/auth";
+import { fetchLabelsWithCounts } from "@/lib/actions/labels";
 import {
 	fetchIdentityMailboxList,
 	fetchIdentitySnoozedThreads,
 	fetchScheduledDraftCounts,
 } from "@/lib/actions/mailbox";
-import { fetchLabelsWithCounts } from "@/lib/actions/labels";
-import { getPublicEnv, LabelScope } from "@schema";
-import { isSignedIn } from "@/lib/actions/auth";
-import { DynamicContextProvider } from "@/hooks/use-dynamic-context";
-import LabelHome from "@/components/dashboard/labels/label-home";
-import * as React from "react";
-import IdentityMailboxesList from "@/components/dashboard/identity-mailboxes-list";
-import ComposeMail from "@/components/mailbox/default/compose-mail";
 
 export default async function DashboardLayout({
 	children,
@@ -20,16 +20,19 @@ export default async function DashboardLayout({
 	children: React.ReactNode;
 }) {
 	const publicConfig = getPublicEnv();
-	const [identityMailboxes, user, globalLabels, scheduledDrafts] =
-		await Promise.all([
-			fetchIdentityMailboxList(),
-			isSignedIn(),
-			fetchLabelsWithCounts(),
-			fetchScheduledDraftCounts(),
-		]);
-	const { threads: snoozedThreads } = await fetchIdentitySnoozedThreads(
-		identityMailboxes[0]?.identity?.publicId,
-	);
+	const [
+		identityMailboxes,
+		user,
+		globalLabels,
+		scheduledDrafts,
+		{ threads: snoozedThreads },
+	] = await Promise.all([
+		fetchIdentityMailboxList(),
+		isSignedIn(),
+		fetchLabelsWithCounts(),
+		fetchScheduledDraftCounts(),
+		fetchIdentitySnoozedThreads(),
+	]);
 
 	return (
 		<>

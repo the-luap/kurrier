@@ -1,5 +1,5 @@
+import type { IdentityStatus } from "@schema";
 import { z } from "zod";
-import { IdentityStatus } from "@schema";
 
 export type VerifyResult = {
 	ok: boolean;
@@ -137,6 +137,8 @@ export interface Mailer {
 			text: string;
 			html: string;
 			from: string;
+			cc?: string[];
+			bcc?: string[];
 			inReplyTo: string;
 			references: string[];
 			attachments?: { name: string; content: Blob; contentType: string }[];

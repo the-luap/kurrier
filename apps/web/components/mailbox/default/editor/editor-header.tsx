@@ -1,34 +1,57 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import { getMessageAddress } from "@common/mail-client";
+import type { MessageEntity } from "@db";
 import {
 	ActionIcon,
-	Select,
-	SelectProps,
-	TagsInput,
-	Group,
-	Text,
-	Input,
 	FocusTrap,
 	FocusTrapInitialFocus,
+	Group,
+	Input,
+	Select,
+	type SelectProps,
+	TagsInput,
+	Text,
 } from "@mantine/core";
-import { Forward, Reply } from "lucide-react";
-import { useDynamicContext } from "@/hooks/use-dynamic-context";
-import { MessageEntity } from "@db";
-import { getMessageAddress } from "@common/mail-client";
 import { useMediaQuery } from "@mantine/hooks";
+import { Forward, Reply } from "lucide-react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import type { InitialDraft } from "@/components/mailbox/default/editor/email-editor";
 import EmailHeaderContacts from "@/components/mailbox/default/editor/email-header-contacts";
+import { useDynamicContext } from "@/hooks/use-dynamic-context";
+
+function splitList(value?: string) {
+	return (value ?? "")
+		.split(",")
+		.map((v) => v.trim())
+		.filter(Boolean);
+}
 
 function EditorHeader({ focusOnSubject }: { focusOnSubject?: () => void }) {
-	const { state } = useDynamicContext<{
+	const { state, setState } = useDynamicContext<{
 		isPending: boolean;
 		message: MessageEntity;
 		showEditorMode: "reply" | "forward" | "compose";
+		initialDraft?: InitialDraft;
+		currentMode?: "reply" | "forward" | "compose";
 	}>();
 
-	const [mode, setMode] = useState<"reply" | "forward" | "compose">(
-		state.showEditorMode,
+	// A restored draft brings its own mode, recipients and subject.
+	const draft = state.initialDraft?.payload;
+	const [initialMode] = useState<"reply" | "forward" | "compose">(() =>
+		state.message && (draft?.mode === "reply" || draft?.mode === "forward")
+			? draft.mode
+			: state.showEditorMode,
 	);
-	const [ccActive, setCcActive] = useState(false);
-	const [bccActive, setBccActive] = useState(false);
+	const [mode, setMode] = useState<"reply" | "forward" | "compose">(
+		initialMode,
+	);
+	const useDraftValues = !!draft && mode === initialMode;
+	const [ccActive, setCcActive] = useState(!!draft?.cc);
+	const [bccActive, setBccActive] = useState(!!draft?.bcc);
+
+	// The footer needs the current mode (e.g. to offer forwarding attachments).
+	useEffect(() => {
+		setState((prev) => ({ ...prev, currentMode: mode }));
+	}, [mode, setState]);
 
 	const options = useMemo(
 		() => [
@@ -38,9 +61,16 @@ function EditorHeader({ focusOnSubject }: { focusOnSubject?: () => void }) {
 		[],
 	);
 
+	// Replies go to Reply-To when the sender set one; forwards start empty.
 	const toEmail = useMemo(() => {
-		return getMessageAddress(state?.message, "from") || "";
-	}, [state.message]);
+		if (!state?.message || mode === "forward") return "";
+		const replyTo = (state.message as any).replyTo;
+		const replyToAddress =
+			typeof replyTo === "string"
+				? replyTo
+				: (replyTo?.value?.[0]?.address ?? null);
+		return replyToAddress || getMessageAddress(state.message, "from") || "";
+	}, [state.message, mode]);
 
 	const renderOption: SelectProps["renderOption"] = ({ option }) => {
 		const ItemIcon =
@@ -61,16 +91,21 @@ function EditorHeader({ focusOnSubject }: { focusOnSubject?: () => void }) {
 
 		const original = state.message.subject?.trim() || "";
 
-		const cleaned = original.replace(/^(re|fwd)\s*:\s*/gi, "");
+		// Strip any chain of reply/forward prefixes ("Re: AW: Fwd: ...").
+		const cleaned = original.replace(/^((re|aw|fwd?|wg)\s*:\s*)+/i, "");
 
 		if (mode === "reply") return `Re: ${cleaned}`;
 		if (mode === "forward") return `Fwd: ${cleaned}`;
 		return cleaned;
 	}, [state.message, mode]);
 
-	const [subject, setSubject] = useState(computedSubject);
+	const [subject, setSubject] = useState(draft?.subject ?? computedSubject);
 
+	const initialComputedSubject = useRef(computedSubject);
+	// biome-ignore lint/correctness/useExhaustiveDependencies: only react to mode/subject changes, the draft is fixed per editor
 	useEffect(() => {
+		// Keep the draft's subject until the user switches the mode.
+		if (draft && computedSubject === initialComputedSubject.current) return;
 		setSubject(computedSubject);
 	}, [computedSubject]);
 
@@ -114,14 +149,10 @@ function EditorHeader({ focusOnSubject }: { focusOnSubject?: () => void }) {
 						To
 					</span>
 					<EmailHeaderContacts
+						key={`to-${mode}`}
 						name={"to"}
-						maxTags={1}
 						toEmail={toEmail}
-						onChange={(value) => {
-							if (value.length > 0) {
-								setSubjectFocus(true);
-							}
-						}}
+						defaultValues={useDraftValues ? splitList(draft?.to) : undefined}
 					/>
 				</div>
 
@@ -158,12 +189,7 @@ function EditorHeader({ focusOnSubject }: { focusOnSubject?: () => void }) {
 					</span>
 					<EmailHeaderContacts
 						name={"cc"}
-						toEmail={toEmail}
-						onChange={(value) => {
-							if (value.length > 0) {
-								setSubjectFocus(true);
-							}
-						}}
+						defaultValues={useDraftValues ? splitList(draft?.cc) : undefined}
 					/>
 				</div>
 			)}
@@ -175,12 +201,7 @@ function EditorHeader({ focusOnSubject }: { focusOnSubject?: () => void }) {
 					</span>
 					<EmailHeaderContacts
 						name={"bcc"}
-						toEmail={toEmail}
-						onChange={(value) => {
-							if (value.length > 0) {
-								setSubjectFocus(true);
-							}
-						}}
+						defaultValues={useDraftValues ? splitList(draft?.bcc) : undefined}
 					/>
 				</div>
 			)}
@@ -230,14 +251,12 @@ function EditorHeader({ focusOnSubject }: { focusOnSubject?: () => void }) {
 						<div className="flex items-center gap-2">
 							<span className="text-sm text-muted-foreground">To</span>
 							<EmailHeaderContacts
+								key={`to-${mode}`}
 								name={"to"}
-								maxTags={1}
 								toEmail={toEmail}
-								onChange={(value) => {
-									if (value.length > 0) {
-										setSubjectFocus(true);
-									}
-								}}
+								defaultValues={
+									useDraftValues ? splitList(draft?.to) : undefined
+								}
 							/>
 						</div>
 
@@ -246,12 +265,9 @@ function EditorHeader({ focusOnSubject }: { focusOnSubject?: () => void }) {
 								<span className="text-sm text-muted-foreground">Cc</span>
 								<EmailHeaderContacts
 									name={"cc"}
-									toEmail={toEmail}
-									onChange={(value) => {
-										if (value.length > 0) {
-											setSubjectFocus(true);
-										}
-									}}
+									defaultValues={
+										useDraftValues ? splitList(draft?.cc) : undefined
+									}
 								/>
 							</div>
 						)}
@@ -261,12 +277,9 @@ function EditorHeader({ focusOnSubject }: { focusOnSubject?: () => void }) {
 								<span className="text-sm text-muted-foreground">Bcc</span>
 								<EmailHeaderContacts
 									name={"bcc"}
-									toEmail={toEmail}
-									onChange={(value) => {
-										if (value.length > 0) {
-											setSubjectFocus(true);
-										}
-									}}
+									defaultValues={
+										useDraftValues ? splitList(draft?.bcc) : undefined
+									}
 								/>
 							</div>
 						)}

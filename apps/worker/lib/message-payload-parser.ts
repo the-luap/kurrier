@@ -1,23 +1,24 @@
-import { simpleParser, ParsedMail, Attachment } from "mailparser";
-import {
-    db,
-    messages,
-    messageAttachments,
-    threads,
-    MessageInsertSchema,
-    MessageCreate,
-    MessageAttachmentCreate,
-    MessageAttachmentInsertSchema,
-    contacts,
-    ContactCreate, mailSubscriptions,
-} from "@db";
-import { createClient } from "@supabase/supabase-js";
-import { getPublicEnv, getServerEnv } from "@schema";
 import { generateSnippet, upsertMailboxThreadItem } from "@common";
+import {
+	type ContactCreate,
+	contacts,
+	db,
+	type MessageAttachmentCreate,
+	MessageAttachmentInsertSchema,
+	type MessageCreate,
+	MessageInsertSchema,
+	mailSubscriptions,
+	messageAttachments,
+	messages,
+	threads,
+} from "@db";
+import { getPublicEnv, getServerEnv } from "@schema";
+import slugify from "@sindresorhus/slugify";
+import { createClient } from "@supabase/supabase-js";
 import { randomUUID } from "crypto";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { type Attachment, type ParsedMail, simpleParser } from "mailparser";
 import { getRedis } from "../lib/get-redis";
-import slugify from "@sindresorhus/slugify";
 
 const publicConfig = getPublicEnv();
 const serverConfig = getServerEnv();
@@ -44,7 +45,7 @@ type ICSJob = {
 	mailboxId: string;
 };
 type RulesJob = {
-    messageId: string;
+	messageId: string;
 };
 
 let searchBuffer: SearchJob[] = [];
@@ -54,7 +55,12 @@ let rulesBuffer: RulesJob[] = [];
 let flushTimer: any = null;
 
 async function flushBatches() {
-	if (!searchBuffer.length && !webhookBuffer.length && !icsBuffer.length && !rulesBuffer.length)
+	if (
+		!searchBuffer.length &&
+		!webhookBuffer.length &&
+		!icsBuffer.length &&
+		!rulesBuffer.length
+	)
 		return;
 
 	try {
@@ -111,16 +117,16 @@ async function flushBatches() {
 			webhookBuffer = [];
 		}
 
-        if (rulesBuffer.length) {
-            const jobs = rulesBuffer.map((job) => ({
-                name: "rules:processor",
-                data: {
-                    messageId: job.messageId
-                },
-            }));
-            await commonWorkerQueue.addBulk(jobs);
-            rulesBuffer = [];
-        }
+		if (rulesBuffer.length) {
+			const jobs = rulesBuffer.map((job) => ({
+				name: "rules:processor",
+				data: {
+					messageId: job.messageId,
+				},
+			}));
+			await commonWorkerQueue.addBulk(jobs);
+			rulesBuffer = [];
+		}
 	} catch (err: any) {
 		console.error(
 			"[parseAndStoreEmail] Error flushing batches:",
@@ -342,7 +348,10 @@ export async function parseAndStoreEmail(
 	const { ownerId, mailboxId, rawStorageKey } = opts;
 	const mode = opts.mode ?? "live";
 
-	const parsed = await simpleParser(rawEmail);
+	// Keep "cid:" references instead of inlining images as base64 data URIs:
+	// inline images are stored as attachments and resolved by the web app,
+	// which keeps the stored HTML (and every thread payload) small.
+	const parsed = await simpleParser(rawEmail, { keepCidLinks: true });
 	const headers = parsed.headers as Map<string, any>;
 
 	const encoder = new TextEncoder();
@@ -357,11 +366,14 @@ export async function parseAndStoreEmail(
 		});
 	if (rawUploadError) {
 		storedRawStorageKey = null;
-		console.warn("[parseAndStoreEmail] Raw EML upload failed; continuing without raw source", {
-			mailboxId,
-			storageKey: opts.rawStorageKey,
-			message: rawUploadError.message,
-		});
+		console.warn(
+			"[parseAndStoreEmail] Raw EML upload failed; continuing without raw source",
+			{
+				mailboxId,
+				storageKey: opts.rawStorageKey,
+				message: rawUploadError.message,
+			},
+		);
 	}
 
 	const messageId =
@@ -425,11 +437,11 @@ export async function parseAndStoreEmail(
 		.returning();
 
 	if (!message) return null;
-    await ingestMailSubscriptionFromMessage({
-        ownerId,
-        parsed,
-        headersJson: (decoratedParsed as any).headersJson,
-    });
+	await ingestMailSubscriptionFromMessage({
+		ownerId,
+		parsed,
+		headersJson: (decoratedParsed as any).headersJson,
+	});
 
 	const contactId = await upsertContactsFromMessage(ownerId, parsed);
 	await upsertMailboxThreadItem(message.id);
@@ -462,12 +474,15 @@ export async function parseAndStoreEmail(
 				cacheControl: "31536000",
 			});
 		if (error) {
-			console.warn("[parseAndStoreEmail] Attachment upload failed; skipping attachment", {
-				messageId: message.id,
-				filename: attachment.filename,
-				path: objectPath,
-				message: error.message,
-			});
+			console.warn(
+				"[parseAndStoreEmail] Attachment upload failed; skipping attachment",
+				{
+					messageId: message.id,
+					filename: attachment.filename,
+					path: objectPath,
+					message: error.message,
+				},
+			);
 			continue;
 		}
 
@@ -525,7 +540,10 @@ export async function parseAndStoreEmail(
 	if (mode === "live") {
 		webhookBuffer.push({ message, rawEmail });
 		rulesBuffer.push({ messageId: message.id });
-		if ((webhookBuffer.length >= WEBHOOK_BATCH_SIZE) || (rulesBuffer.length >= RULES_BATCH_SIZE)) {
+		if (
+			webhookBuffer.length >= WEBHOOK_BATCH_SIZE ||
+			rulesBuffer.length >= RULES_BATCH_SIZE
+		) {
 			await flushBatches();
 		} else {
 			scheduleFlush();
@@ -535,90 +553,92 @@ export async function parseAndStoreEmail(
 	return message;
 }
 
-
-
 async function ingestMailSubscriptionFromMessage(opts: {
-    ownerId: string;
-    parsed: ParsedMail;
-    headersJson: Record<string, any>;
+	ownerId: string;
+	parsed: ParsedMail;
+	headersJson: Record<string, any>;
 }) {
-    const { ownerId, parsed, headersJson } = opts;
+	const { ownerId, parsed, headersJson } = opts;
 
-    const headers = parsed.headers as Map<string, any>;
-    const list =
-        (headers.get("list") as any) ??
-        (headersJson as any)?.list ??
-        null;
+	const headers = parsed.headers as Map<string, any>;
+	const list =
+		(headers.get("list") as any) ?? (headersJson as any)?.list ?? null;
 
-    const rawListId =
-        String(headers.get("list-id") ?? (headersJson as any)?.["list-id"] ?? "")
-            .trim() || null;
+	const rawListId =
+		String(
+			headers.get("list-id") ?? (headersJson as any)?.["list-id"] ?? "",
+		).trim() || null;
 
-    const unsubscribeUrl =
-        (list?.unsubscribe?.url as string | undefined) ||
-        (list?.unsubscribe?.href as string | undefined) ||
-        null;
+	const unsubscribeUrl =
+		(list?.unsubscribe?.url as string | undefined) ||
+		(list?.unsubscribe?.href as string | undefined) ||
+		null;
 
-    const unsubscribePost =
-        String(list?.["unsubscribe-post"]?.name ?? "").toLowerCase() || null;
+	const unsubscribePost =
+		String(list?.["unsubscribe-post"]?.name ?? "").toLowerCase() || null;
 
-    let unsubscribeMailto: string | null = null;
-    const rawListUnsub = headers.get("list-unsubscribe") ?? (headersJson as any)?.["list-unsubscribe"];
-    if (typeof rawListUnsub === "string" && rawListUnsub.toLowerCase().includes("mailto:")) {
-        const m = rawListUnsub.match(/mailto:([^>\s,]+)/i);
-        unsubscribeMailto = (m?.[1] ?? "").trim().toLowerCase() || null;
-    }
+	let unsubscribeMailto: string | null = null;
+	const rawListUnsub =
+		headers.get("list-unsubscribe") ??
+		(headersJson as any)?.["list-unsubscribe"];
+	if (
+		typeof rawListUnsub === "string" &&
+		rawListUnsub.toLowerCase().includes("mailto:")
+	) {
+		const m = rawListUnsub.match(/mailto:([^>\s,]+)/i);
+		unsubscribeMailto = (m?.[1] ?? "").trim().toLowerCase() || null;
+	}
 
-    if (!rawListId && !unsubscribeUrl && !unsubscribeMailto) return;
+	if (!rawListId && !unsubscribeUrl && !unsubscribeMailto) return;
 
-    let subscriptionKey: string | null = null;
+	let subscriptionKey: string | null = null;
 
-    if (rawListId) {
-        const cleaned = rawListId
-            .replace(/^<|>$/g, "")
-            .replace(/\s+/g, "")
-            .toLowerCase();
-        subscriptionKey = cleaned ? `list-id:${cleaned}` : null;
-    } else if (unsubscribeUrl) {
-        try {
-            const u = new URL(unsubscribeUrl);
-            const p = (u.pathname || "/").replace(/\/+$/, "") || "/";
-            subscriptionKey = `${u.protocol}//${u.host}${p}`;
-        } catch {
-            subscriptionKey = null;
-        }
-    } else if (unsubscribeMailto) {
-        subscriptionKey = `mailto:${unsubscribeMailto}`;
-    } else {
-        const from = getFromAddress(parsed);
-        if (from?.email?.includes("@")) {
-            subscriptionKey = `from-domain:${from.email.split("@")[1]}`;
-        }
-    }
+	if (rawListId) {
+		const cleaned = rawListId
+			.replace(/^<|>$/g, "")
+			.replace(/\s+/g, "")
+			.toLowerCase();
+		subscriptionKey = cleaned ? `list-id:${cleaned}` : null;
+	} else if (unsubscribeUrl) {
+		try {
+			const u = new URL(unsubscribeUrl);
+			const p = (u.pathname || "/").replace(/\/+$/, "") || "/";
+			subscriptionKey = `${u.protocol}//${u.host}${p}`;
+		} catch {
+			subscriptionKey = null;
+		}
+	} else if (unsubscribeMailto) {
+		subscriptionKey = `mailto:${unsubscribeMailto}`;
+	} else {
+		const from = getFromAddress(parsed);
+		if (from?.email?.includes("@")) {
+			subscriptionKey = `from-domain:${from.email.split("@")[1]}`;
+		}
+	}
 
-    if (!subscriptionKey) return;
+	if (!subscriptionKey) return;
 
-    const oneClick = unsubscribePost?.includes("one-click") ?? false;
+	const oneClick = unsubscribePost?.includes("one-click") ?? false;
 
-    await db
-        .insert(mailSubscriptions)
-        .values({
-            ownerId,
-            subscriptionKey,
-            listId: rawListId,
-            unsubscribeHttpUrl: unsubscribeUrl,
-            unsubscribeMailto,
-            oneClick,
-            lastSeenAt: new Date(),
-        } as any)
-        .onConflictDoUpdate({
-            target: [mailSubscriptions.ownerId, mailSubscriptions.subscriptionKey],
-            set: {
-                listId: rawListId,
-                unsubscribeHttpUrl: unsubscribeUrl,
-                unsubscribeMailto,
-                oneClick,
-                lastSeenAt: new Date(),
-            } as any,
-        });
+	await db
+		.insert(mailSubscriptions)
+		.values({
+			ownerId,
+			subscriptionKey,
+			listId: rawListId,
+			unsubscribeHttpUrl: unsubscribeUrl,
+			unsubscribeMailto,
+			oneClick,
+			lastSeenAt: new Date(),
+		} as any)
+		.onConflictDoUpdate({
+			target: [mailSubscriptions.ownerId, mailSubscriptions.subscriptionKey],
+			set: {
+				listId: rawListId,
+				unsubscribeHttpUrl: unsubscribeUrl,
+				unsubscribeMailto,
+				oneClick,
+				lastSeenAt: new Date(),
+			} as any,
+		});
 }

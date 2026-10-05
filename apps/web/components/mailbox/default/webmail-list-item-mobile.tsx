@@ -1,21 +1,21 @@
 "use client";
-import React from "react";
+import type { MailboxEntity, MailboxSyncEntity } from "@db";
+import { Temporal } from "@js-temporal/polyfill";
+import { IconStar, IconStarFilled } from "@tabler/icons-react";
 import { Mail, MailOpen, Paperclip, Trash2 } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
-import type { MailboxEntity, MailboxSyncEntity } from "@db";
+import React from "react";
+import { toast } from "sonner";
+import LabelRowTag from "@/components/dashboard/labels/label-row-tag";
+import { useDynamicContext } from "@/hooks/use-dynamic-context";
+import type { FetchMailboxThreadLabelsResult } from "@/lib/actions/labels";
 import {
-	FetchMailboxThreadsResult,
+	type FetchMailboxThreadsResult,
 	markAsRead,
 	markAsUnread,
 	moveToTrash,
 	toggleStar,
 } from "@/lib/actions/mailbox";
-import { FetchMailboxThreadLabelsResult } from "@/lib/actions/labels";
-import { IconStar, IconStarFilled } from "@tabler/icons-react";
-import { Temporal } from "@js-temporal/polyfill";
-import { useDynamicContext } from "@/hooks/use-dynamic-context";
-import { toast } from "sonner";
-import LabelRowTag from "@/components/dashboard/labels/label-row-tag";
 
 type Props = {
 	mailboxThreadItem: FetchMailboxThreadsResult[number];
@@ -121,7 +121,9 @@ export default function WebmailListItemMobile({
 				"relative group grid cursor-pointer",
 				"grid-cols-[auto_1fr_auto] md:grid-cols-[auto_auto_minmax(16rem,1fr)_minmax(10rem,2fr)_auto]",
 				"items-start gap-3 px-3 py-3 transition-colors hover:bg-muted/50",
-				isRead ? "bg-muted/40 text-muted-foreground" : "bg-background font-semibold text-foreground",
+				isRead
+					? "bg-muted/40 text-muted-foreground"
+					: "bg-background font-semibold text-foreground",
 				`md:pr-[${ACTIONS_W}px]`,
 			].join(" ")}
 			onClick={openThread}
@@ -137,7 +139,7 @@ export default function WebmailListItemMobile({
 						e.target.checked
 							? next.add(mailboxThreadItem.threadId)
 							: next.delete(mailboxThreadItem.threadId);
-						setState({ selectedThreadIds: next });
+						setState((prev) => ({ ...prev, selectedThreadIds: next }));
 					}}
 					aria-label={`Select ${mailboxThreadItem.subject}`}
 					className="h-4 w-4 rounded border-muted-foreground/40"
@@ -167,7 +169,10 @@ export default function WebmailListItemMobile({
 			<div className="min-w-0 flex flex-col">
 				<div className="flex items-center gap-2 truncate">
 					{!isRead ? (
-						<span className="h-2 w-2 shrink-0 rounded-full bg-primary" title={`${unreadCount} unread`} />
+						<span
+							className="h-2 w-2 shrink-0 rounded-full bg-primary"
+							title={`${unreadCount} unread`}
+						/>
 					) : null}
 					<span className="truncate">{displayNames}</span>
 					{mailboxThreadItem.messageCount > 1 && (
@@ -260,9 +265,12 @@ export default function WebmailListItemMobile({
 							router.refresh();
 						} catch (error) {
 							setIsDeleting(false);
-							toast.error(error instanceof Error ? error.message : "Delete failed", {
-								position: "bottom-left",
-							});
+							toast.error(
+								error instanceof Error ? error.message : "Delete failed",
+								{
+									position: "bottom-left",
+								},
+							);
 						}
 					}}
 					className="rounded p-1 hover:bg-muted"

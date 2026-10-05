@@ -1,20 +1,20 @@
 "use client";
-import React from "react";
+import type { MailboxEntity, MailboxSyncEntity } from "@db";
+import { IconStar, IconStarFilled } from "@tabler/icons-react";
 import { Mail, MailOpen, Paperclip, Trash2 } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
-import { MailboxEntity, MailboxSyncEntity } from "@db";
+import React from "react";
+import type {
+	FetchLabelsResult,
+	FetchMailboxThreadLabelsResult,
+} from "@/lib/actions/labels";
 import {
-	FetchMailboxThreadsResult,
+	type FetchMailboxThreadsResult,
 	markAsRead,
 	markAsUnread,
 	moveToTrash,
 	toggleStar,
 } from "@/lib/actions/mailbox";
-import {
-	FetchLabelsResult,
-	FetchMailboxThreadLabelsResult,
-} from "@/lib/actions/labels";
-import { IconStar, IconStarFilled } from "@tabler/icons-react";
 
 type Props = {
 	mailboxThreadItem: FetchMailboxThreadsResult[number];
@@ -24,12 +24,13 @@ type Props = {
 	globalLabels: FetchLabelsResult;
 	labelsByThreadId: FetchMailboxThreadLabelsResult;
 };
+
 import { Temporal } from "@js-temporal/polyfill";
-import { useDynamicContext } from "@/hooks/use-dynamic-context";
 import { toast } from "sonner";
 import LabelRowTag from "@/components/dashboard/labels/label-row-tag";
 import ThreadLabelHoverButtons from "@/components/dashboard/labels/thread-label-hover-buttons";
 import SnoozeMail from "@/components/mailbox/default/snooze-mail";
+import { useDynamicContext } from "@/hooks/use-dynamic-context";
 
 export default function WebmailListItem({
 	mailboxThreadItem,
@@ -222,7 +223,9 @@ export default function WebmailListItem({
 					"grid-cols-[auto_auto_20rem_minmax(10rem,2fr)_auto]",
 					// "grid-cols-[auto_auto_minmax(8rem,12rem)_minmax(10rem,2fr)_auto]",
 					"items-center gap-3 px-3 py-2 transition-colors hover:bg-muted/50",
-					isRead ? "bg-muted/40 text-muted-foreground" : "bg-background font-semibold text-foreground",
+					isRead
+						? "bg-muted/40 text-muted-foreground"
+						: "bg-background font-semibold text-foreground",
 					`pr-[${ACTIONS_W}]`,
 				].join(" ")}
 			>
@@ -237,7 +240,7 @@ export default function WebmailListItem({
 								} else {
 									newSet.delete(mailboxThreadItem.threadId);
 								}
-								setState({ selectedThreadIds: newSet });
+								setState((prev) => ({ ...prev, selectedThreadIds: newSet }));
 							}}
 							checked={state?.selectedThreadIds?.has(
 								mailboxThreadItem.threadId,
@@ -269,9 +272,15 @@ export default function WebmailListItem({
 					)}
 				</button>
 
-				<div onClick={openThread} className="flex min-w-0 items-center gap-2 truncate pr-2">
+				<div
+					onClick={openThread}
+					className="flex min-w-0 items-center gap-2 truncate pr-2"
+				>
 					{isUnread ? (
-						<span className="h-2 w-2 shrink-0 rounded-full bg-primary" title={`${unreadCount} unread`} />
+						<span
+							className="h-2 w-2 shrink-0 rounded-full bg-primary"
+							title={`${unreadCount} unread`}
+						/>
 					) : (
 						<span className="h-2 w-2 shrink-0 rounded-full bg-transparent" />
 					)}

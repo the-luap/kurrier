@@ -24,11 +24,15 @@ import type React from "react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import EditorAttachmentItem from "@/components/mailbox/default/editor/editor-attachment-item";
-import type { EmailEditorHandle } from "@/components/mailbox/default/editor/email-editor";
+import type {
+	EmailEditorHandle,
+	InitialDraft,
+} from "@/components/mailbox/default/editor/email-editor";
 import MailUnsubscriber from "@/components/mailbox/default/mail-unsubscriber";
 import {
 	type FetchIdentityMailboxListResult,
 	type FetchThreadMailSubsResult,
+	fetchDraftForMessage,
 	fetchIdentityMailboxList,
 	fetchMailbox,
 	markAsRead,
@@ -47,6 +51,62 @@ const EmailEditor = dynamic(
 		),
 	},
 );
+
+function formatAddressList(message: MessageEntity, field: "to" | "cc"): string {
+	const value = (message as any)?.[field];
+	if (!value) return "";
+	if (typeof value === "string") return value;
+	const list: { name?: string | null; address?: string | null }[] =
+		value.value ?? [];
+	return list
+		.map((v) =>
+			v.name && v.address
+				? `${v.name} <${v.address}>`
+				: (v.address ?? v.name ?? ""),
+		)
+		.filter(Boolean)
+		.join(", ");
+}
+
+function getHeaderValue(headers: unknown, name: string) {
+	if (!headers || typeof headers !== "object") return "";
+	const record = headers as Record<string, unknown>;
+	const direct =
+		record[name] ?? record[name.toLowerCase()] ?? record[name.toUpperCase()];
+	if (typeof direct === "string") return direct;
+	if (direct && typeof direct === "object" && "value" in direct) {
+		return String((direct as { value?: unknown }).value ?? "");
+	}
+	return "";
+}
+
+function getAuthStatus(headers: unknown) {
+	const authResults = getHeaderValue(headers, "authentication-results");
+	const receivedSpf = getHeaderValue(headers, "received-spf");
+	const dkim = /dkim=\s*pass/i.test(authResults)
+		? "pass"
+		: /dkim=\s*fail/i.test(authResults)
+			? "fail"
+			: "unknown";
+	const dmarc = /dmarc=\s*pass/i.test(authResults)
+		? "pass"
+		: /dmarc=\s*fail/i.test(authResults)
+			? "fail"
+			: "unknown";
+	const spf =
+		/spf=\s*pass/i.test(authResults) || /pass/i.test(receivedSpf)
+			? "pass"
+			: /spf=\s*fail/i.test(authResults) || /fail/i.test(receivedSpf)
+				? "fail"
+				: "unknown";
+	return { authResults, dkim, dmarc, spf };
+}
+
+function authClass(value: string) {
+	if (value === "pass") return "text-green-700 dark:text-green-400";
+	if (value === "fail") return "text-red-700 dark:text-red-400";
+	return "text-muted-foreground";
+}
 
 function getScrollParent(el: HTMLElement): HTMLElement {
 	let p: HTMLElement | null = el.parentElement;
@@ -100,46 +160,6 @@ export function scrollToEditor(
 	}, 120);
 }
 
-function getHeaderValue(headers: unknown, name: string) {
-	if (!headers || typeof headers !== "object") return "";
-	const record = headers as Record<string, unknown>;
-	const direct =
-		record[name] ?? record[name.toLowerCase()] ?? record[name.toUpperCase()];
-	if (typeof direct === "string") return direct;
-	if (direct && typeof direct === "object" && "value" in direct) {
-		return String((direct as { value?: unknown }).value ?? "");
-	}
-	return "";
-}
-
-function getAuthStatus(headers: unknown) {
-	const authResults = getHeaderValue(headers, "authentication-results");
-	const receivedSpf = getHeaderValue(headers, "received-spf");
-	const dkim = /dkim=\s*pass/i.test(authResults)
-		? "pass"
-		: /dkim=\s*fail/i.test(authResults)
-			? "fail"
-			: "unknown";
-	const dmarc = /dmarc=\s*pass/i.test(authResults)
-		? "pass"
-		: /dmarc=\s*fail/i.test(authResults)
-			? "fail"
-			: "unknown";
-	const spf =
-		/spf=\s*pass/i.test(authResults) || /pass/i.test(receivedSpf)
-			? "pass"
-			: /spf=\s*fail/i.test(authResults) || /fail/i.test(receivedSpf)
-				? "fail"
-				: "unknown";
-	return { authResults, dkim, dmarc, spf };
-}
-
-function authClass(value: string) {
-	if (value === "pass") return "text-green-700 dark:text-green-400";
-	if (value === "fail") return "text-red-700 dark:text-red-400";
-	return "text-muted-foreground";
-}
-
 function EmailRenderer({
 	threadIndex,
 	numberOfMessages,
@@ -180,31 +200,28 @@ function EmailRenderer({
 		undefined,
 	);
 	const [signatureHtml, setSignatureHtml] = useState<string>("");
+	const [isOpeningEditor, setIsOpeningEditor] = useState(false);
+	const [initialDraft, setInitialDraft] = useState<InitialDraft>(null);
 	const params = useParams();
-	const findSentMailbox = (entry: FetchIdentityMailboxListResult[number]) => {
-		return (
-			entry.mailboxes.find((mailbox) => mailbox.kind === "sent") ??
-			entry.mailboxes.find((mailbox) => mailbox.slug === "sent") ??
-			entry.mailboxes.find((mailbox) => mailbox.slug === "gesendet") ??
-			entry.mailboxes.find((mailbox) =>
-				mailbox.name?.toLowerCase().includes("sent"),
-			) ??
-			entry.mailboxes.find((mailbox) =>
-				mailbox.name?.toLowerCase().includes("gesendet"),
-			)
+	const findSentMailbox = (entry: FetchIdentityMailboxListResult[number]) =>
+		entry.mailboxes.find((mailbox) => mailbox.kind === "sent") ??
+		entry.mailboxes.find((mailbox) => mailbox.slug === "sent") ??
+		entry.mailboxes.find((mailbox) => mailbox.slug === "gesendet") ??
+		entry.mailboxes.find((mailbox) =>
+			mailbox.name?.toLowerCase().includes("sent"),
+		) ??
+		entry.mailboxes.find((mailbox) =>
+			mailbox.name?.toLowerCase().includes("gesendet"),
 		);
-	};
 
 	const fetchSentMailbox = async () => {
 		if (sentMailboxId) return sentMailboxId;
-
 		const identityPublicId = String(params.identityPublicId);
 		const entries = await fetchIdentityMailboxList();
 		const activeEntry = entries.find(
 			(entry) => entry.identity.publicId === identityPublicId,
 		);
 		const sentMailbox = activeEntry ? findSentMailbox(activeEntry) : null;
-
 		if (sentMailbox) {
 			const id = String(sentMailbox.id);
 			setSentMailboxId(id);
@@ -212,33 +229,55 @@ function EmailRenderer({
 			return id;
 		}
 
-		const { activeMailbox, identity } = await fetchMailbox(identityPublicId, "sent");
-		setSignatureHtml(identity.signatureHtml ?? "");
+		const { activeMailbox, identity } = await fetchMailbox(
+			identityPublicId,
+			"sent",
+		);
+		setSignatureHtml(identity?.signatureHtml ?? "");
 		const id = activeMailbox?.id ? String(activeMailbox.id) : undefined;
 		setSentMailboxId(id);
 		return id;
 	};
 
+	// The sent mailbox and signature must be known before the editor mounts:
+	// the editor reads them once, and a late signature would wipe the draft.
 	const openEditor = async (mode: "reply" | "forward") => {
+		if (showEditor) {
+			// Switching mode starts a fresh editor (not the stored draft).
+			setInitialDraft(null);
+			setShowEditorMode(mode);
+			return;
+		}
 		setShowEditorMode(mode);
+		setIsOpeningEditor(true);
 		try {
-			const mailboxId = await fetchSentMailbox();
+			const [mailboxId, draft] = await Promise.all([
+				fetchSentMailbox(),
+				fetchDraftForMessage(String(message.id)).catch(() => null),
+			]);
 			if (!mailboxId) {
-				toast.error("Sender mailbox is not ready yet", {
-					description:
-						"Kurrier could not resolve the Sent mailbox for this identity.",
-				});
-				return;
+				throw new Error(
+					"Kurrier could not resolve the Sent mailbox for this identity.",
+				);
+			}
+			if (draft) {
+				setInitialDraft({ id: draft.id, payload: draft.payload as any });
+				const draftMode = (draft.payload as any)?.mode;
+				if (draftMode === "reply" || draftMode === "forward") {
+					setShowEditorMode(draftMode);
+				}
+				toast.info("Restored your draft", { position: "bottom-left" });
+			} else {
+				setInitialDraft(null);
 			}
 			setShowEditor(true);
 		} catch (error) {
-			console.error("Failed to resolve sender mailbox", error);
-			toast.error("Could not open reply editor", {
-				description:
-					error instanceof Error
-						? error.message
-						: "Kurrier could not resolve the sender mailbox.",
-			});
+			toast.error(
+				error instanceof Error ? error.message : "Could not open editor",
+				{ position: "bottom-left" },
+			);
+		} finally {
+			setIsOpeningEditor(false);
 		}
 	};
 
@@ -341,7 +380,11 @@ function EmailRenderer({
 					}
 					if (data) {
 						data.text().then((raw) => {
-							setEmailString(raw.slice(0, 10000));
+							setEmailString(
+								raw.length > 200_000
+									? `${raw.slice(0, 200_000)}\n\n… truncated, use "Download" for the full message.`
+									: raw,
+							);
 						});
 					}
 				});
@@ -349,7 +392,7 @@ function EmailRenderer({
 	}, [opened, publicConfig, message.rawStorageKey]);
 
 	useEffect(() => {
-		const instant = Temporal.Instant.from(receivedAt.toISOString());
+		const instant = Temporal.Instant.from(new Date(receivedAt).toISOString());
 		setFormatted(
 			instant
 				.toZonedDateTimeISO(Temporal.Now.timeZoneId())
@@ -405,7 +448,7 @@ function EmailRenderer({
 							From
 						</div>
 						<div className="px-3 py-2">
-							{String(message?.headersJson?.from?.text)}
+							{message?.headersJson?.from?.text ?? ""}
 						</div>
 					</div>
 
@@ -415,7 +458,7 @@ function EmailRenderer({
 						</div>
 						{/*<div className="px-3 py-2">suisse@dinebot.io</div>*/}
 						<div className="px-3 py-2">
-							{String(message?.headersJson?.to?.text)}
+							{message?.headersJson?.to?.text ?? ""}
 						</div>
 					</div>
 
@@ -429,39 +472,18 @@ function EmailRenderer({
 						</div>
 					</div>
 
-					<div className="grid grid-cols-[160px_1fr] border-b">
-						<div className="bg-muted px-3 py-2 font-medium text-muted-foreground">
-							SPF
+					{(["spf", "dkim", "dmarc"] as const).map((kind) => (
+						<div key={kind} className="grid grid-cols-[160px_1fr] border-b">
+							<div className="bg-muted px-3 py-2 font-medium uppercase text-muted-foreground">
+								{kind}
+							</div>
+							<div
+								className={`px-3 py-2 font-semibold uppercase ${authClass(authStatus[kind])}`}
+							>
+								{authStatus[kind]}
+							</div>
 						</div>
-						<div
-							className={`px-3 py-2 font-semibold uppercase ${authClass(authStatus.spf)}`}
-						>
-							{authStatus.spf}
-						</div>
-					</div>
-
-					<div className="grid grid-cols-[160px_1fr] border-b">
-						<div className="bg-muted px-3 py-2 font-medium text-muted-foreground">
-							DKIM
-						</div>
-						<div
-							className={`px-3 py-2 font-semibold uppercase ${authClass(authStatus.dkim)}`}
-						>
-							{authStatus.dkim}
-						</div>
-					</div>
-
-					<div className="grid grid-cols-[160px_1fr] border-b">
-						<div className="bg-muted px-3 py-2 font-medium text-muted-foreground">
-							DMARC
-						</div>
-						<div
-							className={`px-3 py-2 font-semibold uppercase ${authClass(authStatus.dmarc)}`}
-						>
-							{authStatus.dmarc}
-						</div>
-					</div>
-
+					))}
 					{authStatus.authResults && (
 						<div className="grid grid-cols-[160px_1fr]">
 							<div className="bg-muted px-3 py-2 font-medium text-muted-foreground">
@@ -472,6 +494,36 @@ function EmailRenderer({
 							</div>
 						</div>
 					)}
+
+					{/*<div className="grid grid-cols-[160px_1fr] border-b">*/}
+					{/*    <div className="bg-muted px-3 py-2 font-medium text-muted-foreground">*/}
+					{/*        SPF*/}
+					{/*    </div>*/}
+					{/*    <div className="px-3 py-2">*/}
+					{/*        <span className="text-green-600 font-semibold">PASS</span> with IP 209.85.220.69{" "}*/}
+					{/*        <a href="#" className="text-blue-600 hover:underline">Learn more</a>*/}
+					{/*    </div>*/}
+					{/*</div>*/}
+
+					{/*<div className="grid grid-cols-[160px_1fr] border-b">*/}
+					{/*    <div className="bg-muted px-3 py-2 font-medium text-muted-foreground">*/}
+					{/*        DKIM*/}
+					{/*    </div>*/}
+					{/*    <div className="px-3 py-2">*/}
+					{/*        <span className="text-green-600 font-semibold">'PASS'</span> with domain google.com{" "}*/}
+					{/*        <a href="#" className="text-blue-600 hover:underline">Learn more</a>*/}
+					{/*    </div>*/}
+					{/*</div>*/}
+
+					{/*<div className="grid grid-cols-[160px_1fr]">*/}
+					{/*    <div className="bg-muted px-3 py-2 font-medium text-muted-foreground">*/}
+					{/*        DMARC*/}
+					{/*    </div>*/}
+					{/*    <div className="px-3 py-2">*/}
+					{/*        <span className="text-green-600 font-semibold">'PASS'</span>{" "}*/}
+					{/*        <a href="#" className="text-blue-600 hover:underline">Learn more</a>*/}
+					{/*    </div>*/}
+					{/*</div>*/}
 				</div>
 
 				{/* Action Buttons */}
@@ -531,27 +583,26 @@ function EmailRenderer({
 						>{`<${getMessageAddress(message, "from") ?? getMessageName(message, "from")}>`}</div>
 					</div>
 					<div className={"flex gap-1 items-center"}>
-						<div className={"text-xs"}>
-							to{" "}
-							{`<${getMessageAddress(message, "to") ?? getMessageName(message, "to")}>`}
+						<div className={"text-xs break-all"}>
+							to {formatAddressList(message, "to") || "undisclosed recipients"}
 						</div>
 					</div>
+					{formatAddressList(message, "cc") && (
+						<div className={"flex gap-1 items-center"}>
+							<div className={"text-xs break-all"}>
+								cc {formatAddressList(message, "cc")}
+							</div>
+						</div>
+					)}
 					<div className="mt-1 flex gap-1 text-[11px] uppercase">
-						<span
-							className={`rounded border px-1.5 py-0.5 ${authClass(authStatus.spf)}`}
-						>
-							SPF {authStatus.spf}
-						</span>
-						<span
-							className={`rounded border px-1.5 py-0.5 ${authClass(authStatus.dkim)}`}
-						>
-							DKIM {authStatus.dkim}
-						</span>
-						<span
-							className={`rounded border px-1.5 py-0.5 ${authClass(authStatus.dmarc)}`}
-						>
-							DMARC {authStatus.dmarc}
-						</span>
+						{(["spf", "dkim", "dmarc"] as const).map((kind) => (
+							<span
+								key={kind}
+								className={`rounded border px-1.5 py-0.5 ${authClass(authStatus[kind])}`}
+							>
+								{kind} {authStatus[kind]}
+							</span>
+						))}
 					</div>
 				</div>
 
@@ -594,12 +645,11 @@ function EmailRenderer({
 						</ActionIcon>
 						<ActionIcon
 							variant={"transparent"}
+							disabled={isOpeningEditor}
+							title="Reply"
 							onClick={() => {
-								if (showEditor) {
-									setShowEditor(false);
-									return;
-								}
-								void openEditor("reply");
+								if (showEditor) setShowEditor(false);
+								else void openEditor("reply");
 							}}
 						>
 							<Reply size={18} />
@@ -691,6 +741,7 @@ function EmailRenderer({
 				<div className={"flex gap-6"}>
 					<Button
 						onClick={() => void openEditor("reply")}
+						loading={isOpeningEditor && showEditorMode === "reply"}
 						leftSection={<Reply />}
 						variant={"outline"}
 						radius={"xl"}
@@ -699,6 +750,7 @@ function EmailRenderer({
 					</Button>
 					<Button
 						onClick={() => void openEditor("forward")}
+						loading={isOpeningEditor && showEditorMode === "forward"}
 						rightSection={<Forward />}
 						variant={"outline"}
 						radius={"xl"}
@@ -711,6 +763,17 @@ function EmailRenderer({
 			{showEditor && (
 				<div>
 					<EmailEditor
+						// Remount when switching reply <-> forward so recipients,
+						// subject and mode are rebuilt for the new mode.
+						key={`${showEditorMode}:${initialDraft?.id ?? "new"}`}
+						initialDraft={initialDraft}
+						originalAttachments={attachments
+							.filter((a) => !a.isInline)
+							.map((a) => ({
+								id: String(a.id),
+								filenameOriginal: a.filenameOriginal,
+								sizeBytes: a.sizeBytes,
+							}))}
 						sentMailboxId={sentMailboxId ?? ""}
 						ref={editorRef}
 						publicConfig={publicConfig}

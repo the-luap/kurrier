@@ -78,64 +78,45 @@ function getTypeSenseClient(): Client {
 export const fetchMailbox = cache(
 	async (identityPublicId: string, mailboxSlug = "inbox") => {
 		const rls = await rlsClient();
-		const [identity] = await rls((tx) =>
-			tx
+		// One transaction instead of five: every rls() call is its own
+		// BEGIN/set_config/COMMIT round trip.
+		return rls(async (tx) => {
+			const [identity] = await tx
 				.select()
 				.from(identities)
-				.where(eq(identities.publicId, identityPublicId)),
-		);
 
-		if (!identity) {
-			redirect("/dashboard/mail");
-		}
+				.where(eq(identities.publicId, identityPublicId));
 
-		const [activeMailboxRows, mailboxList] = await Promise.all([
-			rls((tx) =>
-				tx
-					.select()
-					.from(mailboxes)
-					.where(
-						and(
-							eq(mailboxes.identityId, identity.id),
-							eq(mailboxes.slug, mailboxSlug),
-						),
-					),
-			),
-			rls((tx) =>
-				tx
-					.select()
-					.from(mailboxes)
-					.where(eq(mailboxes.identityId, identity.id)),
-			),
-		]);
-		const activeMailbox = activeMailboxRows[0];
+			const mailboxList = identity
+				? await tx
+						.select()
+						.from(mailboxes)
+						.where(eq(mailboxes.identityId, identity.id))
+				: [];
+			const activeMailbox = mailboxList.find((m) => m.slug === mailboxSlug);
 
-		const [messagesCountRows, syncRows] = activeMailbox?.id
-			? await Promise.all([
-					rls((tx) =>
-						tx
-							.select({ count: count() })
-							.from(mailboxThreads)
-							.where(eq(mailboxThreads.mailboxId, activeMailbox.id)),
-					),
-					rls((tx) =>
-						tx
-							.select()
-							.from(mailboxSync)
-							.where(eq(mailboxSync.mailboxId, activeMailbox.id)),
-					),
-				])
-			: [[{ count: 0 }], [null]];
-		const messagesCount = messagesCountRows[0] ?? { count: 0 };
-		const sync = syncRows[0] ?? null;
+			const [messagesCount] = activeMailbox?.id
+				? await tx
+						.select({ count: count() })
+						.from(mailboxThreads)
+						.where(eq(mailboxThreads.mailboxId, activeMailbox.id))
+				: [{ count: 0 }];
 
-		return {
-			activeMailbox,
-			mailboxList,
-			identity,
-			count: Number(messagesCount.count),
-			mailboxSync: sync,
-		};
+			const [sync] = activeMailbox
+				? await tx
+						.select()
+						.from(mailboxSync)
+						.where(eq(mailboxSync.mailboxId, activeMailbox.id))
+				: [null];
+
+			return {
+				activeMailbox,
+				mailboxList,
+				identity,
+				count: Number(messagesCount?.count ?? 0),
+				mailboxSync: sync,
+			};
+		});
 	},
 );
 
@@ -644,6 +625,8 @@ export async function sendMail(
 	}
 
 	const rls = await rlsClient();
+	const draftId = decodedForm.draftId ? String(decodedForm.draftId) : "";
+	delete decodedForm.draftId;
 	const scheduledAtRaw = decodedForm.scheduledAt
 		? String(decodedForm.scheduledAt)
 		: "";
@@ -692,6 +675,7 @@ export async function sendMail(
 		if (!row?.id || !row.scheduledAt) {
 			return { success: false, error: "Failed to schedule your mail." };
 		}
+		if (draftId) await deleteDraft(draftId);
 
 		const { sendMailQueue } = await getRedis();
 		const delay = Math.max(
@@ -705,12 +689,28 @@ export async function sendMail(
 			{ jobId: row.id, delay },
 		);
 		revalidatePath("/dashboard/mail");
-		return { success: true, data: { draftMessageId: row.id } };
+		return {
+			success: true,
+			message: "Message scheduled",
+			data: { draftMessageId: row.id },
+		};
 	}
 
 	const { sendMailQueue, sendMailEvents } = await getRedis();
 	const job = await sendMailQueue.add("send-and-reconcile", decodedForm);
-	return await job.waitUntilFinished(sendMailEvents);
+	let result: FormState;
+	try {
+		result = await job.waitUntilFinished(sendMailEvents);
+	} catch (error) {
+		return {
+			success: false,
+			error: error instanceof Error ? error.message : "Failed to send email.",
+		};
+	}
+	if (result?.success && draftId) await deleteDraft(draftId);
+	// Show the sent reply in the open thread and the Sent folder.
+	revalidatePath("/dashboard/mail");
+	return result;
 }
 
 export const deltaFetch = async ({ identityId }: { identityId: string }) => {
@@ -984,8 +984,8 @@ export const fetchAdjacentMailboxThreads = cache(
 			),
 		);
 
-		const [current] = await rls((tx) =>
-			tx
+		return rls(async (tx) => {
+			const [current] = await tx
 				.select({
 					threadId: mailboxThreads.threadId,
 					effectiveActivityAt,
@@ -993,26 +993,24 @@ export const fetchAdjacentMailboxThreads = cache(
 				})
 				.from(mailboxThreads)
 				.where(and(visibleInMailbox, eq(mailboxThreads.threadId, threadId)))
-				.limit(1),
-		);
+				.limit(1);
 
-		if (!current) {
-			return { previousThreadId: null, nextThreadId: null };
-		}
+			if (!current) {
+				return { previousThreadId: null, nextThreadId: null };
+			}
 
-		const cursorEffectiveActivityAt =
-			current.effectiveActivityAt instanceof Date
-				? current.effectiveActivityAt.toISOString()
-				: String(current.effectiveActivityAt);
-		const cursorLastActivityAt =
-			current.lastActivityAt instanceof Date
-				? current.lastActivityAt.toISOString()
-				: String(current.lastActivityAt);
-		const cursorThreadId = String(current.threadId);
-		const cursor = sql`(${cursorEffectiveActivityAt}::timestamptz, ${cursorLastActivityAt}::timestamptz, ${cursorThreadId}::uuid)`;
+			const cursorEffectiveActivityAt =
+				current.effectiveActivityAt instanceof Date
+					? current.effectiveActivityAt.toISOString()
+					: String(current.effectiveActivityAt);
+			const cursorLastActivityAt =
+				current.lastActivityAt instanceof Date
+					? current.lastActivityAt.toISOString()
+					: String(current.lastActivityAt);
+			const cursorThreadId = String(current.threadId);
+			const cursor = sql`(${cursorEffectiveActivityAt}::timestamptz, ${cursorLastActivityAt}::timestamptz, ${cursorThreadId}::uuid)`;
 
-		const [previous] = await rls((tx) =>
-			tx
+			const [previous] = await tx
 				.select({ threadId: mailboxThreads.threadId })
 				.from(mailboxThreads)
 				.where(
@@ -1025,16 +1023,15 @@ export const fetchAdjacentMailboxThreads = cache(
 						) > ${cursor}`,
 					),
 				)
+
 				.orderBy(
 					asc(effectiveActivityAt),
 					asc(mailboxThreads.lastActivityAt),
 					asc(mailboxThreads.threadId),
 				)
-				.limit(1),
-		);
+				.limit(1);
 
-		const [next] = await rls((tx) =>
-			tx
+			const [next] = await tx
 				.select({ threadId: mailboxThreads.threadId })
 				.from(mailboxThreads)
 				.where(
@@ -1047,18 +1044,19 @@ export const fetchAdjacentMailboxThreads = cache(
 						) < ${cursor}`,
 					),
 				)
+
 				.orderBy(
 					desc(effectiveActivityAt),
 					desc(mailboxThreads.lastActivityAt),
 					desc(mailboxThreads.threadId),
 				)
-				.limit(1),
-		);
+				.limit(1);
 
-		return {
-			previousThreadId: previous?.threadId ?? null,
-			nextThreadId: next?.threadId ?? null,
-		};
+			return {
+				previousThreadId: previous?.threadId ?? null,
+				nextThreadId: next?.threadId ?? null,
+			};
+		});
 	},
 );
 
@@ -1884,13 +1882,135 @@ export const clearImapClients = async (identityId: string) => {
 
 const fetchScheduledDraftCountsUncached = async () => {
 	const rls = await rlsClient();
+	// Only the columns the sidebar counts need; payloads can be large.
 	const rows = await rls((tx) =>
+		tx
+			.select({
+				id: draftMessages.id,
+				identityId: draftMessages.identityId,
+				status: draftMessages.status,
+			})
+			.from(draftMessages)
+			.where(inArray(draftMessages.status, ["scheduled", "draft"])),
+	);
+	return rows;
+};
+
+export type DraftPayload = {
+	mode?: "reply" | "forward" | "compose";
+	to?: string;
+	cc?: string;
+	bcc?: string;
+	subject?: string;
+	bodyHtml?: string;
+	text?: string;
+	attachments?: string;
+	originalMessageId?: string;
+	threadUrl?: string;
+};
+
+// Autosaved, not yet sent messages (status "draft").
+export async function saveDraft(input: {
+	draftId?: string | null;
+	sentMailboxId: string;
+	payload: DraftPayload;
+}): Promise<{ draftId: string | null; error?: string }> {
+	if (!input.sentMailboxId) return { draftId: input.draftId ?? null };
+	const rls = await rlsClient();
+	try {
+		return await rls(async (tx) => {
+			const [mailbox] = await tx
+				.select({ identityId: mailboxes.identityId })
+				.from(mailboxes)
+				.where(eq(mailboxes.id, input.sentMailboxId));
+			if (!mailbox) return { draftId: input.draftId ?? null };
+
+			const values = {
+				mailboxId: input.sentMailboxId,
+				identityId: mailbox.identityId,
+				payload: input.payload as Record<string, any>,
+				updatedAt: new Date(),
+			};
+
+			if (input.draftId) {
+				const [updated] = await tx
+					.update(draftMessages)
+					.set(values)
+					.where(
+						and(
+							eq(draftMessages.id, input.draftId),
+							eq(draftMessages.status, "draft"),
+						),
+					)
+					.returning({ id: draftMessages.id });
+				// Gone (sent or discarded meanwhile): do not resurrect it.
+				return { draftId: updated?.id ?? null };
+			}
+
+			const [created] = await tx
+				.insert(draftMessages)
+				.values({ ...values, status: "draft" })
+				.returning({ id: draftMessages.id });
+			return { draftId: created?.id ?? null };
+		});
+	} catch (error) {
+		return {
+			draftId: input.draftId ?? null,
+			error: error instanceof Error ? error.message : "Could not save draft",
+		};
+	}
+}
+
+export async function deleteDraft(draftId: string) {
+	if (!draftId) return;
+	const rls = await rlsClient();
+	await rls((tx) =>
+		tx
+			.delete(draftMessages)
+			.where(
+				and(eq(draftMessages.id, draftId), eq(draftMessages.status, "draft")),
+			),
+	);
+	revalidatePath("/dashboard/mail");
+}
+
+export async function fetchDraftForMessage(originalMessageId: string) {
+	const rls = await rlsClient();
+	const [row] = await rls((tx) =>
 		tx
 			.select()
 			.from(draftMessages)
-			.where(eq(draftMessages.status, "scheduled")),
+			.where(
+				and(
+					eq(draftMessages.status, "draft"),
+					sql`${draftMessages.payload}->>'originalMessageId' = ${originalMessageId}`,
+				),
+			)
+			.orderBy(desc(draftMessages.updatedAt))
+			.limit(1),
 	);
-	return rows;
+	return row ?? null;
+}
+
+export const fetchDrafts = async (identityPublicId: string) => {
+	const rls = await rlsClient();
+	return rls(async (tx) => {
+		const [identity] = await tx
+			.select({ id: identities.id })
+			.from(identities)
+			.where(eq(identities.publicId, identityPublicId));
+		if (!identity) return [];
+		return tx
+			.select()
+			.from(draftMessages)
+			.where(
+				and(
+					eq(draftMessages.status, "draft"),
+					eq(draftMessages.identityId, identity.id),
+				),
+			)
+			.orderBy(desc(draftMessages.updatedAt));
+	});
 };
 
 export const fetchScheduledDraftCounts = cache(async () => {
@@ -1976,7 +2096,7 @@ export async function snoozeThread(input: {
 const fetchIdentitySnoozedThreadsUncached = async (
 	identityPublicId?: string,
 ) => {
-	if (!identityPublicId) return { threads: [] };
+	// Without an identity, return all snoozed threads for account-wide sidebar counts.
 
 	const rls = await rlsClient();
 	const now = new Date();
@@ -1987,7 +2107,9 @@ const fetchIdentitySnoozedThreadsUncached = async (
 			.from(mailboxThreads)
 			.where(
 				and(
-					eq(mailboxThreads.identityPublicId, identityPublicId),
+					identityPublicId
+						? eq(mailboxThreads.identityPublicId, identityPublicId)
+						: undefined,
 					isNotNull(mailboxThreads.snoozedUntil),
 					gt(mailboxThreads.snoozedUntil, now),
 				),
@@ -2003,13 +2125,11 @@ const fetchIdentitySnoozedThreadsUncached = async (
 
 export const fetchIdentitySnoozedThreads = cache(
 	async (identityPublicId?: string) => {
-		if (!identityPublicId) return { threads: [] };
-
 		const user = await isSignedIn();
 		if (!user?.id) return fetchIdentitySnoozedThreadsUncached(identityPublicId);
 
 		return withServerCache(
-			`snoozed-threads:${user.id}:${identityPublicId}`,
+			`snoozed-threads:${user.id}:${identityPublicId ?? "all"}`,
 			15,
 			() => fetchIdentitySnoozedThreadsUncached(identityPublicId),
 		);

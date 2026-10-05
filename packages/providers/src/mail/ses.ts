@@ -1,61 +1,58 @@
 import {
-	DnsRecord,
-	DomainIdentity,
-	EmailIdentity,
-	Mailer,
-	RawSesConfigSchema,
-	SesConfig,
-	VerifyResult,
-} from "../core";
+	type BucketLocationConstraint,
+	CreateBucketCommand,
+	type CreateBucketCommandInput,
+	HeadBucketCommand,
+	PutBucketNotificationConfigurationCommand,
+	PutBucketPolicyCommand,
+	PutPublicAccessBlockCommand,
+	S3Client,
+} from "@aws-sdk/client-s3";
 import {
+	CreateReceiptRuleCommand,
 	CreateReceiptRuleSetCommand,
 	DeleteReceiptRuleCommand,
 	DescribeActiveReceiptRuleSetCommand,
+	DescribeReceiptRuleSetCommand,
 	GetSendQuotaCommand,
 	ListReceiptRuleSetsCommand,
-	ReceiptRule,
-	SendEmailCommand,
+	type ReceiptRule,
+	SES,
 	SESClient,
+	SendEmailCommand,
 	SetActiveReceiptRuleSetCommand,
 	SetReceiptRulePositionCommand,
 	UpdateReceiptRuleCommand,
 } from "@aws-sdk/client-ses";
 import {
-	S3Client,
-	HeadBucketCommand,
-	CreateBucketCommand,
-	PutBucketPolicyCommand,
-	CreateBucketCommandInput,
-	BucketLocationConstraint,
-	PutPublicAccessBlockCommand,
-	PutBucketNotificationConfigurationCommand,
-} from "@aws-sdk/client-s3";
-import {
-	SNSClient,
-	CreateTopicCommand,
-	GetTopicAttributesCommand,
-	SetTopicAttributesCommand,
-	ListSubscriptionsByTopicCommand,
-	SubscribeCommand,
-} from "@aws-sdk/client-sns";
-import {
-	SES,
-	DescribeReceiptRuleSetCommand,
-	CreateReceiptRuleCommand,
-} from "@aws-sdk/client-ses";
-import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
-
-import {
-	SESv2Client,
 	CreateEmailIdentityCommand,
-	GetEmailIdentityCommand,
 	DeleteEmailIdentityCommand,
+	GetEmailIdentityCommand,
 	PutEmailIdentityMailFromAttributesCommand,
+	SESv2Client,
 	SendEmailCommand as SendEmailCommandV2,
 	// DeleteEmailIdentityCommand,
 } from "@aws-sdk/client-sesv2";
+import {
+	CreateTopicCommand,
+	GetTopicAttributesCommand,
+	ListSubscriptionsByTopicCommand,
+	SetTopicAttributesCommand,
+	SNSClient,
+	SubscribeCommand,
+} from "@aws-sdk/client-sns";
+import { GetCallerIdentityCommand, STSClient } from "@aws-sdk/client-sts";
 import slugify from "@sindresorhus/slugify";
 import { ulid } from "ulid";
+import {
+	type DnsRecord,
+	type DomainIdentity,
+	type EmailIdentity,
+	type Mailer,
+	RawSesConfigSchema,
+	type SesConfig,
+	type VerifyResult,
+} from "../core";
 
 type BootResult = {
 	bucket: string;
@@ -623,7 +620,7 @@ export class SesMailer implements Mailer {
 			extraMeta = meta;
 		}
 
-		let incomingDns: DnsRecord[] = [];
+		const incomingDns: DnsRecord[] = [];
 		if (incoming) {
 			// 1. Add MX record instruction for inbound
 			incomingDns.push({
@@ -867,6 +864,8 @@ export class SesMailer implements Mailer {
 			text: string;
 			html: string;
 			from: string;
+			cc?: string[];
+			bcc?: string[];
 			inReplyTo: string;
 			references: string[];
 			attachments?: { name: string; content: Blob; contentType: string }[];
@@ -937,7 +936,11 @@ export class SesMailer implements Mailer {
 			const { MessageId } = await this.v2.send(
 				new SendEmailCommandV2({
 					FromEmailAddress: opts.from,
-					Destination: { ToAddresses: to },
+					Destination: {
+						ToAddresses: to,
+						...(opts.cc?.length ? { CcAddresses: opts.cc } : {}),
+						...(opts.bcc?.length ? { BccAddresses: opts.bcc } : {}),
+					},
 					// Source: opts.from,
 					Content: {
 						Simple: {

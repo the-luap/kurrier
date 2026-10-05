@@ -142,7 +142,7 @@ export default function IdentityMailboxesList({
 	onComplete,
 }: {
 	identityMailboxes: FetchIdentityMailboxListResult;
-	scheduledDrafts: DraftMessageEntity[];
+	scheduledDrafts: Pick<DraftMessageEntity, "id" | "identityId" | "status">[];
 	snoozedThreads: MailboxThreadEntity[];
 	onComplete?: () => void;
 }) {
@@ -315,8 +315,14 @@ export default function IdentityMailboxesList({
 				);
 
 				const scheduledCounts = scheduledDrafts.filter(
-					(draft) => draft.identityId === identity.id,
+					(draft) =>
+						draft.identityId === identity.id && draft.status === "scheduled",
 				).length;
+				const draftCounts = scheduledDrafts.filter(
+					(draft) =>
+						draft.identityId === identity.id && draft.status === "draft",
+				).length;
+				const isActiveIdentity = params.identityPublicId === identity.publicId;
 				const snoozedCounts = snoozedThreads.filter(
 					(snoozed) => snoozed.identityId === identity.id,
 				).length;
@@ -343,13 +349,32 @@ export default function IdentityMailboxesList({
 								/>
 							))}
 						</div>
+						{draftCounts > 0 && (
+							<Link
+								href={`/dashboard/mail/${identity.publicId}/unsent`}
+								prefetch={false}
+								className={cn(
+									"my-2 flex w-full items-center justify-start gap-1 rounded border border-transparent p-1.5 text-sm transition-colors hover:bg-sidebar-accent/80",
+									isActiveIdentity &&
+										currentSlug === "unsent" &&
+										"border-primary/20 bg-primary/10 text-sidebar-accent-foreground dark:border-primary/30 dark:bg-primary/20",
+								)}
+							>
+								<FileText
+									size={16}
+									className="text-amber-600 dark:text-amber-300"
+								/>
+								<span className="font-normal">Drafts ({draftCounts})</span>
+							</Link>
+						)}
 						{scheduledCounts > 0 && (
 							<Link
-								href={`/dashboard/mail/${params.identityPublicId}/scheduled`}
+								href={`/dashboard/mail/${identity.publicId}/scheduled`}
 								prefetch={false}
 								className={cn(
 									"my-2 flex w-full justify-start gap-1 rounded border border-transparent p-1.5 text-sm transition-colors hover:bg-sidebar-accent/80",
-									currentSlug === "scheduled" &&
+									isActiveIdentity &&
+										currentSlug === "scheduled" &&
 										"border-primary/20 bg-primary/10 text-sidebar-accent-foreground dark:border-primary/30 dark:bg-primary/20",
 								)}
 							>
@@ -365,11 +390,12 @@ export default function IdentityMailboxesList({
 
 						{snoozedCounts > 0 && (
 							<Link
-								href={`/dashboard/mail/${params.identityPublicId}/snoozed`}
+								href={`/dashboard/mail/${identity.publicId}/snoozed`}
 								prefetch={false}
 								className={cn(
 									"my-2 flex w-full items-center justify-start gap-1 rounded border border-transparent p-1.5 text-sm transition-colors hover:bg-sidebar-accent/80",
-									currentSlug === "snoozed" &&
+									isActiveIdentity &&
+										currentSlug === "snoozed" &&
 										"border-primary/20 bg-primary/10 text-sidebar-accent-foreground dark:border-primary/30 dark:bg-primary/20",
 								)}
 							>
@@ -378,7 +404,7 @@ export default function IdentityMailboxesList({
 									className="text-violet-600 dark:text-violet-300"
 								/>
 								<span className={"font-normal text-sm"}>
-									Snoozed ({snoozedThreads.length})
+									Snoozed ({snoozedCounts})
 								</span>
 							</Link>
 						)}

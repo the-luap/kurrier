@@ -1,45 +1,49 @@
-import { defineNitroPlugin } from "nitropack/runtime";
+import { generateSnippet, upsertMailboxThreadItem } from "@common";
+import { getMessageAddress, getMessageName } from "@common/mail-client";
 import {
-	AddressObjectJSON,
-	ComposeMode,
+	type AddressObjectJSON,
+	type ComposeMode,
 	getPublicEnv,
 	getServerEnv,
-	MailComposeInput,
+	type MailComposeInput,
 } from "@schema";
-import { getMessageAddress, getMessageName } from "@common/mail-client";
-import { generateSnippet, upsertMailboxThreadItem } from "@common";
+import { defineNitroPlugin } from "nitropack/runtime";
+
 const serverConfig = getServerEnv();
 const publicConfig = getPublicEnv();
-import IORedis from "ioredis";
-import { Worker } from "bullmq";
+
 import {
 	db,
 	decryptAdminSecrets,
 	draftMessages,
 	identities,
-	mailboxes,
 	MessageAttachmentInsertSchema,
-	messageAttachments,
-	MessageCreate,
+	type MessageCreate,
 	MessageInsertSchema,
+	mailboxes,
+	messageAttachments,
 	messages,
-	providers,
 	providerSecrets,
-	smtpAccounts,
+	providers,
 	smtpAccountSecrets,
+	smtpAccounts,
 	threads,
 } from "@db";
 import { createMailer } from "@providers";
-import { toArray } from "drizzle-orm/mysql-core";
-import { and, eq } from "drizzle-orm";
-import { createClient, SupabaseClient } from "@supabase/supabase-js";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { Worker } from "bullmq";
+import { and, eq, inArray, isNotNull } from "drizzle-orm";
+import IORedis from "ioredis";
+
 const supabase = createClient(
 	publicConfig.API_URL,
 	serverConfig.SERVICE_ROLE_KEY,
 );
+
 import addressparser from "addressparser";
-import { PgTransaction } from "drizzle-orm/pg-core";
+import type { PgTransaction } from "drizzle-orm/pg-core";
 import { getRedis } from "../../lib/get-redis";
+
 const connection = new IORedis({
 	maxRetriesPerRequest: null,
 	password: serverConfig.REDIS_PASSWORD,
@@ -64,8 +68,8 @@ export default defineNitroPlugin(async (nitroApp) => {
 					await processDraft(job.data);
 					return { success: true };
 				case "send-and-reconcile":
-					await send(job.data);
-					return { success: true };
+					// Propagate provider errors to the UI instead of reporting success.
+					return (await send(job.data)) ?? { success: true };
 				default:
 					return { success: true };
 			}
@@ -112,6 +116,45 @@ export default defineNitroPlugin(async (nitroApp) => {
 		return t.id;
 	}
 
+	// Form fields arrive as comma separated strings (Mantine TagsInput) or arrays.
+	// Parse them with addressparser so "Name, Jr. <a@b.c>" stays one recipient.
+	// Only bare addresses go to the providers (some reject unencoded names).
+	function toArray(input: unknown): string[] {
+		const list = Array.isArray(input) ? input : [input];
+		const out: string[] = [];
+		for (const entry of list) {
+			const str = String(entry ?? "").trim();
+			if (!str) continue;
+			for (const p of addressparser(str)) {
+				if (p.address) out.push(p.address);
+			}
+		}
+		return Array.from(new Set(out));
+	}
+
+	function escapeHtml(value: string) {
+		return value
+			.replace(/&/g, "&amp;")
+			.replace(/</g, "&lt;")
+			.replace(/>/g, "&gt;")
+			.replace(/"/g, "&quot;");
+	}
+
+	// Stored messages may be complete HTML documents. Only the <body> content
+	// can be nested inside a <blockquote>; the original <style> blocks are
+	// dropped because they would also restyle the new reply text.
+	function extractBodyHtml(html: string) {
+		const bodyMatch = html.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i);
+		let body = bodyMatch ? bodyMatch[1] : html;
+		if (!bodyMatch) {
+			body = body
+				.replace(/<!doctype[^>]*>/gi, "")
+				.replace(/<head\b[^>]*>[\s\S]*?<\/head>/gi, "")
+				.replace(/<\/?html\b[^>]*>/gi, "");
+		}
+		return body.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "");
+	}
+
 	function toAddressObj(
 		input: string | string[] | null | undefined,
 	): AddressObjectJSON {
@@ -156,7 +199,10 @@ export default defineNitroPlugin(async (nitroApp) => {
 		if (claimed.length === 0) return;
 
 		try {
-			await send(draft.payload);
+			const result = await send(draft.payload);
+			if (result && result.success === false) {
+				throw new Error(result.error || "Failed to send email");
+			}
 
 			await db
 				.update(draftMessages)
@@ -226,6 +272,7 @@ export default defineNitroPlugin(async (nitroApp) => {
 			const attachmentBlobs = await fetchAttachmentBlobs(
 				supabase,
 				decodedForm.attachments as string,
+				mailbox.identity.ownerId,
 			);
 
 			const data: MailComposeInput = {
@@ -250,7 +297,26 @@ export default defineNitroPlugin(async (nitroApp) => {
 			const { subject, text, html } = await generateMailAttrs({
 				data,
 				orig: origRow,
+				ownerId: mailbox.identity.ownerId,
 			});
+
+			// Forwarding: include the attachments of the original message the
+			// user kept in the editor.
+			if (data.mode === "forward" && origRow?.message) {
+				const forwardIds = String(decodedForm.forwardAttachmentIds ?? "")
+					.split(",")
+					.map((v) => v.trim())
+					.filter(Boolean);
+				if (forwardIds.length > 0) {
+					attachmentBlobs.push(
+						...(await fetchForwardedAttachments(
+							origRow.message.id,
+							forwardIds,
+							mailbox.identity.ownerId,
+						)),
+					);
+				}
+			}
 
 			const mailboxIdForMessage = String(decodedForm.sentMailboxId);
 
@@ -306,6 +372,8 @@ export default defineNitroPlugin(async (nitroApp) => {
 
 			const mailerResponse = await mailer.sendEmail(data.to, {
 				from: mailbox.identity.value,
+				cc: data.cc,
+				bcc: data.bcc,
 				subject: String(newMessageBody.subject),
 				text: newMessageBody.text ?? "",
 				html: newMessageBody.html ?? "",
@@ -345,10 +413,13 @@ export default defineNitroPlugin(async (nitroApp) => {
 					{ messageId: newMessage.id },
 					{ removeOnComplete: true },
 				);
-			} else if (mailerResponse.error) {
+			} else {
+				// Some providers only return { success: false } without details.
 				return {
 					success: false,
-					error: `Failed to send email: ${mailerResponse.error}`,
+					error: mailerResponse.error
+						? `Failed to send email: ${mailerResponse.error}`
+						: "Failed to send email. Check the provider settings of this identity.",
 				};
 			}
 			return { success: true };
@@ -358,9 +429,11 @@ export default defineNitroPlugin(async (nitroApp) => {
 	const generateMailAttrs = async ({
 		data,
 		orig,
+		ownerId,
 	}: {
 		data: MailComposeInput;
 		orig: GetOriginalMessageType | null;
+		ownerId: string;
 	}) => {
 		if (!orig) {
 			return {
@@ -397,33 +470,45 @@ export default defineNitroPlugin(async (nitroApp) => {
 				})
 			: "";
 
-		const origHtml = hasOrig ? origMsg!.html || origMsg!.textAsHtml || "" : "";
+		const origHtml = hasOrig
+			? await inlineCidImages(
+					origMsg!.html || origMsg!.textAsHtml || "",
+					origMsg!.id,
+					ownerId,
+				)
+			: "";
 		const origText = hasOrig ? origMsg!.text || "" : "";
 
 		// Subject
+		// The compose form pre-fills "Re:"/"Fwd:" subjects; honour user edits.
 		const baseSubj = (data.subject ?? "").trim();
 		let subject = baseSubj;
-		if (isReply && hasOrig) {
+		if (!baseSubj && isReply && hasOrig) {
 			const s = (origMsg!.subject ?? "").trim();
-			subject = s.startsWith("Re:") ? s : `Re: ${s || "(no subject)"}`;
-		} else if (isForward && hasOrig) {
+			subject = /^re\s*:/i.test(s) ? s : `Re: ${s || "(no subject)"}`;
+		} else if (!baseSubj && isForward && hasOrig) {
 			const s = (origMsg!.subject ?? "").trim();
-			subject = s.startsWith("Fwd:") ? s : `Fwd: ${s || "(no subject)"}`;
+			subject = /^(fwd?|wg)\s*:/i.test(s) ? s : `Fwd: ${s || "(no subject)"}`;
 		} else if (!baseSubj) {
 			subject = "(no subject)";
 		}
 
 		// Quoted blocks (only with original)
+		const attribution = `On ${origDateLabel}, ${fromNameStr ? `${fromNameStr} ` : ""}<${fromAddrStr}> wrote:`;
 		const quotedText = hasOrig
-			? `On ${origDateLabel}, ${fromNameStr} <${fromAddrStr}> wrote:\n${origText}`
+			? `${attribution}\n${origText
+					.split(/\r?\n/)
+					.map((line: string) => (line ? `> ${line}` : ">"))
+					.join("\n")}`
 			: "";
 
 		const quotedHtml = hasOrig
-			? `<hr>
-<p>On ${origDateLabel}, ${fromNameStr} &lt;${fromAddrStr}&gt; wrote:</p>
-<blockquote style="border-left:2px solid #ccc;margin:0;padding-left:8px;">
-  ${origHtml || `<pre style="white-space:pre-wrap;margin:0;">${origText}</pre>`}
-</blockquote>`
+			? `<br><div class="kurrier_quote">
+<p>${escapeHtml(attribution)}</p>
+<blockquote type="cite" style="border-left:2px solid #ccc;margin:0 0 0 0.8ex;padding-left:1ex;">
+${origHtml ? extractBodyHtml(origHtml) : `<pre style="white-space:pre-wrap;margin:0;font-family:inherit;">${escapeHtml(origText)}</pre>`}
+</blockquote>
+</div>`
 			: "";
 
 		// Bodies
@@ -442,9 +527,92 @@ export default defineNitroPlugin(async (nitroApp) => {
 		return { subject, text, html };
 	};
 
+	// Inline images of stored messages reference their attachment via "cid:".
+	// Quoted in a reply/forward those references would break, so embed them
+	// as data URIs (bounded, so huge mails do not explode).
+	async function inlineCidImages(
+		html: string,
+		messageId: string,
+		ownerId: string,
+	): Promise<string> {
+		if (!html || !/cid:/i.test(html)) return html;
+		const rows = await db
+			.select()
+			.from(messageAttachments)
+			.where(
+				and(
+					eq(messageAttachments.messageId, messageId),
+					eq(messageAttachments.ownerId, ownerId),
+					isNotNull(messageAttachments.cid),
+				),
+			);
+		let budget = 8 * 1024 * 1024;
+		let out = html;
+		for (const row of rows) {
+			const cid = String(row.cid).replace(/^<|>$/g, "");
+			if (!cid || !(row.sizeBytes ?? 0) || (row.sizeBytes ?? 0) > budget)
+				continue;
+			const { data: blob } = await supabase.storage
+				.from(String(row.bucketId || "attachments"))
+				.download(String(row.path));
+			if (!blob) continue;
+			budget -= blob.size;
+			const b64 = Buffer.from(await blob.arrayBuffer()).toString("base64");
+			const uri = `data:${row.contentType || "application/octet-stream"};base64,${b64}`;
+			const escaped = cid.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+			out = out.replace(new RegExp(`cid:${escaped}`, "gi"), uri);
+		}
+		return out;
+	}
+
+	async function fetchForwardedAttachments(
+		originalMessageId: string,
+		ids: string[],
+		ownerId: string,
+	): Promise<AttachmentDownload[]> {
+		const rows = await db
+			.select()
+			.from(messageAttachments)
+			.where(
+				and(
+					eq(messageAttachments.messageId, originalMessageId),
+					eq(messageAttachments.ownerId, ownerId),
+					inArray(messageAttachments.id, ids),
+				),
+			);
+		return Promise.all(
+			rows.map(async (row): Promise<AttachmentDownload> => {
+				const { data: blob, error } = await supabase.storage
+					.from(String(row.bucketId || "attachments"))
+					.download(String(row.path));
+				if (error || !blob) {
+					throw new Error(
+						`Could not load attachment "${row.filenameOriginal ?? row.path}" to forward`,
+					);
+				}
+				const item = MessageAttachmentInsertSchema.parse({
+					bucketId: row.bucketId,
+					path: row.path,
+					filenameOriginal: row.filenameOriginal,
+					contentType: row.contentType,
+					sizeBytes: row.sizeBytes,
+					checksum: row.checksum,
+					disposition: "attachment",
+				});
+				return {
+					item,
+					blob,
+					name: String(row.filenameOriginal || "attachment"),
+					sizeBytes: Number(row.sizeBytes ?? blob.size),
+				};
+			}),
+		);
+	}
+
 	async function fetchAttachmentBlobs(
 		supabase: SupabaseClient,
 		attachmentsString: string,
+		ownerId: string,
 	): Promise<AttachmentDownload[]> {
 		let attachments: unknown = [];
 		try {
@@ -458,7 +626,21 @@ export default defineNitroPlugin(async (nitroApp) => {
 
 		if (candidates.length === 0) return [];
 
-		try {
+		// The list comes from the browser and is downloaded with the service
+		// role: only allow files from the sender's own upload folder.
+		const ownPrefix = `private/${ownerId}/`;
+		for (const a of candidates as any[]) {
+			const path = String(a.path);
+			if (
+				String(a.bucketId) !== "attachments" ||
+				!path.startsWith(ownPrefix) ||
+				path.includes("..")
+			) {
+				throw new Error("Invalid attachment");
+			}
+		}
+
+		{
 			const downloads = await Promise.all(
 				candidates.map(async (attachment: any): Promise<AttachmentDownload> => {
 					const { data: blob, error } = await supabase.storage
@@ -485,10 +667,8 @@ export default defineNitroPlugin(async (nitroApp) => {
 				}),
 			);
 
+			// A failed download aborts sending instead of silently dropping it.
 			return downloads;
-		} catch (e) {
-			console.error("fetchAttachmentBlobs error:", e);
-			return [];
 		}
 	}
 

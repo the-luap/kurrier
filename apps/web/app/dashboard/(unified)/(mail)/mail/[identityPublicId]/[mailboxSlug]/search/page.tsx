@@ -1,15 +1,15 @@
+import { PAGE_SIZE } from "@common/mail-client";
+import { getPublicEnv, type ThreadHit } from "@schema";
+import SearchPagination from "@/components/mailbox/default/search-pagination";
+import WebmailList from "@/components/mailbox/default/webmail-list";
+import { isSignedIn } from "@/lib/actions/auth";
+import { fetchLabels, fetchMailboxThreadLabels } from "@/lib/actions/labels";
 import {
+	type FetchMailboxThreadsByIdsResult,
 	fetchMailbox,
-	FetchMailboxThreadsByIdsResult,
 	fetchMailboxThreadsList,
 	initSearch,
 } from "@/lib/actions/mailbox";
-import { fetchLabels, fetchMailboxThreadLabels } from "@/lib/actions/labels";
-import { getPublicEnv, ThreadHit } from "@schema";
-import { isSignedIn } from "@/lib/actions/auth";
-import SearchPagination from "@/components/mailbox/default/search-pagination";
-import WebmailList from "@/components/mailbox/default/webmail-list";
-import { PAGE_SIZE } from "@common/mail-client";
 
 export default async function SearchPage({
 	params,
@@ -55,7 +55,7 @@ export default async function SearchPage({
 
 	const threadIds = pageItems.map((i) => i.threadId);
 	const { threads } =
-		threadIds.length > 0
+		activeMailbox && threadIds.length > 0
 			? await fetchMailboxThreadsList(activeMailbox.id, threadIds)
 			: { threads: [] };
 

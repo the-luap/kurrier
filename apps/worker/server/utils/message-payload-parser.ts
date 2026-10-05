@@ -1,18 +1,18 @@
-import { simpleParser, ParsedMail, Attachment } from "mailparser";
 import {
 	db,
-	messages,
-	messageAttachments,
-	threads,
-	MessageInsertSchema,
-	MessageCreate,
-	MessageAttachmentCreate,
+	type MessageAttachmentCreate,
 	MessageAttachmentInsertSchema,
+	type MessageCreate,
+	MessageInsertSchema,
+	messageAttachments,
+	messages,
+	threads,
 } from "@db";
-import { createClient } from "@supabase/supabase-js";
 import { getPublicEnv, getServerEnv } from "@schema";
+import { createClient } from "@supabase/supabase-js";
 import { randomUUID } from "crypto";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { type Attachment, type ParsedMail, simpleParser } from "mailparser";
 
 function generateFileName(att: Attachment) {
 	const ext =
@@ -116,7 +116,10 @@ export async function parseAndStoreEmail(
 ) {
 	const { ownerId, mailboxId, rawStorageKey } = opts;
 
-	const parsed = await simpleParser(rawEmail);
+	// Keep "cid:" references instead of inlining images as base64 data URIs:
+	// inline images are stored as attachments and resolved by the web app,
+	// which keeps the stored HTML (and every thread payload) small.
+	const parsed = await simpleParser(rawEmail, { keepCidLinks: true });
 	const headers = parsed.headers as Map<string, any>;
 
 	const encoder = new TextEncoder();
@@ -131,11 +134,14 @@ export async function parseAndStoreEmail(
 		});
 	if (rawUploadError) {
 		storedRawStorageKey = null;
-		console.warn("[parseAndStoreEmail] Raw EML upload failed; continuing without raw source", {
-			mailboxId,
-			storageKey: rawObjectPath,
-			message: rawUploadError.message,
-		});
+		console.warn(
+			"[parseAndStoreEmail] Raw EML upload failed; continuing without raw source",
+			{
+				mailboxId,
+				storageKey: rawObjectPath,
+				message: rawUploadError.message,
+			},
+		);
 	}
 
 	const messageId =
@@ -211,12 +217,15 @@ export async function parseAndStoreEmail(
 				cacheControl: "31536000",
 			});
 		if (error) {
-			console.warn("[parseAndStoreEmail] Attachment upload failed; skipping attachment", {
-				messageId: message.id,
-				filename: attachment.filename,
-				path: objectPath,
-				message: error.message,
-			});
+			console.warn(
+				"[parseAndStoreEmail] Attachment upload failed; skipping attachment",
+				{
+					messageId: message.id,
+					filename: attachment.filename,
+					path: objectPath,
+					message: error.message,
+				},
+			);
 			continue;
 		}
 
