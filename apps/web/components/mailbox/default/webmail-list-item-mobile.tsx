@@ -1,13 +1,16 @@
 "use client";
 import type { MailboxEntity, MailboxSyncEntity } from "@db";
-import { Temporal } from "@js-temporal/polyfill";
 import { IconStar, IconStarFilled } from "@tabler/icons-react";
 import { Mail, MailOpen, Paperclip, Trash2 } from "lucide-react";
-import { usePathname, useRouter } from "next/navigation";
+import { useRouter } from "next/navigation";
 import React from "react";
 import { toast } from "sonner";
 import LabelRowTag from "@/components/dashboard/labels/label-row-tag";
-import { useDynamicContext } from "@/hooks/use-dynamic-context";
+import {
+	formatThreadDate,
+	getParticipantNames,
+	useIsClient,
+} from "@/components/mailbox/default/thread-list-utils";
 import type { FetchMailboxThreadLabelsResult } from "@/lib/actions/labels";
 import {
 	type FetchMailboxThreadsResult,
@@ -20,105 +23,61 @@ import {
 type Props = {
 	mailboxThreadItem: FetchMailboxThreadsResult[number];
 	activeMailbox: MailboxEntity;
-	identityPublicId: string;
 	mailboxSync: MailboxSyncEntity | undefined;
 	labelsByThreadId: FetchMailboxThreadLabelsResult;
+	/** e.g. "/dashboard/mail/<identity>/<mailbox>/threads/" */
+	threadBaseHref: string;
+	selected: boolean;
+	onToggleSelect: (threadId: string, checked: boolean) => void;
 };
 
-export default function WebmailListItemMobile({
+const ACTIONS_W = 96;
+
+// Memoized: selecting one row only re-renders that row.
+const WebmailListItemMobile = React.memo(function WebmailListItemMobile({
 	mailboxThreadItem,
 	activeMailbox,
-	identityPublicId,
 	mailboxSync,
 	labelsByThreadId,
+	threadBaseHref,
+	selected,
+	onToggleSelect,
 }: Props) {
 	const router = useRouter();
 	const [isDeleting, setIsDeleting] = React.useState(false);
-
-	const formatDateLabel = () => {
-		const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-		try {
-			const zdt = Temporal.Instant.from(
-				new Date(mailboxThreadItem.lastActivityAt || Date.now()).toISOString(),
-			).toZonedDateTimeISO(tz);
-			const today = Temporal.Now.zonedDateTimeISO(tz).toPlainDate();
-			const d = zdt.toPlainDate();
-			const diff = today.since(d, { largestUnit: "day" }).days;
-			if (diff === 0)
-				return zdt.toLocaleString(undefined, {
-					hour: "numeric",
-					minute: "2-digit",
-				});
-			if (d.year === today.year)
-				return zdt.toLocaleString(undefined, {
-					month: "short",
-					day: "numeric",
-				});
-			return zdt.toLocaleString(undefined, {
-				month: "short",
-				day: "numeric",
-				year: "numeric",
-			});
-		} catch {
-			return "";
-		}
-	};
-	const [dateLabel, setDateLabel] = React.useState("");
-
-	React.useEffect(() => {
-		setDateLabel(formatDateLabel());
-	}, [mailboxThreadItem.lastActivityAt]);
-
-	const pathname = usePathname();
+	// Timezone dependent: rendered on the client only (empty during SSR).
+	const isClient = useIsClient();
+	const dateLabel = isClient
+		? formatThreadDate(mailboxThreadItem.lastActivityAt || Date.now())
+		: "";
 
 	const openThread = () => {
-		const url = pathname.match("/dashboard/mail")
-			? `/dashboard/mail/${identityPublicId}/${activeMailbox.slug}/threads/${mailboxThreadItem.threadId}`
-			: `/mail/${identityPublicId}/${activeMailbox.slug}/threads/${mailboxThreadItem.threadId}`;
-		router.push(url);
+		router.push(`${threadBaseHref}${mailboxThreadItem.threadId}`);
 	};
 
-	const ACTIONS_W = 96;
-
-	function names(p: typeof mailboxThreadItem.participants) {
-		const lists = [p?.from ?? [], p?.to ?? [], p?.cc ?? [], p?.bcc ?? []];
-		const seen = new Set<string>();
-		const out: { n?: string | null; e: string }[] = [];
-		for (const list of lists) {
-			for (const x of list) {
-				const e = x?.e?.trim();
-				if (!e) continue;
-				const k = e.toLowerCase();
-				if (seen.has(k)) continue;
-				seen.add(k);
-				out.push({ n: x.n, e });
-				if (out.length >= 6) break;
-			}
-			if (out.length >= 6) break;
-		}
-		const toText = (x: { n?: string | null; e: string }) =>
-			(x.n && x.n.trim()) || x.e;
-		const arr = out.map(toText);
-		return arr.slice(0, 3).join(", ") + (arr.length > 3 ? "…" : "");
-	}
-
-	const displayNames = names(mailboxThreadItem.participants);
+	const displayNames = getParticipantNames(mailboxThreadItem.participants);
 	const unreadCount = Number(mailboxThreadItem.unreadCount ?? 0);
 	const canMarkAsRead = unreadCount > 0;
 	const canMarkAsUnread =
 		mailboxThreadItem.messageCount > 0 && unreadCount === 0;
 	const isRead = unreadCount === 0;
 
-	const { state, setState } = useDynamicContext<{
-		selectedThreadIds: Set<string>;
-	}>();
-
 	if (isDeleting) return null;
+
+	// The content cell is a real link (keyboard focusable, opens in a new tab
+	// with modifier keys). Plain clicks bubble to the row's onClick.
+	const onLinkClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
+		if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) {
+			e.stopPropagation();
+			return;
+		}
+		e.preventDefault();
+	};
 
 	return (
 		<li
 			className={[
-				"relative group grid cursor-pointer",
+				"relative group grid cursor-pointer has-[:focus-visible]:bg-muted/50",
 				"grid-cols-[auto_1fr_auto] md:grid-cols-[auto_auto_minmax(16rem,1fr)_minmax(10rem,2fr)_auto]",
 				"items-start gap-3 px-3 py-3 transition-colors hover:bg-muted/50",
 				isRead
@@ -133,19 +92,17 @@ export default function WebmailListItemMobile({
 				<input
 					type="checkbox"
 					onClick={(e) => e.stopPropagation()}
-					checked={state?.selectedThreadIds?.has(mailboxThreadItem.threadId)}
-					onChange={(e) => {
-						const next = new Set(state?.selectedThreadIds ?? new Set<string>());
-						e.target.checked
-							? next.add(mailboxThreadItem.threadId)
-							: next.delete(mailboxThreadItem.threadId);
-						setState((prev) => ({ ...prev, selectedThreadIds: next }));
-					}}
+					checked={selected}
+					onChange={(e) =>
+						onToggleSelect(mailboxThreadItem.threadId, e.target.checked)
+					}
 					aria-label={`Select ${mailboxThreadItem.subject}`}
 					className="h-4 w-4 rounded border-muted-foreground/40"
 				/>
 				<button
-					aria-label="Star"
+					type="button"
+					aria-label={mailboxThreadItem.starred ? "Unstar" : "Star"}
+					aria-pressed={mailboxThreadItem.starred}
 					onClick={(e) => {
 						e.stopPropagation();
 						toggleStar(
@@ -166,7 +123,11 @@ export default function WebmailListItemMobile({
 			</div>
 
 			{/* content (2-line layout) */}
-			<div className="min-w-0 flex flex-col">
+			<a
+				href={`${threadBaseHref}${mailboxThreadItem.threadId}`}
+				onClick={onLinkClick}
+				className="min-w-0 flex flex-col focus-visible:outline-none"
+			>
 				<div className="flex items-center gap-2 truncate">
 					{!isRead ? (
 						<span
@@ -194,7 +155,7 @@ export default function WebmailListItemMobile({
 						<Paperclip className="ml-1 h-4 w-4 text-muted-foreground hidden sm:inline" />
 					)}
 				</div>
-			</div>
+			</a>
 
 			{/* meta */}
 			<div className="ml-auto flex flex-col items-end justify-start gap-1 text-right">
@@ -218,6 +179,8 @@ export default function WebmailListItemMobile({
 			>
 				{canMarkAsUnread && (
 					<button
+						type="button"
+						aria-label="Mark as unread"
 						onClick={async () =>
 							markAsUnread(
 								mailboxThreadItem.threadId,
@@ -234,6 +197,8 @@ export default function WebmailListItemMobile({
 				)}
 				{canMarkAsRead && (
 					<button
+						type="button"
+						aria-label="Mark as read"
 						onClick={async () =>
 							markAsRead(
 								mailboxThreadItem.threadId,
@@ -248,6 +213,8 @@ export default function WebmailListItemMobile({
 					</button>
 				)}
 				<button
+					type="button"
+					aria-label="Delete"
 					onClick={async (e) => {
 						e.preventDefault();
 						e.stopPropagation();
@@ -281,4 +248,6 @@ export default function WebmailListItemMobile({
 			</div>
 		</li>
 	);
-}
+});
+
+export default WebmailListItemMobile;

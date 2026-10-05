@@ -15,10 +15,20 @@ export default async function ContactsLayout({
 }) {
 	const rls = await rlsClient();
 
+	// Only the columns the list renders: this array is serialized into the
+	// client component, so full rows (notes, addresses, phones, DAV metadata,
+	// ...) for every contact would bloat the RSC payload.
 	const rows = await rls((tx) =>
 		tx
 			.select({
-				contact: contacts,
+				contact: {
+					id: contacts.id,
+					publicId: contacts.publicId,
+					firstName: contacts.firstName,
+					lastName: contacts.lastName,
+					emails: contacts.emails,
+					profilePictureXs: contacts.profilePictureXs,
+				},
 				labelSlug: labels.slug,
 			})
 			.from(contacts)
@@ -53,10 +63,13 @@ export default async function ContactsLayout({
 	const userProfileImages = allContacts
 		.map((contact) => contact.profilePictureXs)
 		.filter(Boolean) as string[];
-	const supabase = await createClient();
-	const { data } = await supabase.storage
-		.from("attachments")
-		.createSignedUrls(userProfileImages, 600);
+	// Skip the storage round trip entirely when no contact has a picture.
+	const { data } =
+		userProfileImages.length > 0
+			? await (await createClient()).storage
+					.from("attachments")
+					.createSignedUrls(userProfileImages, 600)
+			: { data: null };
 
 	return (
 		<>

@@ -34,7 +34,7 @@ import {
     labelScopesList,
     mailboxKindsList,
     mailboxSyncPhase, MailRuleMatchV1,
-    mailRulesActionsList, mailRulesFieldsList, mailRulesLogicList, mailRulesOpsList, mailSubscriptionStatusList,
+    mailRulesActionsList, mailSubscriptionStatusList,
     messagePriorityList,
     messageStatesList,
     providersList,
@@ -138,11 +138,11 @@ export const userAiSettings = pgTable(
 	{
 		id: uuid("id").defaultRandom().primaryKey(),
 		ownerId: uuid("owner_id")
-			.references(() => users.id)
+			.references(() => users.id, { onDelete: "cascade" })
 			.notNull()
 			.default(sql`auth.uid()`),
 		provider: text("provider").notNull().default("ollama"),
-		baseUrl: text("base_url").notNull().default("http://10.0.252.12:11434"),
+		baseUrl: text("base_url").notNull().default("http://localhost:11434"),
 		model: text("model").notNull().default("gemma3:12b"),
 		apiKey: text("api_key"),
 		systemPrompt: text("system_prompt"),
@@ -150,7 +150,7 @@ export const userAiSettings = pgTable(
 			.notNull()
 			.default("0.4"),
 		maxTokens: integer("max_tokens").notNull().default(700),
-		enabled: boolean("enabled").notNull().default(true),
+		enabled: boolean("enabled").notNull().default(false),
 		createdAt: timestamp("created_at", { withTimezone: true })
 			.defaultNow()
 			.notNull(),
@@ -175,6 +175,11 @@ export const userAiSettings = pgTable(
 			to: authenticatedRole,
 			using: sql`${t.ownerId} = ${authUid}`,
 			withCheck: sql`${t.ownerId} = ${authUid}`,
+		}),
+		pgPolicy("user_ai_settings_delete_own", {
+			for: "delete",
+			to: authenticatedRole,
+			using: sql`${t.ownerId} = ${authUid}`,
 		}),
 	],
 ).enableRLS();
@@ -717,6 +722,8 @@ export const messages = pgTable(
 
 		index("idx_messages_mailbox_date").on(t.mailboxId, t.date),
 		index("idx_messages_mailbox_seen_date").on(t.mailboxId, t.seen, t.date),
+		// RLS adds owner_id = auth.uid() to every query (dashboard counts).
+		index("idx_messages_owner_created").on(t.ownerId, t.createdAt),
 
 		pgPolicy("messages_select_own", {
 			for: "select",
@@ -881,6 +888,10 @@ export const mailboxThreads = pgTable(
 
 		index("ix_mbth_mailbox_snoozed_until").on(t.mailboxId, t.snoozedUntil),
 		index("ix_mbth_mailbox_unsnoozed_at").on(t.mailboxId, t.unsnoozedAt),
+		// Account-wide snoozed list / sidebar counts.
+		index("ix_mbth_owner_snoozed_until")
+			.on(t.ownerId, t.snoozedUntil)
+			.where(sql`${t.snoozedUntil} IS NOT NULL`),
 
 		uniqueIndex("ux_mbth_thread_mailbox").on(t.threadId, t.mailboxId),
 
@@ -1550,6 +1561,10 @@ export const calendarEvents = pgTable(
 		index("ix_calendar_events_owner").on(t.ownerId),
 		index("ix_calendar_events_calendar").on(t.calendarId),
 		index("ix_calendar_events_calendar_start").on(t.calendarId, t.startsAt),
+		// Invitation preview looks events up by iCal UID.
+		index("ix_calendar_events_owner_ical_uid")
+			.on(t.ownerId, t.icalUid)
+			.where(sql`${t.icalUid} IS NOT NULL`),
 		uniqueIndex("ix_calendar_events_owner_dav_uri")
 			.on(t.ownerId, t.davUri)
 			.where(sql`${t.davUri} IS NOT NULL`),

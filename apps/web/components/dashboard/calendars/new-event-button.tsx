@@ -4,7 +4,6 @@ import { Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ActionIcon, Modal } from "@mantine/core";
 import { useIsMobile } from "@/hooks/use-mobile";
-import Link from "next/link";
 import { useDynamicContext } from "@/hooks/use-dynamic-context";
 import { getDayjsTz } from "@common/day-js-extended";
 import { CalendarState } from "@schema";
@@ -43,10 +42,8 @@ export default function NewEventButton({
 			</Modal>
 
 			{isMobile ? (
-				<ActionIcon>
-					<Link href={"/dashboard/contacts/new"}>
-						<Plus className="h-4 w-4" />
-					</Link>
+				<ActionIcon onClick={open} aria-label="Create event">
+					<Plus className="h-4 w-4" />
 				</ActionIcon>
 			) : (
 				<>

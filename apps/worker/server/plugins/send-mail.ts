@@ -33,7 +33,6 @@ import { createMailer } from "@providers";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { Worker } from "bullmq";
 import { and, eq, inArray, isNotNull } from "drizzle-orm";
-import IORedis from "ioredis";
 
 const supabase = createClient(
 	publicConfig.API_URL,
@@ -42,14 +41,7 @@ const supabase = createClient(
 
 import addressparser from "addressparser";
 import type { PgTransaction } from "drizzle-orm/pg-core";
-import { getRedis } from "../../lib/get-redis";
-
-const connection = new IORedis({
-	maxRetriesPerRequest: null,
-	password: serverConfig.REDIS_PASSWORD,
-	host: serverConfig.REDIS_HOST || "redis",
-	port: Number(serverConfig.REDIS_PORT || 6379),
-});
+import { getRedis, workerOptions } from "../../lib/get-redis";
 
 type AttachmentDownload = {
 	item: ReturnType<typeof MessageAttachmentInsertSchema.parse>;
@@ -74,7 +66,7 @@ export default defineNitroPlugin(async (nitroApp) => {
 					return { success: true };
 			}
 		},
-		{ connection },
+		workerOptions(),
 	);
 
 	worker.on("completed", (job) => {
@@ -226,7 +218,8 @@ export default defineNitroPlugin(async (nitroApp) => {
 	};
 
 	const send = async (decodedForm: Record<any, unknown>) => {
-		return await db.transaction(async (tx) => {
+		let indexMessageId: string | null = null;
+		const result = await db.transaction(async (tx) => {
 			const [mailbox] = await tx
 				.select({
 					mailbox: mailboxes,
@@ -397,22 +390,19 @@ export default defineNitroPlugin(async (nitroApp) => {
 					.values(parsedMessage as MessageCreate)
 					.returning();
 
-				for (const attachmentBlob of attachmentBlobs) {
-					await tx.insert(messageAttachments).values({
-						...attachmentBlob.item,
-						ownerId: newMessage.ownerId,
-						messageId: newMessage.id,
-					});
+				if (attachmentBlobs.length) {
+					await tx.insert(messageAttachments).values(
+						attachmentBlobs.map((attachmentBlob) => ({
+							...attachmentBlob.item,
+							ownerId: newMessage.ownerId,
+							messageId: newMessage.id,
+						})),
+					);
 				}
 
 				await upsertMailboxThreadItem(newMessage.id, tx);
 
-				const { searchIngestQueue } = await getRedis();
-				await searchIngestQueue.add(
-					"add",
-					{ messageId: newMessage.id },
-					{ removeOnComplete: true },
-				);
+				indexMessageId = newMessage.id;
 			} else {
 				// Some providers only return { success: false } without details.
 				return {
@@ -424,6 +414,24 @@ export default defineNitroPlugin(async (nitroApp) => {
 			}
 			return { success: true };
 		});
+
+		// Enqueue indexing only after the transaction committed: from inside it
+		// the search worker could run before the message row was visible.
+		// The mail is already sent at this point: a failed enqueue must not turn
+		// the result into an error (the user would send it again).
+		if (indexMessageId) {
+			try {
+				const { searchIngestQueue } = await getRedis();
+				await searchIngestQueue.add(
+					"add",
+					{ messageId: indexMessageId },
+					{ removeOnComplete: true },
+				);
+			} catch (error) {
+				console.error("[send-mail] failed to queue search indexing", error);
+			}
+		}
+		return result;
 	};
 
 	const generateMailAttrs = async ({

@@ -5,7 +5,7 @@ import {
 	contacts,
 	db,
 } from "@db";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray, isNotNull } from "drizzle-orm";
 import { davCards, DavCardsEntity, davDb } from "../dav-schema";
 import { parseVCardToContact } from "./dav-vcard";
 import { nanoid } from "nanoid";
@@ -95,18 +95,30 @@ const syncBook = async (
 		.from(davCards)
 		.where(eq(davCards.addressbookid, davBookId));
 
+	// Load the local state once instead of one query per card (this runs for
+	// every card of every book on each 2-minute sync tick).
+	const localByUri = new Map<string, ContactEntity>();
+	const localRows = await db
+		.select({
+			id: contacts.id,
+			publicId: contacts.publicId,
+			davUri: contacts.davUri,
+			davEtag: contacts.davEtag,
+		})
+		.from(contacts)
+		.where(and(eq(contacts.ownerId, book.ownerId), isNotNull(contacts.davUri)));
+	for (const row of localRows) {
+		if (row.davUri && !localByUri.has(row.davUri)) {
+			localByUri.set(row.davUri, row as ContactEntity);
+		}
+	}
+
 	const remoteUris = new Set<string>();
 
 	for (const card of cards) {
 		remoteUris.add(card.uri);
 
-		const [localContact] = await db
-			.select()
-			.from(contacts)
-			.where(
-				// and(eq(contacts.addressBookId, book.id), eq(contacts.davUri, card.uri)),
-				and(eq(contacts.ownerId, book.ownerId), eq(contacts.davUri, card.uri)),
-			);
+		const localContact = localByUri.get(card.uri);
 
 		if (localContact) {
 			if (normalizeEtag(card.etag) !== localContact.davEtag) {
@@ -124,17 +136,16 @@ const syncBook = async (
 	}
 
 	const localContacts = await db
-		.select()
+		.select({ id: contacts.id, davUri: contacts.davUri })
 		.from(contacts)
 		.where(eq(contacts.addressBookId, book.id));
 
-	const deletedIds: string[] = [];
+	const deletedIds = localContacts
+		.filter((local) => local.davUri && !remoteUris.has(local.davUri))
+		.map((local) => String(local.id));
 
-	for (const local of localContacts) {
-		if (local.davUri && !remoteUris.has(local.davUri)) {
-			await db.delete(contacts).where(eq(contacts.id, local.id));
-			deletedIds.push(String(local.id));
-		}
+	if (deletedIds.length) {
+		await db.delete(contacts).where(inArray(contacts.id, deletedIds));
 	}
 
 	if (deletedIds.length) {

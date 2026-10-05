@@ -8,7 +8,7 @@ import {
 } from "@/lib/actions/labels";
 
 type ContactLabelHoverButtonsProps = {
-	contact: ContactEntity;
+	contact: Pick<ContactEntity, "id">;
 	allLabels: LabelEntity[];
 	labelsByContactId: FetchContactLabelsByIdResult;
 };

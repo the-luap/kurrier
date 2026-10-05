@@ -1,8 +1,5 @@
-import {
-	fetchCloudListPath,
-	fetchListPath,
-	normalizeWithinPath,
-} from "@/lib/actions/drive";
+import { fetchCloudListPath, fetchListPath } from "@/lib/actions/drive";
+import { getDriveRouteContext } from "./route-context";
 import DriveEntry from "@/components/dashboard/drive/drive-entry";
 
 export default async function Page({
@@ -11,12 +8,20 @@ export default async function Page({
 	params: Promise<{ segments?: string[] }>;
 }) {
 	const { segments } = await params;
-	const ctx = await normalizeWithinPath(segments ?? []);
+	const ctx = await getDriveRouteContext(segments);
 
 	const entries =
 		ctx.scope === "cloud"
 			? await fetchCloudListPath(ctx)
 			: await fetchListPath(ctx.within);
+
+	if (!entries?.length) {
+		return (
+			<div className="flex items-center justify-center my-24 text-sm text-muted-foreground">
+				This folder is empty.
+			</div>
+		);
+	}
 
 	return (
 		<div className="p-8">

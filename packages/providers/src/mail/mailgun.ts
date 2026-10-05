@@ -67,7 +67,7 @@ export class MailgunMailer implements Mailer {
 			});
 
 			return true;
-		} catch (err) {
+		} catch {
 			return false;
 		}
 	}

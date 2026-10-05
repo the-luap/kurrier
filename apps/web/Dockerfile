@@ -1,7 +1,7 @@
 # -----------------------------
 # Build stage
 # -----------------------------
-FROM node:20-alpine AS build
+FROM node:22-alpine AS build
 WORKDIR /repo
 RUN corepack enable
 
@@ -74,7 +74,7 @@ RUN pnpm run build
 # -----------------------------
 # Runtime stage (standalone)
 # -----------------------------
-FROM node:20-alpine
+FROM node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production
 ENV HOST=0.0.0.0

@@ -23,21 +23,24 @@ export default async function LabelPage({
 		1,
 		Number((resolvedSearchParams.page as string | undefined) ?? 1),
 	);
-	const { activeMailbox, mailboxSync } = await fetchMailbox(
-		identityPublicId,
-		mailboxSlug,
-	);
-	const publicConfig = await getPublicEnv();
-	const globalLabels = await fetchLabels();
-
-	const { threads: mailboxThreads, total } = await fetchMailboxThreadsByLabel(
+	const publicConfig = getPublicEnv();
+	const threadsPromise = fetchMailboxThreadsByLabel(
 		identityPublicId,
 		mailboxSlug,
 		labelSlug,
 		page,
 	);
-
-	const labelsByThreadId = await fetchMailboxThreadLabels(mailboxThreads);
+	const [
+		{ activeMailbox, mailboxSync },
+		globalLabels,
+		{ threads: mailboxThreads, total },
+		labelsByThreadId,
+	] = await Promise.all([
+		fetchMailbox(identityPublicId, mailboxSlug),
+		fetchLabels(),
+		threadsPromise,
+		threadsPromise.then(({ threads }) => fetchMailboxThreadLabels(threads)),
+	]);
 	const label = globalLabels.find((l) => l.slug === labelSlug);
 
 	return (

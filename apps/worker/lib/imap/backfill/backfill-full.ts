@@ -66,6 +66,20 @@ type BackfillMailboxOpts = {
 const DEFAULT_WINDOW = 300;
 
 async function backfillMailboxFull(opts: BackfillMailboxOpts) {
+	if (opts.quota.limit <= 0) return;
+
+	// Hold the mailbox lock like every other IMAP operation on this shared
+	// client; otherwise a concurrent delta fetch could switch the selected
+	// mailbox in the middle of this fetch.
+	const lock = await opts.client.getMailboxLock(opts.path, { readOnly: true });
+	try {
+		await backfillMailboxBatch(opts);
+	} finally {
+		lock.release();
+	}
+}
+
+async function backfillMailboxBatch(opts: BackfillMailboxOpts) {
 	const {
 		client,
 		identityId,

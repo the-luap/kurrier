@@ -2,17 +2,12 @@ import { Container } from "@/components/common/containers";
 import OllamaSettingsForm from "@/components/dashboard/ai/ollama-settings-form";
 import { Separator } from "@/components/ui/separator";
 import { SidebarTrigger } from "@/components/ui/sidebar";
-import { fetchAiSettings, listAiModels } from "@/lib/actions/dashboard";
+import { fetchAiSettings } from "@/lib/actions/dashboard";
 
 export default async function AiSettingsPage() {
 	const settings = await fetchAiSettings();
-	const modelsResult = await listAiModels({
-		provider: settings.provider,
-		baseUrl: settings.baseUrl,
-	});
-	const initialModels = modelsResult.success
-		? ((modelsResult.data as { models?: [] })?.models ?? [])
-		: [];
+	// Models are loaded client-side by the form: the AI host may be slow or
+	// unreachable and must not block rendering this page.
 
 	return (
 		<>
@@ -36,10 +31,7 @@ export default async function AiSettingsPage() {
 						mail composer.
 					</p>
 
-					<OllamaSettingsForm
-						settings={settings}
-						initialModels={initialModels}
-					/>
+					<OllamaSettingsForm settings={settings} initialModels={[]} />
 				</Container>
 			</div>
 		</>

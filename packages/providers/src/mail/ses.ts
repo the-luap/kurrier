@@ -248,7 +248,7 @@ export class SesMailer implements Mailer {
 		}
 
 		const normalized = address.trim().toLowerCase();
-		const { bucket, topicArn, ruleSetName } = res;
+		const { bucket, ruleSetName } = res;
 
 		const { name: activeRuleSet } = await this.ensureRuleSet(ses, ruleSetName);
 

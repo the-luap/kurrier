@@ -7,7 +7,7 @@ import {
 	CalendarEntity,
 	CalendarEventUpdateSchema,
 } from "@db";
-import { and, eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import {
 	davCalendarObjects,
 	DavCalendarObjectEntity,
@@ -246,24 +246,38 @@ const syncCalendar = async (
 		.from(davCalendarObjects)
 		.where(eq(davCalendarObjects.calendarid, davCalendarId));
 
+	// One query for the local state instead of one per DAV object; the same
+	// rows also drive the deletion pass below. rawIcs is not needed here.
+	const localEvents = await db
+		.select({
+			id: calendarEvents.id,
+			davUri: calendarEvents.davUri,
+			davEtag: calendarEvents.davEtag,
+		})
+		.from(calendarEvents)
+		.where(eq(calendarEvents.calendarId, calendar.id));
+
+	const localByUri = new Map<string, (typeof localEvents)[number]>();
+	for (const local of localEvents) {
+		if (local.davUri && !localByUri.has(local.davUri)) {
+			localByUri.set(local.davUri, local);
+		}
+	}
+
 	const remoteUris = new Set<string>();
 
 	for (const obj of objs) {
 		remoteUris.add(obj.uri);
 
-		const [localEvent] = await db
-			.select()
-			.from(calendarEvents)
-			.where(
-				and(
-					eq(calendarEvents.calendarId, calendar.id),
-					eq(calendarEvents.davUri, obj.uri),
-				),
-			);
+		const localEvent = localByUri.get(obj.uri);
 
 		if (localEvent) {
 			if (normalizeEtag(obj.etag) !== localEvent.davEtag) {
-				await updateEventFromDav({ obj, calendar, localEvent });
+				await updateEventFromDav({
+					obj,
+					calendar,
+					localEvent: localEvent as CalendarEventEntity,
+				});
 			}
 		} else {
 			console.info(
@@ -276,18 +290,14 @@ const syncCalendar = async (
 		}
 	}
 
-	const localEvents = await db
-		.select()
-		.from(calendarEvents)
-		.where(eq(calendarEvents.calendarId, calendar.id));
+	const deletedIds = localEvents
+		.filter((local) => local.davUri && !remoteUris.has(local.davUri))
+		.map((local) => String(local.id));
 
-	const deletedIds: string[] = [];
-
-	for (const local of localEvents) {
-		if (local.davUri && !remoteUris.has(local.davUri)) {
-			await db.delete(calendarEvents).where(eq(calendarEvents.id, local.id));
-			deletedIds.push(String(local.id));
-		}
+	if (deletedIds.length) {
+		await db
+			.delete(calendarEvents)
+			.where(inArray(calendarEvents.id, deletedIds));
 	}
 
 	if (deletedIds.length) {

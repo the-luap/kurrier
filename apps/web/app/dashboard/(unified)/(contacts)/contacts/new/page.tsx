@@ -11,7 +11,7 @@ import {
 } from "@db";
 import { isSignedIn } from "@/lib/actions/auth";
 import { revalidatePath } from "next/cache";
-import { getRedis } from "@/lib/actions/get-redis";
+import { getQueue } from "@/lib/actions/get-redis";
 import { eq } from "drizzle-orm";
 
 async function Page() {
@@ -48,7 +48,7 @@ async function Page() {
 					.values(payload as ContactCreate)
 					.returning(),
 			);
-			const { davQueue } = await getRedis();
+			const davQueue = getQueue("dav-worker");
 			davQueue.add("dav:create-contact", {
 				contactId: newContact.id,
 				ownerId: newContact.ownerId,

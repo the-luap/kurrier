@@ -46,45 +46,45 @@ export default function MailboxSearch({
 		return () => window.removeEventListener("keydown", onKey);
 	}, []);
 
-	const doSearch = React.useMemo(() => {
-		let t: ReturnType<typeof setTimeout> | null = null;
-		return (q: string, attach: boolean, unread: boolean, starred: boolean) => {
-			if (t) clearTimeout(t);
-			t = setTimeout(async () => {
-				if (!q.trim()) {
-					setItems([]);
-					setTotalThreads(0);
-					setTotalMessages(0);
-					return;
-				}
-				try {
-					setLoading(true);
-					const res = (await initSearch(
-						q,
-						String(user?.id),
-						attach,
-						unread,
-						starred,
-						1,
-					)) as SearchThreadsResponse;
-
-					setItems(res.items || []);
-					setTotalThreads(res.totalThreads ?? res.items?.length ?? 0);
-					setTotalMessages(res.totalMessages ?? res.items?.length ?? 0);
-				} catch (e) {
-					setItems([]);
-					setTotalThreads(0);
-					setTotalMessages(0);
-				} finally {
-					setLoading(false);
-				}
-			}, 250);
-		};
-	}, [user?.id]);
-
+	// Debounced search. The timer is cleared on every change / unmount and a
+	// request id drops responses that arrive after a newer query was typed,
+	// so a slow earlier search can no longer overwrite newer results.
+	const requestIdRef = React.useRef(0);
 	React.useEffect(() => {
-		doSearch(query, hasAttachment, onlyUnread, isStarred);
-	}, [query, hasAttachment, onlyUnread, isStarred, doSearch]);
+		const requestId = ++requestIdRef.current;
+		const timer = setTimeout(async () => {
+			if (!query.trim()) {
+				setItems([]);
+				setTotalThreads(0);
+				setTotalMessages(0);
+				setLoading(false);
+				return;
+			}
+			try {
+				setLoading(true);
+				const res = (await initSearch(
+					query,
+					String(user?.id),
+					hasAttachment,
+					onlyUnread,
+					isStarred,
+					1,
+				)) as SearchThreadsResponse;
+				if (requestId !== requestIdRef.current) return;
+				setItems(res.items || []);
+				setTotalThreads(res.totalThreads ?? res.items?.length ?? 0);
+				setTotalMessages(res.totalMessages ?? res.items?.length ?? 0);
+			} catch {
+				if (requestId !== requestIdRef.current) return;
+				setItems([]);
+				setTotalThreads(0);
+				setTotalMessages(0);
+			} finally {
+				if (requestId === requestIdRef.current) setLoading(false);
+			}
+		}, 250);
+		return () => clearTimeout(timer);
+	}, [query, hasAttachment, onlyUnread, isStarred, user?.id]);
 
 	const toggle = (setter: React.Dispatch<React.SetStateAction<boolean>>) =>
 		setter((v) => !v);
@@ -98,6 +98,7 @@ export default function MailboxSearch({
 			<button
 				type="button"
 				onClick={() => setOpen(true)}
+				aria-keyshortcuts="Control+K Meta+K"
 				className="flex w-full items-center gap-2 rounded-lg border bg-background px-4 py-2.5 text-muted-foreground hover:bg-muted/30"
 			>
 				<Search className="h-4 w-4 opacity-60" />
@@ -123,33 +124,51 @@ export default function MailboxSearch({
 
 				<div className="sticky top-0 z-10 flex flex-wrap gap-2 border-b bg-background px-4 py-2">
 					<Badge
-						onClick={() => toggle(setHasAttachment)}
+						asChild
 						className={`cursor-pointer rounded-full px-3 py-1 text-sm ${
 							hasAttachment ? "bg-primary text-primary-foreground" : ""
 						}`}
 						variant={hasAttachment ? "default" : "secondary"}
 					>
-						Has attachment
+						<button
+							type="button"
+							aria-pressed={hasAttachment}
+							onClick={() => toggle(setHasAttachment)}
+						>
+							Has attachment
+						</button>
 					</Badge>
 
 					<Badge
-						onClick={() => toggle(setOnlyUnread)}
+						asChild
 						className={`cursor-pointer rounded-full px-3 py-1 text-sm ${
 							onlyUnread ? "bg-primary text-primary-foreground" : ""
 						}`}
 						variant={onlyUnread ? "default" : "secondary"}
 					>
-						Unread only
+						<button
+							type="button"
+							aria-pressed={onlyUnread}
+							onClick={() => toggle(setOnlyUnread)}
+						>
+							Unread only
+						</button>
 					</Badge>
 
 					<Badge
-						onClick={() => toggle(setIsStarred)}
+						asChild
 						className={`cursor-pointer rounded-full px-3 py-1 text-sm ${
 							isStarred ? "bg-primary text-primary-foreground" : ""
 						}`}
 						variant={isStarred ? "default" : "secondary"}
 					>
-						Starred only
+						<button
+							type="button"
+							aria-pressed={isStarred}
+							onClick={() => toggle(setIsStarred)}
+						>
+							Starred only
+						</button>
 					</Badge>
 				</div>
 
@@ -170,7 +189,6 @@ export default function MailboxSearch({
 								<li key={t.id} className={"my-2"}>
 									<Link
 										href={`${pathName.match("/dashboard/mail") ? "/dashboard/mail" : "/mail"}/${publicId}/inbox/threads/${t.threadId}`}
-										type="button"
 										className="w-full rounded-md px-4 py-3 text-left hover:bg-muted/60 block focus:outline-none focus:ring-2 focus:ring-ring"
 									>
 										<div className="flex items-center gap-2">

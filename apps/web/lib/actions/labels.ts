@@ -20,7 +20,15 @@ import { cache } from "react";
 import { isSignedIn } from "@/lib/actions/auth";
 import { rlsClient } from "@/lib/actions/clients";
 import type { FetchMailboxThreadsResult } from "@/lib/actions/mailbox";
-import { withServerCache } from "@/lib/server-cache";
+import { invalidateServerCache, withServerCache } from "@/lib/server-cache";
+
+const currentUserId = async () => (await isSignedIn())?.id;
+
+// Label lists and counts are cached per user; drop them after a change.
+async function afterLabelMutation(...paths: string[]) {
+	await invalidateServerCache(await currentUserId());
+	for (const path of paths) revalidatePath(path);
+}
 
 const fetchLabelsUncached = async (selectedScope: LabelScope) => {
 	const rls = await rlsClient();
@@ -39,31 +47,33 @@ export const fetchLabels = cache(async (scope?: LabelScope) => {
 	const user = await isSignedIn();
 	if (!user?.id) return fetchLabelsUncached(selectedScope);
 
-	return withServerCache(`labels:${user.id}:${selectedScope}`, 30, () =>
-		fetchLabelsUncached(selectedScope),
+	return withServerCache(
+		user.id,
+		`labels:${user.id}:${selectedScope}`,
+		30,
+		() => fetchLabelsUncached(selectedScope),
 	);
 });
 
 const fetchLabelsWithCountsUncached = async () => {
 	const rls = await rlsClient();
 
-	const allLabels = await rls((tx) =>
-		tx
+	const { allLabels, counts } = await rls(async (tx) => {
+		const allLabels = await tx
 			.select()
 			.from(labels)
 			.where(sql`${labels.scope} = 'thread'`)
-			.orderBy(asc(labels.name)),
-	);
+			.orderBy(asc(labels.name));
 
-	const counts = await rls((tx) =>
-		tx
+		const counts = await tx
 			.select({
 				labelId: mailboxThreadLabels.labelId,
 				threadCount: sql<number>`count(*)`,
 			})
 			.from(mailboxThreadLabels)
-			.groupBy(mailboxThreadLabels.labelId),
-	);
+			.groupBy(mailboxThreadLabels.labelId);
+		return { allLabels, counts };
+	});
 
 	const countsById = new Map<string, number>();
 	for (const row of counts) {
@@ -80,8 +90,11 @@ export const fetchLabelsWithCounts = cache(async () => {
 	const user = await isSignedIn();
 	if (!user?.id) return fetchLabelsWithCountsUncached();
 
-	return withServerCache(`labels-with-counts:${user.id}:thread`, 30, () =>
-		fetchLabelsWithCountsUncached(),
+	return withServerCache(
+		user.id,
+		`labels-with-counts:${user.id}:thread`,
+		30,
+		() => fetchLabelsWithCountsUncached(),
 	);
 });
 
@@ -93,23 +106,22 @@ export type FetchLabelsResult = Awaited<ReturnType<typeof fetchLabels>>;
 const fetchContactLabelsWithCountsUncached = async () => {
 	const rls = await rlsClient();
 
-	const allLabels = await rls((tx) =>
-		tx
+	const { allLabels, counts } = await rls(async (tx) => {
+		const allLabels = await tx
 			.select()
 			.from(labels)
 			.where(sql`${labels.scope} = 'contact'`)
-			.orderBy(asc(labels.name)),
-	);
+			.orderBy(asc(labels.name));
 
-	const counts = await rls((tx) =>
-		tx
+		const counts = await tx
 			.select({
 				labelId: contactLabels.labelId,
 				contactCount: sql<number>`count(*)`,
 			})
 			.from(contactLabels)
-			.groupBy(contactLabels.labelId),
-	);
+			.groupBy(contactLabels.labelId);
+		return { allLabels, counts };
+	});
 
 	const countsById = new Map<string, number>();
 	for (const row of counts) {
@@ -126,8 +138,11 @@ export const fetchContactLabelsWithCounts = cache(async () => {
 	const user = await isSignedIn();
 	if (!user?.id) return fetchContactLabelsWithCountsUncached();
 
-	return withServerCache(`labels-with-counts:${user.id}:contact`, 30, () =>
-		fetchContactLabelsWithCountsUncached(),
+	return withServerCache(
+		user.id,
+		`labels-with-counts:${user.id}:contact`,
+		30,
+		() => fetchContactLabelsWithCountsUncached(),
 	);
 });
 
@@ -160,12 +175,12 @@ export async function addNewLabel(
 
 		const scope = decodedForm.scope as LabelScope;
 
-		if (scope === "contact" || scope === "all") {
-			revalidatePath("/dashboard/contacts");
-		}
-		if (scope === "thread" || scope === "all") {
-			revalidatePath("/dashboard/mail");
-		}
+		await afterLabelMutation(
+			...(scope === "contact" || scope === "all"
+				? ["/dashboard/contacts"]
+				: []),
+			...(scope === "thread" || scope === "all" ? ["/dashboard/mail"] : []),
+		);
 		return { success: true, data: newLabelRows };
 	});
 }
@@ -188,7 +203,7 @@ export async function addLabelToThread({
 				labelId,
 			}),
 		);
-		revalidatePath("/dashboard/mail");
+		await afterLabelMutation("/dashboard/mail");
 		return { success: true };
 	});
 }
@@ -216,7 +231,7 @@ export async function removeLabelFromThread({
 				)
 				.returning(),
 		);
-		revalidatePath("/dashboard/mail");
+		await afterLabelMutation("/dashboard/mail");
 		return { success: true };
 	});
 }
@@ -238,7 +253,7 @@ export async function addLabelToContact({
 		);
 
 		// contacts sidebar / list
-		revalidatePath("/dashboard/contacts");
+		await afterLabelMutation("/dashboard/contacts");
 		return { success: true };
 	});
 }
@@ -264,7 +279,7 @@ export async function removeLabelFromContact({
 				.returning(),
 		);
 
-		revalidatePath("/dashboard/contacts");
+		await afterLabelMutation("/dashboard/contacts");
 		return { success: true };
 	});
 }
@@ -355,8 +370,14 @@ export const fetchMailboxThreadsByLabel = async (
 	const rls = await rlsClient();
 	const pageNum = page && page > 0 ? page : 1;
 
-	const rows = await rls((tx) =>
-		tx
+	const labelFilter = and(
+		eq(mailboxThreads.identityPublicId, identityPublicId),
+		eq(mailboxThreads.mailboxSlug, mailboxSlug),
+		eq(labels.slug, labelSlug),
+	);
+
+	const { rows, total } = await rls(async (tx) => {
+		const rows = await tx
 			.select({
 				mt: mailboxThreads,
 			})
@@ -369,20 +390,12 @@ export const fetchMailboxThreadsByLabel = async (
 				),
 			)
 			.innerJoin(labels, eq(mailboxThreadLabels.labelId, labels.id))
-			.where(
-				and(
-					eq(mailboxThreads.identityPublicId, identityPublicId),
-					eq(mailboxThreads.mailboxSlug, mailboxSlug),
-					eq(labels.slug, labelSlug),
-				),
-			)
+			.where(labelFilter)
 			.orderBy(desc(mailboxThreads.lastActivityAt))
 			.offset((pageNum - 1) * PAGE_SIZE)
-			.limit(PAGE_SIZE),
-	);
+			.limit(PAGE_SIZE);
 
-	const [{ total }] = await rls((tx) =>
-		tx
+		const [{ total }] = await tx
 			.select({ total: sql<number>`count(*)` })
 			.from(mailboxThreadLabels)
 			.innerJoin(
@@ -393,14 +406,9 @@ export const fetchMailboxThreadsByLabel = async (
 				),
 			)
 			.innerJoin(labels, eq(mailboxThreadLabels.labelId, labels.id))
-			.where(
-				and(
-					eq(mailboxThreads.identityPublicId, identityPublicId),
-					eq(mailboxThreads.mailboxSlug, mailboxSlug),
-					eq(labels.slug, labelSlug),
-				),
-			),
-	);
+			.where(labelFilter);
+		return { rows, total };
+	});
 	const threads = rows.map((r) => r.mt);
 	return { threads, total };
 };
@@ -414,7 +422,7 @@ export const deleteLabel = async ({ id }: { id: string }) => {
 		const rls = await rlsClient();
 
 		await rls((tx) => tx.delete(labels).where(eq(labels.id, id)));
-		revalidatePath("/dashboard");
+		await afterLabelMutation("/dashboard");
 		return { success: true };
 	} catch (err: any) {
 		return { success: false, error: err?.message ?? "Unknown error" };
@@ -447,52 +455,12 @@ export const updateLabel = async ({
 				.where(eq(labels.id, id)),
 		);
 
-		revalidatePath("/dashboard");
+		await afterLabelMutation("/dashboard");
 		return { success: true };
 	} catch (err: any) {
 		return { success: false, error: err?.message ?? "Unknown error" };
 	}
 };
-
-export async function getOrCreateSystemLabel({
-	name,
-	scope,
-	colorBg,
-}: {
-	name: string;
-	scope: LabelScope;
-	colorBg?: string | null;
-}): Promise<LabelEntity> {
-	const rls = await rlsClient();
-
-	const [existing] = await rls((tx) =>
-		tx
-			.select()
-			.from(labels)
-			.where(and(eq(labels.slug, slugify(name)), eq(labels.scope, scope)))
-			.limit(1),
-	);
-
-	if (existing) return existing as LabelEntity;
-
-	const payload = LabelInsertSchema.parse({
-		name,
-		slug: slugify(name),
-		isSystem: true,
-		scope,
-		colorBg: colorBg ?? null,
-		parentId: undefined,
-	});
-
-	const [inserted] = await rls((tx) =>
-		tx
-			.insert(labels)
-			.values(payload as LabelCreate)
-			.returning(),
-	);
-
-	return inserted as LabelEntity;
-}
 
 export async function toggleFavoriteContact(formData: FormData) {
 	await handleAction(async () => {
@@ -500,17 +468,16 @@ export async function toggleFavoriteContact(formData: FormData) {
 		const contactId = String(decodedForm.contactId);
 		const rls = await rlsClient();
 
-		let [favorite] = await rls((tx) =>
-			tx
-				.select()
+		// One transaction instead of up to four.
+		const isFavorite = await rls(async (tx) => {
+			let [favorite] = await tx
+				.select({ id: labels.id })
 				.from(labels)
 				.where(and(eq(labels.slug, "favorite"), eq(labels.scope, "contact")))
-				.limit(1),
-		);
+				.limit(1);
 
-		if (!favorite) {
-			const rows = await rls((tx) =>
-				tx
+			if (!favorite) {
+				[favorite] = await tx
 					.insert(labels)
 					.values({
 						name: "Favorite",
@@ -519,48 +486,28 @@ export async function toggleFavoriteContact(formData: FormData) {
 						isSystem: true,
 						colorBg: "#eab308",
 					})
-					.returning(),
-			);
-			favorite = rows[0];
-		}
+					.returning({ id: labels.id });
+			}
 
-		const existing = await rls((tx) =>
-			tx
-				.select()
-				.from(contactLabels)
+			const removed = await tx
+				.delete(contactLabels)
 				.where(
 					and(
 						eq(contactLabels.contactId, contactId),
 						eq(contactLabels.labelId, favorite.id),
 					),
 				)
-				.limit(1),
-		);
+				.returning({ contactId: contactLabels.contactId });
+			if (removed.length) return false;
 
-		if (existing.length) {
-			await rls((tx) =>
-				tx
-					.delete(contactLabels)
-					.where(
-						and(
-							eq(contactLabels.contactId, contactId),
-							eq(contactLabels.labelId, favorite.id),
-						),
-					),
-			);
-
-			revalidatePath("/dashboard/contacts");
-			return { success: true, isFavorite: false };
-		}
-
-		await rls((tx) =>
-			tx.insert(contactLabels).values({
+			await tx.insert(contactLabels).values({
 				contactId,
 				labelId: favorite.id,
-			}),
-		);
+			});
+			return true;
+		});
 
-		revalidatePath("/dashboard/contacts");
-		return { success: true, isFavorite: true };
+		await afterLabelMutation("/dashboard/contacts");
+		return { success: true, isFavorite };
 	});
 }

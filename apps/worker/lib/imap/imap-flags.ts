@@ -18,8 +18,9 @@ export async function mailSetFlags(
 	const client = await initSmtpClient(mailbox.identityId, imapInstances);
 	if (!client?.authenticated || !client?.usable) return;
 
+	// Only the IMAP metadata is needed, not the full bodies.
 	const threadMessages = await db
-		.select()
+		.select({ id: messages.id, metaData: messages.metaData })
 		.from(messages)
 		.where(
 			and(eq(messages.threadId, threadId), eq(messages.mailboxId, mailboxId)),

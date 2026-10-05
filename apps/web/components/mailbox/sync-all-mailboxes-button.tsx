@@ -19,7 +19,7 @@ export default function SyncAllMailboxesButton({
 	const [syncing, setSyncing] = useState(false);
 
 	const syncAll = async () => {
-		const toastId = toast.loading("Sync für alle Postfächer wird gestartet…", {
+		const toastId = toast.loading("Starting sync for all mailboxes…", {
 			position: "bottom-left",
 		});
 
@@ -28,7 +28,7 @@ export default function SyncAllMailboxesButton({
 			const result = await deltaFetchAllMailboxes();
 
 			if (!result.success) {
-				toast.error(result.error ?? "Sync konnte nicht gestartet werden.", {
+				toast.error(result.error ?? "Could not start sync.", {
 					id: toastId,
 					position: "bottom-left",
 				});
@@ -36,7 +36,7 @@ export default function SyncAllMailboxesButton({
 			}
 
 			if (result.queued === 0) {
-				toast.info("Keine synchronisierbaren Postfächer gefunden.", {
+				toast.info("No mailboxes available to sync.", {
 					id: toastId,
 					position: "bottom-left",
 				});
@@ -44,7 +44,7 @@ export default function SyncAllMailboxesButton({
 			}
 
 			toast.success(
-				`Sync für ${result.queued} Postfach${result.queued === 1 ? "" : "er"} gestartet.`,
+				`Sync started for ${result.queued} mailbox${result.queued === 1 ? "" : "es"}.`,
 				{
 					id: toastId,
 					position: "bottom-left",
@@ -53,7 +53,7 @@ export default function SyncAllMailboxesButton({
 			router.refresh();
 		} catch (error) {
 			toast.error(
-				`Sync konnte nicht gestartet werden: ${
+				`Could not start sync: ${
 					error instanceof Error ? error.message : String(error)
 				}`,
 				{ id: toastId, position: "bottom-left" },
@@ -71,10 +71,10 @@ export default function SyncAllMailboxesButton({
 			onClick={syncAll}
 			disabled={disabled || syncing}
 			className="shrink-0"
-			title="Alle Postfächer synchronisieren"
+			title="Sync all mailboxes"
 		>
 			<RotateCw className={cn("h-4 w-4", syncing && "animate-spin")} />
-			<span>Alle synchronisieren</span>
+			<span>Sync all</span>
 		</Button>
 	);
 }

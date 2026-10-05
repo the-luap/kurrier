@@ -14,7 +14,7 @@ import {
 	Trash2,
 } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { toast } from "sonner";
 import ComposeMail from "@/components/mailbox/default/compose-mail";
 import MoveToFolder from "@/components/mailbox/default/move-to-folder";
@@ -62,7 +62,7 @@ function MailListHeader({
 
 	const identityIdRef = useRef<string | undefined>(activeMailbox?.identityId);
 	const mailboxIdRef = useRef<string | undefined>(activeMailbox?.id);
-	const mailboxKind = useRef<string | undefined>(activeMailbox?.kind);
+	const mailboxKind = activeMailbox?.kind;
 	useEffect(() => {
 		if (activeMailbox?.identityId)
 			identityIdRef.current = activeMailbox.identityId;
@@ -80,20 +80,20 @@ function MailListHeader({
 		if (mailboxSync) {
 			const identityId = identityIdRef.current;
 			if (!identityId) return;
-			const toastId = toast.loading("Sync wird gestartet…", {
+			const toastId = toast.loading("Starting sync…", {
 				position: "bottom-left",
 			});
 			try {
 				setReloading(true);
 				const result = await deltaFetch({ identityId });
 				if (!result.success || !result.jobId) {
-					toast.error(result.error ?? "Sync konnte nicht gestartet werden.", {
+					toast.error(result.error ?? "Could not start sync.", {
 						id: toastId,
 						position: "bottom-left",
 					});
 					return;
 				}
-				toast.loading("Sync läuft im Hintergrund…", {
+				toast.loading("Sync running in the background…", {
 					id: toastId,
 					position: "bottom-left",
 				});
@@ -107,7 +107,7 @@ function MailListHeader({
 					finalError = status.error ?? null;
 
 					if (status.state === "completed") {
-						toast.success("Sync abgeschlossen", {
+						toast.success("Sync completed", {
 							id: toastId,
 							position: "bottom-left",
 						});
@@ -117,18 +117,15 @@ function MailListHeader({
 					}
 
 					if (status.state === "failed") {
-						toast.error(
-							`Sync fehlgeschlagen${finalError ? `: ${finalError}` : ""}`,
-							{
-								id: toastId,
-								position: "bottom-left",
-							},
-						);
+						toast.error(`Sync failed${finalError ? `: ${finalError}` : ""}`, {
+							id: toastId,
+							position: "bottom-left",
+						});
 						return;
 					}
 				}
 
-				toast.info(`Sync läuft weiter im Hintergrund (${finalState})`, {
+				toast.info(`Sync still running in the background (${finalState})`, {
 					id: toastId,
 					position: "bottom-left",
 				});
@@ -136,7 +133,7 @@ function MailListHeader({
 				router.refresh();
 			} catch (error) {
 				toast.error(
-					`Sync konnte nicht gestartet/geprüft werden: ${error instanceof Error ? error.message : String(error)}`,
+					`Could not start or check sync: ${error instanceof Error ? error.message : String(error)}`,
 					{ id: toastId, position: "bottom-left" },
 				);
 			} finally {
@@ -145,7 +142,7 @@ function MailListHeader({
 		} else {
 			await revalidateMailbox("/mail");
 			router.refresh();
-			toast.success("Mailbox aktualisiert", { position: "bottom-left" });
+			toast.success("Mailbox refreshed", { position: "bottom-left" });
 		}
 	};
 
@@ -158,106 +155,95 @@ function MailListHeader({
 		}));
 	};
 
-	const markRead = async () => {
-		await markAsRead(
-			selectedThreads(),
-			String(mailboxIdRef.current),
-			!!mailboxSync,
-			true,
-		);
-		toast.success("Marked selected threads as read", {
-			position: "bottom-left",
+	const [isBusy, startBusy] = useTransition();
+
+	// Runs a bulk action with a busy state; failures surface as a toast
+	// instead of an unhandled rejection.
+	const runBulk = (
+		action: () => Promise<unknown>,
+		successMessage: string,
+		errorMessage: string,
+	) => {
+		startBusy(async () => {
+			try {
+				await action();
+				toast.success(successMessage, { position: "bottom-left" });
+				clearSelection();
+				router.refresh();
+			} catch (error) {
+				toast.error(errorMessage, {
+					description: error instanceof Error ? error.message : undefined,
+					position: "bottom-left",
+				});
+			}
 		});
-		clearSelection();
-		router.refresh();
 	};
 
-	const markUnread = async () => {
-		await markAsUnread(
-			selectedThreads(),
-			String(mailboxIdRef.current),
-			!!mailboxSync,
-			true,
-		);
-		toast.success("Marked selected threads as unread", {
-			position: "bottom-left",
-		});
-		clearSelection();
-		router.refresh();
-	};
+	const mailboxId = () => String(mailboxIdRef.current);
 
-	const starThreads = async (starred: boolean) => {
-		await setStarForThreads(
-			selectedThreads(),
-			String(mailboxIdRef.current),
-			starred,
-			!!mailboxSync,
-			true,
+	const markRead = () =>
+		runBulk(
+			() => markAsRead(selectedThreads(), mailboxId(), !!mailboxSync, true),
+			"Marked selected threads as read",
+			"Could not mark threads as read",
 		);
-		toast.success(
+
+	const markUnread = () =>
+		runBulk(
+			() => markAsUnread(selectedThreads(), mailboxId(), !!mailboxSync, true),
+			"Marked selected threads as unread",
+			"Could not mark threads as unread",
+		);
+
+	const starThreads = (starred: boolean) =>
+		runBulk(
+			() =>
+				setStarForThreads(
+					selectedThreads(),
+					mailboxId(),
+					starred,
+					!!mailboxSync,
+					true,
+				),
 			starred
 				? "Starred selected threads"
 				: "Removed stars from selected threads",
-			{ position: "bottom-left" },
+			starred ? "Could not star threads" : "Could not remove stars",
 		);
-		clearSelection();
-		router.refresh();
-	};
 
-	const spamThreads = async () => {
-		await moveToSpam(
-			selectedThreads(),
-			String(mailboxIdRef.current),
-			!!mailboxSync,
-			true,
+	const spamThreads = () =>
+		runBulk(
+			() => moveToSpam(selectedThreads(), mailboxId(), !!mailboxSync, true),
+			"Selected threads moved to Spam",
+			"Could not move threads to Spam",
 		);
-		toast.success("Selected threads moved to Spam", {
-			position: "bottom-left",
-		});
-		clearSelection();
-		router.refresh();
-	};
 
-	const deleteThreads = async () => {
-		if (mailboxKind.current === "trash") {
-			await removeTrash();
+	const deleteThreads = () => {
+		if (mailboxKind === "trash") {
+			runBulk(
+				() =>
+					deleteForever(selectedThreads(), mailboxId(), !!mailboxSync, true),
+				"Thread deleted forever",
+				"Could not delete threads",
+			);
 			return;
 		}
-		await moveToTrash(
-			selectedThreads(),
-			String(mailboxIdRef.current),
-			!!mailboxSync,
-			true,
+		runBulk(
+			() => moveToTrash(selectedThreads(), mailboxId(), !!mailboxSync, true),
+			"Messages moved to Trash",
+			"Could not move threads to Trash",
 		);
-		toast.success("Messages moved to Trash", { position: "bottom-left" });
-		clearSelection();
-		router.refresh();
 	};
 
-	const removeTrash = async () => {
-		await deleteForever(
-			selectedThreads(),
-			String(mailboxIdRef.current),
-			!!mailboxSync,
-			true,
+	const emptyTrash = () =>
+		runBulk(
+			() =>
+				deleteForever(null, mailboxId(), !!mailboxSync, true, {
+					emptyAll: true,
+				}),
+			"Trash emptied",
+			"Could not empty Trash",
 		);
-		toast.success("Thread deleted forever", { position: "bottom-left" });
-		clearSelection();
-		router.refresh();
-	};
-
-	const emptyTrash = async () => {
-		await deleteForever(
-			null,
-			String(mailboxIdRef.current),
-			!!mailboxSync,
-			true,
-			{
-				emptyAll: true,
-			},
-		);
-		toast.success("Trash removed successfully", { position: "bottom-left" });
-	};
 
 	const isMobile = useMediaQuery("(max-width: 768px)");
 	const pathName = usePathname();
@@ -318,23 +304,28 @@ function MailListHeader({
 						<button
 							type="button"
 							onClick={deleteThreads}
-							className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs hover:bg-muted"
+							disabled={isBusy}
+							className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs hover:bg-muted disabled:pointer-events-none disabled:opacity-50"
 							title="Delete"
 						>
 							<Trash2 className="h-4 w-4" />
 						</button>
-						<button
-							type="button"
-							onClick={spamThreads}
-							className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs hover:bg-muted"
-							title="Mark as spam"
-						>
-							<Ban className="h-4 w-4" />
-						</button>
+						{mailboxKind !== "spam" && (
+							<button
+								type="button"
+								onClick={spamThreads}
+								disabled={isBusy}
+								className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs hover:bg-muted disabled:pointer-events-none disabled:opacity-50"
+								title="Mark as spam"
+							>
+								<Ban className="h-4 w-4" />
+							</button>
+						)}
 						<button
 							type="button"
 							onClick={() => starThreads(true)}
-							className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs hover:bg-muted"
+							disabled={isBusy}
+							className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs hover:bg-muted disabled:pointer-events-none disabled:opacity-50"
 							title="Star"
 						>
 							<Star className="h-4 w-4" />
@@ -342,7 +333,8 @@ function MailListHeader({
 						<button
 							type="button"
 							onClick={() => starThreads(false)}
-							className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs hover:bg-muted"
+							disabled={isBusy}
+							className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs hover:bg-muted disabled:pointer-events-none disabled:opacity-50"
 							title="Unstar"
 						>
 							<StarOff className="h-4 w-4" />
@@ -350,7 +342,8 @@ function MailListHeader({
 						<button
 							type="button"
 							onClick={markRead}
-							className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs hover:bg-muted"
+							disabled={isBusy}
+							className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs hover:bg-muted disabled:pointer-events-none disabled:opacity-50"
 							title="Mark read"
 						>
 							<MailOpen className="h-4 w-4" />
@@ -358,7 +351,8 @@ function MailListHeader({
 						<button
 							type="button"
 							onClick={markUnread}
-							className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs hover:bg-muted"
+							disabled={isBusy}
+							className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs hover:bg-muted disabled:pointer-events-none disabled:opacity-50"
 							title="Mark unread"
 						>
 							<Mail className="h-4 w-4" />
@@ -369,7 +363,7 @@ function MailListHeader({
 				</div>
 			</div>
 
-			{mailboxKind.current === "trash" && (
+			{mailboxKind === "trash" && (
 				<div
 					className={
 						"flex p-2 text-sm text-muted-foreground justify-center mb-3  mx-2 rounded items-center"
@@ -381,14 +375,16 @@ function MailListHeader({
 					</span>
 					<AlertDialog>
 						<AlertDialogTrigger asChild={true} className={"-mx-2"}>
-							<Button variant={"transparent"}>Empty Bin Now</Button>
+							<Button variant={"transparent"} disabled={isBusy}>
+								Empty Bin Now
+							</Button>
 						</AlertDialogTrigger>
 						<AlertDialogContent>
 							<AlertDialogHeader>
 								<AlertDialogTitle>Are you absolutely sure?</AlertDialogTitle>
 								<AlertDialogDescription>
-									This action cannot be undone. This will permanently delete
-									your account and remove your data from our servers.
+									This action cannot be undone. All messages in the Trash will
+									be permanently deleted.
 								</AlertDialogDescription>
 							</AlertDialogHeader>
 							<AlertDialogFooter>

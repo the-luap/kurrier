@@ -19,6 +19,7 @@ import {
 	DynamicContextProvider,
 	useDynamicContext,
 } from "@/hooks/use-dynamic-context";
+import { fetchAiSettings } from "@/lib/actions/dashboard";
 import {
 	type DraftPayload,
 	deleteDraft,
@@ -92,6 +93,29 @@ const EmailEditor = forwardRef<EmailEditorHandle, Props>(
 		const textEditorRef = useRef<TextEditorHandle>(null);
 		const [aiInstruction, setAiInstruction] = React.useState("");
 		const [isAiPending, setIsAiPending] = React.useState(false);
+		const [aiEnabled, setAiEnabled] = React.useState(false);
+
+		// Show the AI panel only when the user enabled the AI assistant.
+		useEffect(() => {
+			let cancelled = false;
+			fetchAiSettings()
+				.then((settings) => {
+					if (!cancelled) setAiEnabled(Boolean(settings?.enabled));
+				})
+				.catch(() => {
+					if (!cancelled) setAiEnabled(false);
+				});
+			return () => {
+				cancelled = true;
+			};
+		}, []);
+
+		// Parents pass handleClose inline; keep the latest one in a ref so the
+		// send-result effect does not re-run (and re-toast) on every render.
+		const handleCloseRef = useRef(handleClose);
+		useEffect(() => {
+			handleCloseRef.current = handleClose;
+		}, [handleClose]);
 
 		useImperativeHandle(
 			ref,
@@ -198,7 +222,11 @@ const EmailEditor = forwardRef<EmailEditorHandle, Props>(
 			return true;
 		};
 
-		const scheduleSave = () => {
+		const scheduleSave = (event?: React.SyntheticEvent) => {
+			// The AI instruction box is not part of the draft.
+			const target = event?.target;
+			if (target instanceof Element && target.closest("[data-no-autosave]"))
+				return;
 			// Hidden inputs (recipients, attachments) update after React renders.
 			requestAnimationFrame(() => {
 				takeSnapshot();
@@ -239,13 +267,19 @@ const EmailEditor = forwardRef<EmailEditorHandle, Props>(
 		const handleGenerateAiSuggestion = async () => {
 			setIsAiPending(true);
 			try {
+				// With an id the server loads the original body itself (the client
+				// only has a reduced copy of the message without text/html).
+				const originalMessageId = message?.id ? String(message.id) : undefined;
 				const result = await generateAiReplySuggestion({
 					mode: showEditorMode,
 					userInstruction: aiInstruction,
 					currentHtml: textEditorRef.current?.getHTML() || "",
+					originalMessageId,
 					originalSubject: message?.subject,
-					originalText: message?.text || message?.snippet,
-					originalHtml: message?.html,
+					originalText: originalMessageId
+						? undefined
+						: message?.text || message?.snippet,
+					originalHtml: originalMessageId ? undefined : message?.html,
 					originalFrom: message?.from,
 				});
 
@@ -265,11 +299,25 @@ const EmailEditor = forwardRef<EmailEditorHandle, Props>(
 					return;
 				}
 
+				const existingText = textEditorRef.current?.getText().trim() ?? "";
+				if (
+					existingText &&
+					!window.confirm(
+						"Replace the text you have already written with the AI draft?",
+					)
+				) {
+					return;
+				}
 				textEditorRef.current?.setHTML(plainTextToHtml(suggestion));
 				textEditorRef.current?.focus("end");
 				scheduleSave();
 				toast.success("AI suggestion inserted", {
 					description: "Review and edit it before sending.",
+				});
+			} catch (error) {
+				toast.error("AI suggestion failed", {
+					description:
+						error instanceof Error ? error.message : "Unexpected error.",
 				});
 			} finally {
 				setIsAiPending(false);
@@ -300,7 +348,7 @@ const EmailEditor = forwardRef<EmailEditorHandle, Props>(
 			await saveChainRef.current;
 			if (draftIdRef.current) await deleteDraft(draftIdRef.current);
 			draftIdRef.current = null;
-			handleClose();
+			handleCloseRef.current();
 			toast.success("Draft discarded", { position: "bottom-left" });
 		};
 
@@ -317,10 +365,10 @@ const EmailEditor = forwardRef<EmailEditorHandle, Props>(
 					if (draftIdRef.current) void deleteDraft(draftIdRef.current);
 					draftIdRef.current = null;
 				});
-				handleClose();
+				handleCloseRef.current();
 				toast.success(formState.message || "Message sent");
 			}
-		}, [formState, handleClose]);
+		}, [formState]);
 
 		return (
 			<div className="mt-4" tabIndex={-1}>
@@ -395,34 +443,39 @@ const EmailEditor = forwardRef<EmailEditorHandle, Props>(
 										: ""
 							}
 						/>
-						<div className="border-b bg-muted/20 px-3 py-2 space-y-2">
-							<div className="flex flex-col gap-2 sm:flex-row sm:items-end">
-								<Textarea
-									aria-label="AI reply instruction"
-									value={aiInstruction}
-									onChange={(event) =>
-										setAiInstruction(event.currentTarget.value)
-									}
-									placeholder="AI reply notes: e.g. höflich absagen, kurz auf Deutsch, Termin nächste Woche vorschlagen…"
-									autosize
-									minRows={1}
-									maxRows={4}
-									className="flex-1"
-								/>
-								<Button
-									type="button"
-									variant="light"
-									loading={isAiPending}
-									onClick={handleGenerateAiSuggestion}
-								>
-									AI draft
-								</Button>
+						{aiEnabled && (
+							<div
+								className="border-b bg-muted/20 px-3 py-2 space-y-2"
+								data-no-autosave
+							>
+								<div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+									<Textarea
+										aria-label="AI reply instruction"
+										value={aiInstruction}
+										onChange={(event) =>
+											setAiInstruction(event.currentTarget.value)
+										}
+										placeholder="AI reply notes: e.g. politely decline, keep it short, suggest a meeting next week…"
+										autosize
+										minRows={1}
+										maxRows={4}
+										className="flex-1"
+									/>
+									<Button
+										type="button"
+										variant="light"
+										loading={isAiPending}
+										onClick={handleGenerateAiSuggestion}
+									>
+										AI draft
+									</Button>
+								</div>
+								<p className="text-xs text-muted-foreground">
+									Uses the configured AI provider to draft text into the editor.
+									Nothing is sent until you review and press Send.
+								</p>
 							</div>
-							<p className="text-xs text-muted-foreground">
-								Uses the configured AI provider to draft text into the editor.
-								Nothing is sent until you review and press Send.
-							</p>
-						</div>
+						)}
 						<TextEditor
 							name={"html"}
 							ref={textEditorRef}

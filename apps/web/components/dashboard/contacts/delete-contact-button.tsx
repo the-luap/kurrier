@@ -8,7 +8,7 @@ import { ContactEntity } from "@db";
 import { useRouter } from "next/navigation";
 
 type DeleteContactButtonProps = {
-	contact: ContactEntity;
+	contact: Pick<ContactEntity, "id" | "firstName" | "lastName">;
 	onDeleteAction: (id: string) => Promise<{ success: boolean }>;
 };
 
@@ -48,6 +48,8 @@ function DeleteContactButton({
 	return (
 		<ActionIcon
 			onClick={confirmDeleteContact}
+			aria-label="Delete contact"
+			title="Delete contact"
 			size="md"
 			className={"-mt-1"}
 			variant={"subtle"}

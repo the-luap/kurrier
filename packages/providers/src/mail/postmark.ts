@@ -311,7 +311,7 @@ export class PostmarkMailer implements Mailer {
 			let inboundConfigured: { updated?: boolean } | undefined;
 			if (isVerified && hook) {
 				const server = await this.serverClient.getServer();
-				const res = await this.serverClient.editServer({
+				await this.serverClient.editServer({
 					Name: server.Name,
 					InboundHookUrl: hook,
 					InboundDomain: server.InboundDomain || domain,

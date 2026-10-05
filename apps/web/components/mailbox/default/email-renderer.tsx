@@ -1,8 +1,10 @@
-// @ts-nocheck
 "use client";
 import { getMessageAddress, getMessageName } from "@common/mail-client";
-import type { MessageAttachmentEntity, MessageEntity } from "@db";
-import { Temporal } from "@js-temporal/polyfill";
+import type {
+	MailSubscriptionEntity,
+	MessageAttachmentEntity,
+	MessageEntity,
+} from "@db";
 import { ActionIcon, Button, Menu, Modal } from "@mantine/core";
 import { useDisclosure } from "@mantine/hooks";
 import type { PublicConfig } from "@schema";
@@ -28,10 +30,10 @@ import type {
 	EmailEditorHandle,
 	InitialDraft,
 } from "@/components/mailbox/default/editor/email-editor";
+import type { AuthStatus } from "@/components/mailbox/default/auth-status";
 import MailUnsubscriber from "@/components/mailbox/default/mail-unsubscriber";
 import {
 	type FetchIdentityMailboxListResult,
-	type FetchThreadMailSubsResult,
 	fetchDraftForMessage,
 	fetchIdentityMailboxList,
 	fetchMailbox,
@@ -68,43 +70,29 @@ function formatAddressList(message: MessageEntity, field: "to" | "cc"): string {
 		.join(", ");
 }
 
-function getHeaderValue(headers: unknown, name: string) {
-	if (!headers || typeof headers !== "object") return "";
-	const record = headers as Record<string, unknown>;
-	const direct =
-		record[name] ?? record[name.toLowerCase()] ?? record[name.toUpperCase()];
-	if (typeof direct === "string") return direct;
-	if (direct && typeof direct === "object" && "value" in direct) {
-		return String((direct as { value?: unknown }).value ?? "");
-	}
-	return "";
-}
-
-function getAuthStatus(headers: unknown) {
-	const authResults = getHeaderValue(headers, "authentication-results");
-	const receivedSpf = getHeaderValue(headers, "received-spf");
-	const dkim = /dkim=\s*pass/i.test(authResults)
-		? "pass"
-		: /dkim=\s*fail/i.test(authResults)
-			? "fail"
-			: "unknown";
-	const dmarc = /dmarc=\s*pass/i.test(authResults)
-		? "pass"
-		: /dmarc=\s*fail/i.test(authResults)
-			? "fail"
-			: "unknown";
-	const spf =
-		/spf=\s*pass/i.test(authResults) || /pass/i.test(receivedSpf)
-			? "pass"
-			: /spf=\s*fail/i.test(authResults) || /fail/i.test(receivedSpf)
-				? "fail"
-				: "unknown";
-	return { authResults, dkim, dmarc, spf };
-}
+// Viewer-local formatting (same output as the former Temporal polyfill code,
+// without shipping the polyfill to the thread view).
+const headerDateFormatter = new Intl.DateTimeFormat("en-US", {
+	day: "2-digit",
+	month: "short",
+	year: "numeric",
+	hour: "2-digit",
+	minute: "2-digit",
+	hour12: true,
+});
+const originalDateFormatter = new Intl.DateTimeFormat("en-GB", {
+	day: "numeric",
+	month: "long",
+	year: "numeric",
+	hour: "2-digit",
+	minute: "2-digit",
+	hour12: false,
+});
 
 function authClass(value: string) {
 	if (value === "pass") return "text-green-700 dark:text-green-400";
 	if (value === "fail") return "text-red-700 dark:text-red-400";
+	if (value === "warn") return "text-amber-700 dark:text-amber-400";
 	return "text-muted-foreground";
 }
 
@@ -170,6 +158,8 @@ function EmailRenderer({
 	markSmtp,
 	activeMailboxId,
 	mailSubscription,
+	authStatus,
+	attachmentUrls,
 	children,
 }: {
 	threadIndex: number;
@@ -180,10 +170,19 @@ function EmailRenderer({
 	threadId: string;
 	markSmtp: boolean;
 	activeMailboxId: string;
-	mailSubscription: FetchThreadMailSubsResult["byMessageId"] | null;
+	mailSubscription: MailSubscriptionEntity | null;
+	authStatus?: AuthStatus | null;
+	/** Server-signed download URLs by attachment id. */
+	attachmentUrls?: Record<string, string>;
 	children?: React.ReactNode;
 }) {
 	const receivedAt = message.date ?? message.createdAt;
+	// thread-item passes a trimmed header object ({ from, to, subject }).
+	const headerInfo = (message.headersJson ?? {}) as {
+		from?: { text?: string };
+		to?: { text?: string };
+		subject?: string;
+	};
 	const [formatted, setFormatted] = useState("");
 	const [formattedTime, setFormattedTime] = useState("");
 
@@ -194,7 +193,6 @@ function EmailRenderer({
 	const router = useRouter();
 	const [isRead, setIsRead] = useState(Boolean(message.seen));
 	const [isMutating, setIsMutating] = useState(false);
-	const authStatus = getAuthStatus(message.headersJson);
 
 	const [sentMailboxId, setSentMailboxId] = useState<string | undefined>(
 		undefined,
@@ -364,60 +362,41 @@ function EmailRenderer({
 	const [emailString, setEmailString] = useState<string | null>(null);
 
 	useEffect(() => {
-		if (opened) {
-			if (!message.rawStorageKey) {
-				setEmailString("Raw .eml source is not available for this message.");
-				return;
-			}
-			const supabase = createClient(publicConfig);
-			supabase.storage
-				.from("attachments")
-				.download(String(message.rawStorageKey))
-				.then(({ data, error }) => {
-					if (error) {
-						console.error("Error downloading original message:", error);
-						return;
-					}
-					if (data) {
-						data.text().then((raw) => {
-							setEmailString(
-								raw.length > 200_000
-									? `${raw.slice(0, 200_000)}\n\n… truncated, use "Download" for the full message.`
-									: raw,
-							);
-						});
-					}
-				});
+		if (!opened || emailString) return;
+		if (!message.rawStorageKey) {
+			setEmailString("Raw .eml source is not available for this message.");
+			return;
 		}
-	}, [opened, publicConfig, message.rawStorageKey]);
+		// Ignore a late response once the modal is closed / message changes.
+		let cancelled = false;
+		const supabase = createClient(publicConfig);
+		supabase.storage
+			.from("attachments")
+			.download(String(message.rawStorageKey))
+			.then(async ({ data, error }) => {
+				if (error) {
+					console.error("Error downloading original message:", error);
+					return;
+				}
+				if (!data) return;
+				const raw = await data.text();
+				if (cancelled) return;
+				setEmailString(
+					raw.length > 200_000
+						? `${raw.slice(0, 200_000)}\n\n… truncated, use "Download" for the full message.`
+						: raw,
+				);
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [opened, emailString, publicConfig, message.rawStorageKey]);
 
 	useEffect(() => {
-		const instant = Temporal.Instant.from(new Date(receivedAt).toISOString());
-		setFormatted(
-			instant
-				.toZonedDateTimeISO(Temporal.Now.timeZoneId())
-				.toLocaleString("en-US", {
-					day: "2-digit",
-					month: "short",
-					year: "numeric",
-					hour: "2-digit",
-					minute: "2-digit",
-					hour12: true,
-				}),
-		);
-		setFormattedTime(
-			instant
-				.toZonedDateTimeISO(Temporal.Now.timeZoneId())
-				.toLocaleString("en-GB", {
-					day: "numeric",
-					month: "long",
-					year: "numeric",
-					hour: "2-digit",
-					minute: "2-digit",
-					hour12: false,
-				})
-				.replace(",", " at"),
-		);
+		const date = new Date(receivedAt);
+		if (Number.isNaN(date.getTime())) return;
+		setFormatted(headerDateFormatter.format(date));
+		setFormattedTime(originalDateFormatter.format(date).replace(",", " at"));
 	}, [receivedAt]);
 
 	return (
@@ -447,9 +426,7 @@ function EmailRenderer({
 						<div className="bg-muted px-3 py-2 font-medium text-muted-foreground">
 							From
 						</div>
-						<div className="px-3 py-2">
-							{message?.headersJson?.from?.text ?? ""}
-						</div>
+						<div className="px-3 py-2">{headerInfo.from?.text ?? ""}</div>
 					</div>
 
 					<div className="grid grid-cols-[160px_1fr] border-b">
@@ -457,9 +434,7 @@ function EmailRenderer({
 							To
 						</div>
 						{/*<div className="px-3 py-2">suisse@dinebot.io</div>*/}
-						<div className="px-3 py-2">
-							{message?.headersJson?.to?.text ?? ""}
-						</div>
+						<div className="px-3 py-2">{headerInfo.to?.text ?? ""}</div>
 					</div>
 
 					<div className="grid grid-cols-[160px_1fr] border-b">
@@ -468,23 +443,24 @@ function EmailRenderer({
 						</div>
 						<div className="px-3 py-2">
 							{/*Google Workspace: Your invoice is available for dinebot.io*/}
-							{message?.headersJson?.subject}
+							{headerInfo.subject}
 						</div>
 					</div>
 
-					{(["spf", "dkim", "dmarc"] as const).map((kind) => (
-						<div key={kind} className="grid grid-cols-[160px_1fr] border-b">
-							<div className="bg-muted px-3 py-2 font-medium uppercase text-muted-foreground">
-								{kind}
+					{authStatus &&
+						(["spf", "dkim", "dmarc"] as const).map((kind) => (
+							<div key={kind} className="grid grid-cols-[160px_1fr] border-b">
+								<div className="bg-muted px-3 py-2 font-medium uppercase text-muted-foreground">
+									{kind}
+								</div>
+								<div
+									className={`px-3 py-2 font-semibold uppercase ${authClass(authStatus[kind])}`}
+								>
+									{authStatus[kind]}
+								</div>
 							</div>
-							<div
-								className={`px-3 py-2 font-semibold uppercase ${authClass(authStatus[kind])}`}
-							>
-								{authStatus[kind]}
-							</div>
-						</div>
-					))}
-					{authStatus.authResults && (
+						))}
+					{authStatus?.authResults && (
 						<div className="grid grid-cols-[160px_1fr]">
 							<div className="bg-muted px-3 py-2 font-medium text-muted-foreground">
 								Authentication-Results
@@ -594,16 +570,18 @@ function EmailRenderer({
 							</div>
 						</div>
 					)}
-					<div className="mt-1 flex gap-1 text-[11px] uppercase">
-						{(["spf", "dkim", "dmarc"] as const).map((kind) => (
-							<span
-								key={kind}
-								className={`rounded border px-1.5 py-0.5 ${authClass(authStatus[kind])}`}
-							>
-								{kind} {authStatus[kind]}
-							</span>
-						))}
-					</div>
+					{authStatus && (
+						<div className="mt-1 flex gap-1 text-[11px] uppercase">
+							{(["spf", "dkim", "dmarc"] as const).map((kind) => (
+								<span
+									key={kind}
+									className={`rounded border px-1.5 py-0.5 ${authClass(authStatus[kind])}`}
+								>
+									{kind} {authStatus[kind]}
+								</span>
+							))}
+						</div>
+					)}
 				</div>
 
 				{/*<div className={"col-span-6 my-1"}>*/}
@@ -730,6 +708,7 @@ function EmailRenderer({
 							<EditorAttachmentItem
 								key={attachment.id}
 								attachment={attachment}
+								signedUrl={attachmentUrls?.[String(attachment.id)]}
 								publicConfig={publicConfig}
 							/>
 						))}

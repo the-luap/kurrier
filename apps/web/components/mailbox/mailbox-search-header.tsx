@@ -1,42 +1,66 @@
-import React from 'react';
-import { SidebarTrigger } from "@/components/ui/sidebar";
-import { Separator } from "@/components/ui/separator";
+import { type ReactNode, Suspense } from "react";
 import MailboxSearch from "@/components/mailbox/default/mailbox-search";
-import { isSignedIn } from "@/lib/actions/auth";
+import { getIdentityByPublicId } from "@/components/mailbox/identity-by-public-id";
 import IdentitySettingsLink from "@/components/mailbox/settings/identity-settings";
-import { rlsClient } from "@/lib/actions/clients";
-import { identities } from "@db";
-import { eq } from "drizzle-orm";
+import { Separator } from "@/components/ui/separator";
+import { SidebarTrigger } from "@/components/ui/sidebar";
+import { isSignedIn } from "@/lib/actions/auth";
 
-async function MailboxSearchHeader({params}: {params: Promise<Record<string, string>>}) {
-    const { identityPublicId, mailboxSlug } = await params;
-    const user = await isSignedIn();
+type Params = Promise<Record<string, string>>;
 
-    const rls = await rlsClient();
-    const [identity] = await rls((tx) =>
-        tx
-            .select({
-                value: identities.value,
-            })
-            .from(identities)
-            .where(eq(identities.publicId, identityPublicId))
-    );
+const HEADER_CLASS =
+	"bg-background sticky top-0 flex shrink-0 items-center gap-2 border-b p-4 z-50";
 
-    const identityLabel = identity?.value;
+function HeaderShell({ children }: { children?: ReactNode }) {
+	return (
+		<header className={HEADER_CLASS}>
+			<SidebarTrigger className="-ml-1" />
+			<Separator
+				orientation="vertical"
+				className="mr-2 data-[orientation=vertical]:h-4"
+			/>
+			{children}
+		</header>
+	);
+}
 
-    return <header className={"bg-background sticky top-0 flex shrink-0 items-center gap-2 border-b p-4 z-50"}>
-        <SidebarTrigger className="-ml-1" />
-        <Separator
-            orientation="vertical"
-            className="mr-2 data-[orientation=vertical]:h-4"
-        />
-        <MailboxSearch
-            user={user}
-            publicId={identityPublicId}
-            mailboxSlug={mailboxSlug}
-        />
-        <IdentitySettingsLink identityLabel={identityLabel} />
-    </header>
+async function MailboxSearchHeaderContent({ params }: { params: Params }) {
+	const { identityPublicId, mailboxSlug } = await params;
+	const [user, identity] = await Promise.all([
+		isSignedIn(),
+		getIdentityByPublicId(identityPublicId),
+	]);
+
+	return (
+		<HeaderShell>
+			<MailboxSearch
+				user={user}
+				publicId={identityPublicId}
+				mailboxSlug={mailboxSlug}
+			/>
+			<IdentitySettingsLink identityLabel={identity?.value ?? ""} />
+		</HeaderShell>
+	);
+}
+
+// The header has its own Suspense boundary so the layout (and the page's
+// loading.tsx below it) can render immediately instead of waiting for the
+// auth + identity lookups.
+function MailboxSearchHeader({ params }: { params: Params }) {
+	return (
+		<Suspense
+			fallback={
+				<HeaderShell>
+					<div
+						aria-hidden
+						className="h-[42px] w-full animate-pulse rounded-lg border bg-muted/30"
+					/>
+				</HeaderShell>
+			}
+		>
+			<MailboxSearchHeaderContent params={params} />
+		</Suspense>
+	);
 }
 
 export default MailboxSearchHeader;

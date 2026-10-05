@@ -15,19 +15,30 @@ async function Page({
 	const { identityPublicId, mailboxSlug } = await params;
 	const publicConfig = getPublicEnv();
 	const resolvedMailboxSlug = mailboxSlug || "inbox";
-	const mailboxPromise = fetchMailbox(
-		identityPublicId,
-		resolvedMailboxSlug,
-	);
+	const mailboxPromise = fetchMailbox(identityPublicId, resolvedMailboxSlug);
 	const mailboxThreadsPromise = fetchMailboxThreads(
 		identityPublicId,
 		resolvedMailboxSlug,
 		Number(page),
 	);
 	const globalLabelsPromise = fetchLabels();
+	// Start the label lookup as soon as the threads arrive instead of after
+	// every other request has finished.
+	const labelsByThreadIdPromise = mailboxThreadsPromise.then(
+		fetchMailboxThreadLabels,
+	);
 
-	const [{ activeMailbox, count, mailboxSync }, mailboxThreads, globalLabels] =
-		await Promise.all([mailboxPromise, mailboxThreadsPromise, globalLabelsPromise]);
+	const [
+		{ activeMailbox, count, mailboxSync },
+		mailboxThreads,
+		globalLabels,
+		labelsByThreadId,
+	] = await Promise.all([
+		mailboxPromise,
+		mailboxThreadsPromise,
+		globalLabelsPromise,
+		labelsByThreadIdPromise,
+	]);
 
 	if (!activeMailbox) {
 		return (
@@ -42,8 +53,6 @@ async function Page({
 			</div>
 		);
 	}
-
-	const labelsByThreadId = await fetchMailboxThreadLabels(mailboxThreads);
 
 	return (
 		<>

@@ -2,35 +2,17 @@
 
 import * as crypto from "node:crypto";
 import { APP_VERSION } from "@common";
-import { type FormState, getPublicEnv, getServerEnv } from "@schema";
+import { decode } from "@db";
+import { type FormState, getPublicEnv } from "@schema";
 import type { AuthSession } from "@supabase/supabase-js";
-import { Queue, QueueEvents } from "bullmq";
 import { redirect } from "next/navigation";
 import { cache } from "react";
-import { getRedis } from "@/lib/actions/get-redis";
+import { addJobAndWait } from "@/lib/actions/get-redis";
 import { createClient } from "@/lib/supabase/server";
 import { formDataToJson } from "@/lib/utils";
 
 const initProviders = async (userId: string) => {
-	const { REDIS_PASSWORD, REDIS_HOST, REDIS_PORT } = getServerEnv();
-	const redisConnection = {
-		connection: {
-			host: REDIS_HOST || "redis",
-			port: Number(REDIS_PORT || 6379),
-			password: REDIS_PASSWORD,
-			maxRetriesPerRequest: 1,
-			enableOfflineQueue: false,
-			retryStrategy: () => null,
-		},
-	};
-	const commonWorkerQueue = new Queue("common-worker", redisConnection);
-	const commonWorkerEvents = new QueueEvents("common-worker", redisConnection);
-	commonWorkerQueue.on("error", () => {});
-	commonWorkerEvents.on("error", () => {});
-	await commonWorkerEvents.waitUntilReady();
-
-	const job = await commonWorkerQueue.add("sync-providers", { userId });
-	await job.waitUntilFinished(commonWorkerEvents);
+	await addJobAndWait("common-worker", "sync-providers", { userId });
 };
 
 export async function login(
@@ -59,8 +41,8 @@ export async function login(
 }
 
 const applyPendingMigrations = async (userId: string) => {
-	const { migrationWorkerQueue, migrationWorkerEvents } = await getRedis();
-	const job = await migrationWorkerQueue.add(
+	await addJobAndWait(
+		"migration-worker",
 		"migration:run-for-user-after-signup",
 		{ userId },
 		{
@@ -74,8 +56,6 @@ const applyPendingMigrations = async (userId: string) => {
 			jobId: `migration:${userId}:${APP_VERSION}`,
 		},
 	);
-	await job.waitUntilFinished(migrationWorkerEvents);
-	return;
 };
 
 export async function signup(
@@ -135,6 +115,16 @@ export const currentSession = cache(async (): Promise<AuthSession | null> => {
 		const {
 			data: { session },
 		} = await client.auth.getSession();
+		if (!session?.access_token) return null;
+
+		// getSession() only reads the cookie and does not verify the JWT
+		// signature. The token's claims are used for RLS, so make sure the
+		// auth server accepts it (getUser is cached per request) and that it
+		// belongs to that user.
+		const user = await isSignedIn();
+		const claims = decode(session.access_token);
+		if (!user || claims.sub !== user.id) return null;
+
 		return session as AuthSession | null;
 	} catch (error) {
 		console.warn("Unable to load auth session", error);

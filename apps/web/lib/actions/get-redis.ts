@@ -1,5 +1,5 @@
 import { getServerEnv } from "@schema";
-import { Queue, QueueEvents } from "bullmq";
+import { type JobsOptions, Queue, QueueEvents } from "bullmq";
 
 type RedisConnection = {
 	connection: {
@@ -27,76 +27,109 @@ function getRedisConnection(): RedisConnection {
 	};
 }
 
-function silenceRedisErrors<
-	T extends { on: (event: "error", cb: () => void) => T },
->(client: T): T {
-	return client.on("error", () => {
-		// Redis-backed queues are best-effort at render time; callers surface failures.
-	});
+export type QueueName =
+	| "smtp-worker"
+	| "send-mail"
+	| "search-ingest"
+	| "migration-worker"
+	| "dav-worker"
+	| "common-worker";
+
+type QueuePair = { queue: Queue; events?: QueueEvents };
+
+// Queues and their event streams are shared per process. Creating them per
+// call leaked ~10 Redis connections for every mail action. The connections
+// don't reconnect (retryStrategy: null), so a client that errors is dropped
+// and recreated on the next call.
+const globalQueues = globalThis as unknown as {
+	__kurrierQueues?: Map<QueueName, QueuePair>;
+};
+if (!globalQueues.__kurrierQueues) globalQueues.__kurrierQueues = new Map();
+const queues = globalQueues.__kurrierQueues;
+
+function dropQueue(name: QueueName, pair: QueuePair) {
+	if (queues.get(name) !== pair) return;
+	queues.delete(name);
+	pair.queue.close().catch(() => {});
+	pair.events?.close().catch(() => {});
 }
 
-export const getRedis = async () => {
-	const redisConnection = getRedisConnection();
-	const smtpQueue = silenceRedisErrors(
-		new Queue("smtp-worker", redisConnection),
-	);
-	const smtpEvents = silenceRedisErrors(
-		new QueueEvents("smtp-worker", redisConnection),
-	);
+function getPair(name: QueueName): QueuePair {
+	let pair = queues.get(name);
+	if (!pair) {
+		const created: QueuePair = {
+			queue: new Queue(name, getRedisConnection()),
+		};
+		// Redis-backed queues are best-effort at render time; callers surface failures.
+		created.queue.on("error", () => dropQueue(name, created));
+		// A clean socket close (e.g. Redis restart) emits no "error".
+		created.queue.on("ioredis:close", () => dropQueue(name, created));
+		queues.set(name, created);
+		pair = created;
+	}
+	return pair;
+}
 
-	const sendMailQueue = silenceRedisErrors(
-		new Queue("send-mail", redisConnection),
-	);
-	const sendMailEvents = silenceRedisErrors(
-		new QueueEvents("send-mail", redisConnection),
-	);
+export function getQueue(name: QueueName): Queue {
+	return getPair(name).queue;
+}
 
-	const searchIngestQueue = silenceRedisErrors(
-		new Queue("search-ingest", redisConnection),
-	);
-	const searchIngestEvents = silenceRedisErrors(
-		new QueueEvents("search-ingest", redisConnection),
-	);
+export async function getQueueEvents(name: QueueName): Promise<QueueEvents> {
+	const pair = getPair(name);
+	if (!pair.events) {
+		const events = new QueueEvents(name, getRedisConnection());
+		events.on("error", () => dropQueue(name, pair));
+		events.on("ioredis:close", () => dropQueue(name, pair));
+		pair.events = events;
+	}
+	try {
+		await pair.events.waitUntilReady();
+	} catch (error) {
+		dropQueue(name, pair);
+		throw error;
+	}
+	return pair.events;
+}
 
-	const migrationWorkerQueue = silenceRedisErrors(
-		new Queue("migration-worker", redisConnection),
-	);
-	const migrationWorkerEvents = silenceRedisErrors(
-		new QueueEvents("migration-worker", redisConnection),
-	);
+/** Queue that has finished connecting (fails fast while Redis is down). */
+export async function getReadyQueue(name: QueueName): Promise<Queue> {
+	const pair = getPair(name);
+	try {
+		await pair.queue.waitUntilReady();
+	} catch (error) {
+		dropQueue(name, pair);
+		throw error;
+	}
+	return pair.queue;
+}
 
-	const davQueue = silenceRedisErrors(new Queue("dav-worker", redisConnection));
-	const davEvents = silenceRedisErrors(
-		new QueueEvents("dav-worker", redisConnection),
-	);
+export const getSmtpQueue = async () => ({
+	smtpQueue: await getReadyQueue("smtp-worker"),
+});
 
-	await smtpEvents.waitUntilReady();
-	await sendMailEvents.waitUntilReady();
-	await searchIngestEvents.waitUntilReady();
-	await davEvents.waitUntilReady();
-	await migrationWorkerEvents.waitUntilReady();
+/**
+ * Queue plus its event stream, for callers that wait for a job result.
+ * Only connects the one stream that is needed. The events are subscribed before the caller adds a job, so
+ * no completion event is missed.
+ */
+export async function getQueueWithEvents(name: QueueName) {
+	const events = await getQueueEvents(name);
+	return { queue: getQueue(name), events };
+}
 
-	return {
-		smtpQueue,
-		smtpEvents,
-		sendMailQueue,
-		sendMailEvents,
-		searchIngestQueue,
-		searchIngestEvents,
-		davQueue,
-		davEvents,
-		migrationWorkerQueue,
-		migrationWorkerEvents,
-	};
-};
+/** Add a job and wait for its return value. */
+export async function addJobAndWait<T = unknown>(
+	name: QueueName,
+	jobName: string,
+	data: unknown,
+	opts?: JobsOptions,
+): Promise<T> {
+	const { queue, events } = await getQueueWithEvents(name);
+	const job = await queue.add(jobName, data, opts);
+	return (await job.waitUntilFinished(events)) as T;
+}
 
-export const getSmtpQueue = async () => {
-	const redisConnection = getRedisConnection();
-	const smtpQueue = silenceRedisErrors(
-		new Queue("smtp-worker", redisConnection),
-	);
-
-	await smtpQueue.waitUntilReady();
-
-	return { smtpQueue };
-};
+export const RETRY_JOB_OPTS = {
+	attempts: 3,
+	backoff: { type: "exponential", delay: 1500 },
+} satisfies JobsOptions;

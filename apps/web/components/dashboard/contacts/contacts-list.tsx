@@ -6,7 +6,11 @@ import { useParams } from "next/navigation";
 import { Star } from "lucide-react";
 import ContactListAvatar from "@/components/dashboard/contacts/contact-list-avatar";
 
-export type ContactWithFavorite = ContactEntity & {
+/** Slim contact shape used by the list (only what it renders). */
+export type ContactWithFavorite = Pick<
+	ContactEntity,
+	"id" | "publicId" | "firstName" | "lastName" | "emails" | "profilePictureXs"
+> & {
 	isFavorite: boolean;
 	labels?: string[];
 };
@@ -29,6 +33,12 @@ function ContactsList({
 		labelSlug?: string;
 	};
 
+	// path -> signed URL, built once instead of a linear search per row
+	const signedUrlByPath = new Map<string, string>();
+	for (const img of profileImages ?? []) {
+		if (img.path && img.signedUrl) signedUrlByPath.set(img.path, img.signedUrl);
+	}
+
 	const filteredUserContacts =
 		params.labelSlug && userContacts
 			? userContacts.filter((c) =>
@@ -39,12 +49,13 @@ function ContactsList({
 	return (
 		<div className="overflow-y-auto flex-col h-[calc(100vh-10rem)]">
 			{filteredUserContacts.map((c) => {
-				const imagePath =
-					c.profilePictureXs && profileImages
-						? (profileImages.find((img) =>
-								img.path?.includes(c.profilePictureXs as string),
-							)?.signedUrl ?? null)
-						: null;
+				const imagePath = c.profilePictureXs
+					? (signedUrlByPath.get(c.profilePictureXs) ??
+						profileImages?.find((img) =>
+							img.path?.includes(c.profilePictureXs as string),
+						)?.signedUrl ??
+						null)
+					: null;
 
 				return (
 					<Link
@@ -61,8 +72,7 @@ function ContactsList({
 								: `/dashboard/contacts/${c.publicId}`
 						}
 					>
-
-                        <ContactListAvatar signedUrl={imagePath} alt={c?.firstName} />
+						<ContactListAvatar signedUrl={imagePath} alt={c?.firstName} />
 
 						<div className="min-w-0 flex-1">
 							<div className="truncate text-sm font-medium text-foreground flex justify-between">

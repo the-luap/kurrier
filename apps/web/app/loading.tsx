@@ -1,5 +1,5 @@
-import React from "react";
 import { LoaderCircle } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 const Loading = (props: {
 	loadingClassNames?: string;
@@ -7,11 +7,19 @@ const Loading = (props: {
 }) => {
 	return (
 		<div
-			className={`h-full min-h-screen flex justify-center items-center w-full ${props.wrapperClassNames}`}
+			className={cn(
+				"h-full min-h-screen flex justify-center items-center w-full",
+				props.wrapperClassNames,
+			)}
 		>
 			<LoaderCircle
-				className={`animate-spin text-brand dark:text-brand-foreground w-8 h-8 ${props.loadingClassNames}`}
+				aria-hidden="true"
+				className={cn(
+					"animate-spin text-brand dark:text-brand-foreground w-8 h-8",
+					props.loadingClassNames,
+				)}
 			/>
+			<span className="sr-only">Loading…</span>
 		</div>
 	);
 };

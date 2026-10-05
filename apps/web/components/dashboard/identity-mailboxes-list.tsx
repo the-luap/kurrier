@@ -29,6 +29,7 @@ import * as React from "react";
 import AddNewFolder from "@/components/mailbox/default/add-new-folder";
 import DeleteMailboxFolder from "@/components/mailbox/default/delete-folder";
 import type { FetchIdentityMailboxListResult } from "@/lib/actions/mailbox";
+import { useSidebar } from "@/components/ui/sidebar";
 import { cn } from "@/lib/utils";
 
 const ORDER: MailboxKind[] = [
@@ -93,6 +94,11 @@ type MailboxWithNavMeta = MailboxEntity & {
 	metaData?: { imap?: { selectable?: boolean } } | null;
 };
 
+function orderIndex(kind: MailboxKind) {
+	const idx = ORDER.indexOf(kind);
+	return idx === -1 ? 999 : idx;
+}
+
 function buildTree(rows: MailboxEntity[]): TreeMailbox[] {
 	const byId = new Map<string, TreeMailbox>();
 	const roots: TreeMailbox[] = [];
@@ -106,10 +112,9 @@ function buildTree(rows: MailboxEntity[]): TreeMailbox[] {
 			slug: r.slug ?? null,
 			parentId: row.parentId ?? null,
 			selectable: row.metaData?.imap?.selectable !== false,
-			unread: Math.max(
-				Number(row.unreadCount ?? 0),
-				Number(row.unreadThreads ?? 0),
-			),
+			// Badge = number of threads with unread mail (unreadCount is the
+			// total of unread messages, which overcounts long threads).
+			unread: Number(row.unreadThreads ?? 0),
 			children: [],
 		});
 	}
@@ -125,7 +130,7 @@ function buildTree(rows: MailboxEntity[]): TreeMailbox[] {
 	const sortRec = (arr: TreeMailbox[]) => {
 		arr.sort(
 			(a, b) =>
-				(ORDER.indexOf(a.kind) ?? 999) - (ORDER.indexOf(b.kind) ?? 999) ||
+				orderIndex(a.kind) - orderIndex(b.kind) ||
 				(a.name ?? "").localeCompare(b.name ?? ""),
 		);
 		for (const c of arr) if (c.children.length) sortRec(c.children);
@@ -133,6 +138,203 @@ function buildTree(rows: MailboxEntity[]): TreeMailbox[] {
 	sortRec(roots);
 
 	return roots;
+}
+
+// Module scope (not defined inside the list) so React keeps the same
+// component type across renders and the folder tree (and its open/collapsed
+// state) does not remount on navigation. Memoized and only given the active
+// slug of *its own* identity, so navigating re-renders just the folders
+// whose active state changes instead of every folder of every identity.
+const MailboxItem = React.memo(function MailboxItem({
+	m,
+	identityPublicId,
+	depth = 0,
+	identity,
+	activeSlug,
+	onNavigate,
+}: {
+	m: TreeMailbox;
+	identityPublicId: string;
+	depth?: number;
+	identity: IdentityEntity;
+	/** Active mailbox slug when this identity is the active one. */
+	activeSlug?: string;
+	onNavigate: () => void;
+}) {
+	const Icon = ICON[m.kind] ?? Folder;
+	const slug = m.slug ?? "inbox";
+	const href = `/dashboard/mail/${identityPublicId}/${slug}`;
+	const isActive = activeSlug === slug;
+
+	const [open, setOpen] = React.useState(true);
+	const hasChildren = m.children.length > 0;
+
+	return (
+		<div className="min-w-0">
+			<div
+				className={cn(
+					"group/folder grid min-w-0 items-center gap-1",
+					m.kind === "custom"
+						? "grid-cols-[1rem_minmax(0,1fr)_1.5rem]"
+						: "grid-cols-[1rem_minmax(0,1fr)]",
+				)}
+			>
+				{hasChildren ? (
+					<button
+						type="button"
+						onClick={() => setOpen((v) => !v)}
+						className="rounded p-0.5 hover:bg-sidebar-accent/60"
+						aria-label={open ? "Collapse" : "Expand"}
+					>
+						{open ? (
+							<ChevronDown className="h-3.5 w-3.5" />
+						) : (
+							<ChevronRight className="h-3.5 w-3.5" />
+						)}
+					</button>
+				) : (
+					<span className="w-4" />
+				)}
+
+				<Link
+					href={href}
+					prefetch={false}
+					onClick={onNavigate}
+					aria-disabled={!m.selectable}
+					style={{ paddingLeft: `${Math.min(depth, 4) * 0.625 + 0.5}rem` }}
+					className={cn(
+						"relative flex min-w-0 w-full items-center gap-2 rounded-md border border-transparent py-1.5 pr-2 text-sm transition-colors",
+						"hover:border-sidebar-border hover:bg-sidebar-accent/80 hover:text-sidebar-accent-foreground",
+						isActive &&
+							"border-primary/20 bg-primary/10 text-sidebar-accent-foreground shadow-sm dark:border-primary/30 dark:bg-primary/20",
+						!m.selectable && "opacity-60 pointer-events-none cursor-default",
+					)}
+				>
+					{isActive ? (
+						<span className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-primary" />
+					) : null}
+					<Icon className={cn("h-4 w-4 shrink-0", ACCENT[m.kind])} />
+					<span
+						className="min-w-0 flex-1 truncate"
+						title={m.kind === "custom" ? (m.name ?? "Mailbox") : TITLE[m.kind]}
+					>
+						{m.kind === "custom" ? (m.name ?? "Mailbox") : TITLE[m.kind]}
+					</span>
+					{(m.kind === "inbox" || m.unread > 0) && (
+						<span
+							className={cn(
+								"ml-auto shrink-0 rounded-full border px-1.5 text-[10px] leading-5 tabular-nums",
+								m.unread > 0
+									? "border-primary/20 bg-primary/10 text-sidebar-foreground dark:border-primary/30 dark:bg-primary/20"
+									: "border-sidebar-border bg-sidebar-accent/40 text-sidebar-foreground/60",
+							)}
+							title={`${m.unread} unread`}
+						>
+							{m.unread > 99 ? "99+" : m.unread}
+						</span>
+					)}
+				</Link>
+
+				{m.kind === "custom" ? (
+					<Menu withinPortal position="right-start" offset={4}>
+						<Menu.Target>
+							<button
+								type="button"
+								onClick={(e) => {
+									e.stopPropagation(); // don’t toggle parent handlers
+								}}
+								className={cn(
+									"shrink-0 rounded p-1 transition",
+									"hover:bg-sidebar-accent/60",
+								)}
+								aria-label={`Actions for ${m.name ?? "folder"}`}
+							>
+								<MoreVertical className="h-4 w-4" />
+							</button>
+						</Menu.Target>
+						<Menu.Dropdown onClick={(e) => e.stopPropagation()}>
+							<DeleteMailboxFolder
+								mailboxId={m.id}
+								identityPublicId={identityPublicId}
+								imapOp={!!identity.smtpAccountId}
+							/>
+						</Menu.Dropdown>
+					</Menu>
+				) : null}
+			</div>
+
+			{open && hasChildren && (
+				<div className="min-w-0">
+					{m.children.map((child) => (
+						<MailboxItem
+							key={child.id}
+							m={child}
+							identityPublicId={identityPublicId}
+							identity={identity}
+							depth={depth + 1}
+							activeSlug={activeSlug}
+							onNavigate={onNavigate}
+						/>
+					))}
+				</div>
+			)}
+		</div>
+	);
+});
+
+type IdentityNavEntry = {
+	identity: IdentityEntity;
+	mailboxes: FetchIdentityMailboxListResult[number]["mailboxes"];
+	tree: TreeMailbox[];
+	identityUnread: number;
+	draftCount: number;
+	scheduledCount: number;
+	snoozedCount: number;
+};
+
+// Derived from the server data only (not the pathname): built once per data
+// change instead of on every navigation.
+function buildIdentityNav(
+	identityMailboxes: FetchIdentityMailboxListResult,
+	scheduledDrafts: Pick<DraftMessageEntity, "id" | "identityId" | "status">[],
+	snoozedThreads: Pick<MailboxThreadEntity, "identityId">[],
+): IdentityNavEntry[] {
+	const draftCounts = new Map<string, number>();
+	const scheduledCounts = new Map<string, number>();
+	for (const draft of scheduledDrafts) {
+		const target =
+			draft.status === "scheduled"
+				? scheduledCounts
+				: draft.status === "draft"
+					? draftCounts
+					: null;
+		if (!target || !draft.identityId) continue;
+		target.set(draft.identityId, (target.get(draft.identityId) ?? 0) + 1);
+	}
+	const snoozedCounts = new Map<string, number>();
+	for (const snoozed of snoozedThreads) {
+		if (!snoozed.identityId) continue;
+		snoozedCounts.set(
+			snoozed.identityId,
+			(snoozedCounts.get(snoozed.identityId) ?? 0) + 1,
+		);
+	}
+
+	return identityMailboxes.map(({ identity, mailboxes }) => {
+		const tree = buildTree(mailboxes as MailboxEntity[]);
+		return {
+			identity,
+			mailboxes,
+			tree,
+			identityUnread: tree.reduce(
+				(sum, mailbox) => sum + (mailbox.kind === "inbox" ? mailbox.unread : 0),
+				0,
+			),
+			draftCount: draftCounts.get(identity.id) ?? 0,
+			scheduledCount: scheduledCounts.get(identity.id) ?? 0,
+			snoozedCount: snoozedCounts.get(identity.id) ?? 0,
+		};
+	});
 }
 
 export default function IdentityMailboxesList({
@@ -151,151 +353,35 @@ export default function IdentityMailboxesList({
 		identityPublicId?: string;
 		mailboxSlug?: string;
 	};
-	const currentSlug = React.useMemo(() => {
-		const parts = pathname.split("/").filter(Boolean);
-		return parts.at(-1) ?? "inbox";
-	}, [pathname]);
+	// /dashboard/mail/<identity>/<mailboxSlug | unsent | scheduled | snoozed>/…
+	// Use the route param (not the last segment) so thread pages such as
+	// /…/inbox/threads/<id> still highlight their mailbox.
+	const currentSlug =
+		params.mailboxSlug ?? pathname.split("/").filter(Boolean)[3];
 
-	const Item = ({
-		m,
-		identityPublicId,
-		depth = 0,
-		identity,
-	}: {
-		m: TreeMailbox;
-		identityPublicId: string;
-		depth?: number;
-		identity: IdentityEntity;
-	}) => {
-		const Icon = ICON[m.kind] ?? Folder;
-		const slug = m.slug ?? "inbox";
-		const href = `/dashboard/mail/${identityPublicId}/${slug}`;
-		const isActive =
-			pathname === href ||
-			(params.identityPublicId === identityPublicId && currentSlug === slug);
-
-		const [open, setOpen] = React.useState(true);
-		const hasChildren = m.children.length > 0;
-
-		return (
-			<div className="min-w-0">
-				<div
-					className={cn(
-						"group/folder grid min-w-0 items-center gap-1",
-						m.kind === "custom"
-							? "grid-cols-[1rem_minmax(0,1fr)_1.5rem]"
-							: "grid-cols-[1rem_minmax(0,1fr)]",
-					)}
-				>
-					{hasChildren ? (
-						<button
-							type="button"
-							onClick={() => setOpen((v) => !v)}
-							className="rounded p-0.5 hover:bg-sidebar-accent/60"
-							aria-label={open ? "Collapse" : "Expand"}
-						>
-							{open ? (
-								<ChevronDown className="h-3.5 w-3.5" />
-							) : (
-								<ChevronRight className="h-3.5 w-3.5" />
-							)}
-						</button>
-					) : (
-						<span className="w-4" />
-					)}
-
-					<Link
-						href={href}
-						prefetch={false}
-						onClick={onComplete ? () => onComplete() : undefined}
-						aria-disabled={!m.selectable}
-						style={{ paddingLeft: `${Math.min(depth, 4) * 0.625 + 0.5}rem` }}
-						className={cn(
-							"relative flex min-w-0 w-full items-center gap-2 rounded-md border border-transparent py-1.5 pr-2 text-sm transition-colors",
-							"hover:border-sidebar-border hover:bg-sidebar-accent/80 hover:text-sidebar-accent-foreground",
-							isActive &&
-								"border-primary/20 bg-primary/10 text-sidebar-accent-foreground shadow-sm dark:border-primary/30 dark:bg-primary/20",
-							!m.selectable && "opacity-60 pointer-events-none cursor-default",
-						)}
-					>
-						{isActive ? (
-							<span className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-primary" />
-						) : null}
-						<Icon className={cn("h-4 w-4 shrink-0", ACCENT[m.kind])} />
-						<span
-							className="min-w-0 flex-1 truncate"
-							title={
-								m.kind === "custom" ? (m.name ?? "Mailbox") : TITLE[m.kind]
-							}
-						>
-							{m.kind === "custom" ? (m.name ?? "Mailbox") : TITLE[m.kind]}
-						</span>
-						{(m.kind === "inbox" || m.unread > 0) && (
-							<span
-								className={cn(
-									"ml-auto shrink-0 rounded-full border px-1.5 text-[10px] leading-5 tabular-nums",
-									m.unread > 0
-										? "border-primary/20 bg-primary/10 text-sidebar-foreground dark:border-primary/30 dark:bg-primary/20"
-										: "border-sidebar-border bg-sidebar-accent/40 text-sidebar-foreground/60",
-								)}
-								title={`${m.unread} unread`}
-							>
-								{m.unread > 99 ? "99+" : m.unread}
-							</span>
-						)}
-					</Link>
-
-					{m.kind === "custom" ? (
-						<Menu withinPortal position="right-start" offset={4}>
-							<Menu.Target>
-								<button
-									type="button"
-									onClick={(e) => {
-										e.stopPropagation(); // don’t toggle parent handlers
-									}}
-									className={cn(
-										"shrink-0 rounded p-1 transition",
-										"hover:bg-sidebar-accent/60",
-									)}
-									aria-label={`Actions for ${m.name ?? "folder"}`}
-								>
-									<MoreVertical className="h-4 w-4" />
-								</button>
-							</Menu.Target>
-							<Menu.Dropdown onClick={(e) => e.stopPropagation()}>
-								<DeleteMailboxFolder
-									mailboxId={m.id}
-									identityPublicId={identityPublicId}
-									imapOp={!!identity.smtpAccountId}
-								/>
-							</Menu.Dropdown>
-						</Menu>
-					) : null}
-				</div>
-
-				{open && hasChildren && (
-					<div className="min-w-0">
-						{m.children.map((child) => (
-							<Item
-								key={child.id}
-								m={child}
-								identityPublicId={identityPublicId}
-								identity={identity}
-								depth={depth + 1}
-							/>
-						))}
-					</div>
-				)}
-			</div>
-		);
-	};
+	// On mobile the list lives in the sidebar sheet: close it after navigating.
+	const { isMobile, setOpenMobile } = useSidebar();
+	const handleNavigate = React.useCallback(() => {
+		onComplete?.();
+		if (isMobile) setOpenMobile(false);
+	}, [onComplete, isMobile, setOpenMobile]);
+	const identityNav = React.useMemo(
+		() => buildIdentityNav(identityMailboxes, scheduledDrafts, snoozedThreads),
+		[identityMailboxes, scheduledDrafts, snoozedThreads],
+	);
+	const lastPathnameRef = React.useRef(pathname);
+	React.useEffect(() => {
+		if (lastPathnameRef.current === pathname) return;
+		lastPathnameRef.current = pathname;
+		setOpenMobile(false);
+	}, [pathname, setOpenMobile]);
 
 	return (
 		<div className="min-w-0 space-y-2 overflow-x-hidden px-2">
 			<Link
 				href="/dashboard/mail"
 				prefetch={false}
-				onClick={onComplete ? () => onComplete() : undefined}
+				onClick={handleNavigate}
 				className={cn(
 					"mb-3 flex min-w-0 items-center gap-2 rounded-md border border-transparent px-2 py-2 text-sm font-medium transition-colors",
 					"hover:border-sidebar-border hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
@@ -306,111 +392,113 @@ export default function IdentityMailboxesList({
 				<LayoutDashboard className="h-4 w-4 shrink-0 text-primary" />
 				<span className="min-w-0 truncate">Mailbox Overview</span>
 			</Link>
-			{identityMailboxes.map(({ identity, mailboxes }) => {
-				const tree = buildTree(mailboxes as MailboxEntity[]);
-				const identityUnread = tree.reduce(
-					(sum, mailbox) =>
-						sum + (mailbox.kind === "inbox" ? mailbox.unread : 0),
-					0,
-				);
+			{identityNav.map(
+				({
+					identity,
+					mailboxes,
+					tree,
+					identityUnread,
+					draftCount: draftCounts,
+					scheduledCount: scheduledCounts,
+					snoozedCount: snoozedCounts,
+				}) => {
+					const isActiveIdentity =
+						params.identityPublicId === identity.publicId;
+					const activeSlug = isActiveIdentity ? currentSlug : undefined;
+					return (
+						<div key={identity.id} className="min-w-0">
+							<div className="mb-1 mt-3 grid min-w-0 grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-1 border-l-2 border-l-primary/30 px-2 text-xs font-semibold text-sidebar-foreground/60 dark:border-l-primary/50">
+								<span
+									className="min-w-0 flex-1 truncate"
+									title={identity.value}
+								>
+									{identity.value}
+								</span>
+								{identityUnread > 0 ? (
+									<span className="shrink-0 rounded-full bg-primary/10 px-1.5 text-[10px] leading-5 text-sidebar-foreground tabular-nums dark:bg-primary/20">
+										{identityUnread > 99 ? "99+" : identityUnread}
+									</span>
+								) : null}
+								<AddNewFolder mailboxes={mailboxes} identity={identity} />
+							</div>
+							<div className="min-w-0 space-y-1">
+								{tree.map((m) => (
+									<MailboxItem
+										key={`${identity.id}:${m.id}`}
+										m={m}
+										identityPublicId={identity.publicId}
+										identity={identity}
+										activeSlug={activeSlug}
+										onNavigate={handleNavigate}
+									/>
+								))}
+							</div>
+							{draftCounts > 0 && (
+								<Link
+									href={`/dashboard/mail/${identity.publicId}/unsent`}
+									prefetch={false}
+									onClick={handleNavigate}
+									className={cn(
+										"my-2 flex w-full items-center justify-start gap-1 rounded border border-transparent p-1.5 text-sm transition-colors hover:bg-sidebar-accent/80",
+										isActiveIdentity &&
+											currentSlug === "unsent" &&
+											"border-primary/20 bg-primary/10 text-sidebar-accent-foreground dark:border-primary/30 dark:bg-primary/20",
+									)}
+								>
+									<FileText
+										size={16}
+										className="text-amber-600 dark:text-amber-300"
+									/>
+									<span className="font-normal">Drafts ({draftCounts})</span>
+								</Link>
+							)}
+							{scheduledCounts > 0 && (
+								<Link
+									href={`/dashboard/mail/${identity.publicId}/scheduled`}
+									prefetch={false}
+									onClick={handleNavigate}
+									className={cn(
+										"my-2 flex w-full justify-start gap-1 rounded border border-transparent p-1.5 text-sm transition-colors hover:bg-sidebar-accent/80",
+										isActiveIdentity &&
+											currentSlug === "scheduled" &&
+											"border-primary/20 bg-primary/10 text-sidebar-accent-foreground dark:border-primary/30 dark:bg-primary/20",
+									)}
+								>
+									<IconMailFast
+										size={22}
+										className="text-cyan-600 dark:text-cyan-300"
+									/>
+									<span className={"font-normal text-sm"}>
+										Scheduled ({scheduledCounts})
+									</span>
+								</Link>
+							)}
 
-				const scheduledCounts = scheduledDrafts.filter(
-					(draft) =>
-						draft.identityId === identity.id && draft.status === "scheduled",
-				).length;
-				const draftCounts = scheduledDrafts.filter(
-					(draft) =>
-						draft.identityId === identity.id && draft.status === "draft",
-				).length;
-				const isActiveIdentity = params.identityPublicId === identity.publicId;
-				const snoozedCounts = snoozedThreads.filter(
-					(snoozed) => snoozed.identityId === identity.id,
-				).length;
-				return (
-					<div key={identity.id} className="min-w-0">
-						<div className="mb-1 mt-3 grid min-w-0 grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-1 border-l-2 border-l-primary/30 px-2 text-xs font-semibold text-sidebar-foreground/60 dark:border-l-primary/50">
-							<span className="min-w-0 flex-1 truncate" title={identity.value}>
-								{identity.value}
-							</span>
-							{identityUnread > 0 ? (
-								<span className="shrink-0 rounded-full bg-primary/10 px-1.5 text-[10px] leading-5 text-sidebar-foreground tabular-nums dark:bg-primary/20">
-									{identityUnread > 99 ? "99+" : identityUnread}
-								</span>
-							) : null}
-							<AddNewFolder mailboxes={mailboxes} identity={identity} />
+							{snoozedCounts > 0 && (
+								<Link
+									href={`/dashboard/mail/${identity.publicId}/snoozed`}
+									prefetch={false}
+									onClick={handleNavigate}
+									className={cn(
+										"my-2 flex w-full items-center justify-start gap-1 rounded border border-transparent p-1.5 text-sm transition-colors hover:bg-sidebar-accent/80",
+										isActiveIdentity &&
+											currentSlug === "snoozed" &&
+											"border-primary/20 bg-primary/10 text-sidebar-accent-foreground dark:border-primary/30 dark:bg-primary/20",
+									)}
+								>
+									<Clock4
+										size={16}
+										className="text-violet-600 dark:text-violet-300"
+									/>
+									<span className={"font-normal text-sm"}>
+										Snoozed ({snoozedCounts})
+									</span>
+								</Link>
+							)}
 						</div>
-						<div className="min-w-0 space-y-1">
-							{tree.map((m) => (
-								<Item
-									key={`${identity.id}:${m.id}`}
-									m={m}
-									identityPublicId={identity.publicId}
-									identity={identity}
-								/>
-							))}
-						</div>
-						{draftCounts > 0 && (
-							<Link
-								href={`/dashboard/mail/${identity.publicId}/unsent`}
-								prefetch={false}
-								className={cn(
-									"my-2 flex w-full items-center justify-start gap-1 rounded border border-transparent p-1.5 text-sm transition-colors hover:bg-sidebar-accent/80",
-									isActiveIdentity &&
-										currentSlug === "unsent" &&
-										"border-primary/20 bg-primary/10 text-sidebar-accent-foreground dark:border-primary/30 dark:bg-primary/20",
-								)}
-							>
-								<FileText
-									size={16}
-									className="text-amber-600 dark:text-amber-300"
-								/>
-								<span className="font-normal">Drafts ({draftCounts})</span>
-							</Link>
-						)}
-						{scheduledCounts > 0 && (
-							<Link
-								href={`/dashboard/mail/${identity.publicId}/scheduled`}
-								prefetch={false}
-								className={cn(
-									"my-2 flex w-full justify-start gap-1 rounded border border-transparent p-1.5 text-sm transition-colors hover:bg-sidebar-accent/80",
-									isActiveIdentity &&
-										currentSlug === "scheduled" &&
-										"border-primary/20 bg-primary/10 text-sidebar-accent-foreground dark:border-primary/30 dark:bg-primary/20",
-								)}
-							>
-								<IconMailFast
-									size={22}
-									className="text-cyan-600 dark:text-cyan-300"
-								/>
-								<span className={"font-normal text-sm"}>
-									Scheduled ({scheduledCounts})
-								</span>
-							</Link>
-						)}
-
-						{snoozedCounts > 0 && (
-							<Link
-								href={`/dashboard/mail/${identity.publicId}/snoozed`}
-								prefetch={false}
-								className={cn(
-									"my-2 flex w-full items-center justify-start gap-1 rounded border border-transparent p-1.5 text-sm transition-colors hover:bg-sidebar-accent/80",
-									isActiveIdentity &&
-										currentSlug === "snoozed" &&
-										"border-primary/20 bg-primary/10 text-sidebar-accent-foreground dark:border-primary/30 dark:bg-primary/20",
-								)}
-							>
-								<Clock4
-									size={16}
-									className="text-violet-600 dark:text-violet-300"
-								/>
-								<span className={"font-normal text-sm"}>
-									Snoozed ({snoozedCounts})
-								</span>
-							</Link>
-						)}
-					</div>
-				);
-			})}
+					);
+				},
+			)}
 		</div>
 	);
 }

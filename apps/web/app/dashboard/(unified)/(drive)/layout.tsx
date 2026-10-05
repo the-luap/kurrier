@@ -1,7 +1,6 @@
 import { SidebarInset } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/ui/dashboards/unified/default/app-sidebar";
-import { fetchIdentityMailboxList } from "@/lib/actions/mailbox";
-import { DriveState, getPublicEnv } from "@schema";
+import type { DriveState } from "@schema";
 import { isSignedIn } from "@/lib/actions/auth";
 import * as React from "react";
 import { DynamicContextProvider } from "@/hooks/use-dynamic-context";
@@ -14,28 +13,22 @@ export default async function DriveLayout({
 }: {
 	children: React.ReactNode;
 }) {
-	const publicConfig = getPublicEnv();
-	const [identityMailboxes, user] = await Promise.all([
-		fetchIdentityMailboxList(),
+	const [user, { localVolumes, cloudVolumes }] = await Promise.all([
 		isSignedIn(),
+		fetchVolumes(),
 	]);
-
-	const { localVolumes, cloudVolumes } = await fetchVolumes();
-	const userId = await isSignedIn();
 	const initialState: DriveState = {
 		localVolumes,
 		cloudVolumes,
 		driveRouteContext: null,
-		userId: String(userId?.id),
+		userId: String(user?.id),
 	};
 
 	return (
 		<>
 			<DynamicContextProvider initialState={initialState}>
 				<AppSidebar
-					publicConfig={publicConfig}
 					user={user}
-					identityMailboxes={identityMailboxes}
 					sidebarSectionContent={<DriveSideBar />}
 					sidebarTopContent={
 						<>

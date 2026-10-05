@@ -11,7 +11,7 @@ import {
 
 export class SmtpMailer implements Mailer {
 	private transporter: Transporter;
-	private imapClient: ImapFlow | null;
+	private imapCfg: SmtpVerifyInput["imap"];
 
 	private constructor(cfg: SmtpVerifyInput) {
 		this.transporter = nodemailer.createTransport({
@@ -21,14 +21,21 @@ export class SmtpMailer implements Mailer {
 			auth: cfg.auth,
 			pool: cfg.pool ?? false,
 		} as SMTPTransport.Options);
-		this.imapClient = cfg.imap
+		// The IMAP client is only needed by verify(); create it there instead
+		// of for every mailer (sendEmail never uses it).
+		this.imapCfg = cfg.imap;
+	}
+
+	private createImapClient(): ImapFlow | null {
+		const imap = this.imapCfg;
+		return imap
 			? new ImapFlow({
-					host: cfg.imap.host,
-					port: cfg.imap.port,
-					secure: cfg.imap.secure,
+					host: imap.host,
+					port: imap.port,
+					secure: imap.secure,
 					auth: {
-						user: cfg.imap.user,
-						pass: cfg.imap.pass,
+						user: imap.user,
+						pass: imap.pass,
 					},
 				})
 			: null;
@@ -46,22 +53,23 @@ export class SmtpMailer implements Mailer {
 			const ok = await this.transporter.verify();
 			meta.send = !!ok;
 
-			if (this.imapClient) {
+			const imapClient = this.createImapClient();
+			if (imapClient) {
 				try {
-					await this.imapClient.connect();
-					await this.imapClient.noop();
+					await imapClient.connect();
+					await imapClient.noop();
 					meta.receive = true;
 				} catch (err: any) {
 					meta.receive = false;
 					meta.response = err?.message ?? String(err);
 				} finally {
-					if (this.imapClient?.authenticated) {
+					if (imapClient.authenticated) {
 						try {
-							await this.imapClient.logout();
+							await imapClient.logout();
 						} catch {}
 					} else {
 						try {
-							await this.imapClient?.close();
+							imapClient.close();
 						} catch {}
 					}
 				}

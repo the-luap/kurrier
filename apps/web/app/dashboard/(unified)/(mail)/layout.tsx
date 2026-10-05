@@ -37,9 +37,7 @@ export default async function DashboardLayout({
 	return (
 		<>
 			<AppSidebar
-				publicConfig={publicConfig}
 				user={user}
-				identityMailboxes={identityMailboxes}
 				sidebarTopContent={
 					<div className={"-mt-1"} key={"mail-sidebar-compose"}>
 						{identityMailboxes.length > 0 && (

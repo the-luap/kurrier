@@ -32,6 +32,7 @@ import {
 	count,
 	desc,
 	eq,
+	getTableColumns,
 	gt,
 	inArray,
 	isNotNull,
@@ -46,8 +47,25 @@ import { cache } from "react";
 import Typesense, { type Client } from "typesense";
 import { isSignedIn } from "@/lib/actions/auth";
 import { rlsClient } from "@/lib/actions/clients";
-import { getRedis, getSmtpQueue } from "@/lib/actions/get-redis";
-import { withServerCache } from "@/lib/server-cache";
+import {
+	addJobAndWait,
+	getQueue,
+	getSmtpQueue,
+	RETRY_JOB_OPTS,
+} from "@/lib/actions/get-redis";
+import {
+	aiProviderLabel,
+	getAiDefaults,
+	normalizeAiBaseUrl,
+	runAiPrompt,
+	toAiProvider,
+} from "@/lib/ai-endpoint";
+import {
+	enqueueSearchRefresh,
+	enqueueThreadSmtpJobs,
+	toIdList,
+} from "@/lib/mail-jobs";
+import { invalidateServerCache, withServerCache } from "@/lib/server-cache";
 import { toArray } from "@/lib/utils";
 
 let typeSenseClient: Client | null = null;
@@ -122,9 +140,9 @@ export const fetchMailbox = cache(
 
 const fetchIdentityMailboxListUncached = async () => {
 	const rls = await rlsClient();
-
-	const rows = await rls((tx) =>
-		tx
+	// One transaction for the list and the unread counts.
+	const { rows, unreadAgg } = await rls(async (tx) => {
+		const rows = await tx
 			.select({ identity: identities, mailbox: mailboxes })
 			.from(identities)
 			.leftJoin(
@@ -151,8 +169,26 @@ const fetchIdentityMailboxListUncached = async () => {
                 `,
 				asc(mailboxes.parentId),
 				sql`lower(coalesce(${mailboxes.name}, ''))`,
-			),
-	);
+			);
+
+		const mailboxIds = rows.flatMap((r) => (r.mailbox ? [r.mailbox.id] : []));
+		const unreadAgg = mailboxIds.length
+			? await tx
+					.select({
+						mailboxId: mailboxThreads.mailboxId,
+						unreadThreads: sql<number>`
+        count(*) FILTER (WHERE ${mailboxThreads.unreadCount} > 0)
+      `.as("unread_threads"),
+						unreadTotal: sql<number>`
+        coalesce(sum(${mailboxThreads.unreadCount}), 0)
+      `.as("unread_total"),
+					})
+					.from(mailboxThreads)
+					.where(inArray(mailboxThreads.mailboxId, mailboxIds))
+					.groupBy(mailboxThreads.mailboxId)
+			: [];
+		return { rows, unreadAgg };
+	});
 
 	const byIdentity = rows.reduce(
 		(acc, r) => {
@@ -173,28 +209,6 @@ const fetchIdentityMailboxListUncached = async () => {
 			}
 		>,
 	);
-	const mailboxIds = Object.values(byIdentity).flatMap((entry) =>
-		entry.mailboxes.map((mailbox) => mailbox.id),
-	);
-
-	const unreadAgg = mailboxIds.length
-		? await rls((tx) =>
-				tx
-					.select({
-						mailboxId: mailboxThreads.mailboxId,
-						unreadThreads: sql<number>`
-        count(*) FILTER (WHERE ${mailboxThreads.unreadCount} > 0)
-      `.as("unread_threads"),
-						unreadTotal: sql<number>`
-        coalesce(sum(${mailboxThreads.unreadCount}), 0)
-      `.as("unread_total"),
-					})
-					.from(mailboxThreads)
-					.where(inArray(mailboxThreads.mailboxId, mailboxIds))
-					.groupBy(mailboxThreads.mailboxId),
-			)
-		: [];
-
 	const aggByMailbox = new Map<
 		string,
 		{ unreadThreads: number; unreadTotal: number }
@@ -223,6 +237,7 @@ export const fetchIdentityMailboxList = cache(async () => {
 	if (!user?.id) return fetchIdentityMailboxListUncached();
 
 	return withServerCache(
+		user.id,
 		`mailbox-list:${user.id}`,
 		15,
 		fetchIdentityMailboxListUncached,
@@ -250,30 +265,67 @@ const fetchMailboxOverviewUncached = async () => {
 
 	const rls = await rlsClient();
 	const now = new Date();
-	const recentRows = await rls((tx) =>
-		tx
-			.select()
-			.from(mailboxThreads)
-			.where(
-				and(
-					inArray(mailboxThreads.mailboxId, inboxMailboxIds),
-					gt(mailboxThreads.unreadCount, 0),
-					or(
-						isNull(mailboxThreads.snoozedUntil),
-						lte(mailboxThreads.snoozedUntil, now),
+	// Top 3 unread threads per inbox plus the unread thread count, both with
+	// the same filter (snoozed threads excluded), so the badge and the list
+	// agree and one busy inbox can't starve the others.
+	const rankedRows = await rls((tx) => {
+		const ranked = tx.$with("ranked").as(
+			tx
+				.select({
+					...getTableColumns(mailboxThreads),
+					rank: sql<number>`row_number() over (partition by ${mailboxThreads.mailboxId} order by ${mailboxThreads.lastActivityAt} desc)`.as(
+						"rank",
+					),
+					unreadThreadsInMailbox:
+						sql<number>`count(*) over (partition by ${mailboxThreads.mailboxId})`.as(
+							"unread_threads_in_mailbox",
+						),
+					unreadMessagesInMailbox:
+						sql<number>`sum(${mailboxThreads.unreadCount}) over (partition by ${mailboxThreads.mailboxId})`.as(
+							"unread_messages_in_mailbox",
+						),
+				})
+				.from(mailboxThreads)
+				.where(
+					and(
+						inArray(mailboxThreads.mailboxId, inboxMailboxIds),
+						gt(mailboxThreads.unreadCount, 0),
+						or(
+							isNull(mailboxThreads.snoozedUntil),
+							lte(mailboxThreads.snoozedUntil, now),
+						),
 					),
 				),
-			)
-			.orderBy(desc(mailboxThreads.lastActivityAt))
-			.limit(Math.min(inboxMailboxIds.length * 3, 150)),
-	);
-	const recentByMailbox = new Map<string, typeof recentRows>();
-	for (const thread of recentRows) {
+		);
+		return tx
+			.with(ranked)
+			.select()
+			.from(ranked)
+			.where(lte(ranked.rank, 3))
+			.orderBy(desc(ranked.lastActivityAt));
+	});
+
+	const recentByMailbox = new Map<
+		string,
+		(typeof mailboxThreads.$inferSelect)[]
+	>();
+	const unreadByMailbox = new Map<
+		string,
+		{ unreadThreads: number; unreadCount: number }
+	>();
+	for (const {
+		rank: _rank,
+		unreadThreadsInMailbox,
+		unreadMessagesInMailbox,
+		...thread
+	} of rankedRows) {
 		const list = recentByMailbox.get(thread.mailboxId) ?? [];
-		if (list.length < 3) {
-			list.push(thread);
-			recentByMailbox.set(thread.mailboxId, list);
-		}
+		list.push(thread);
+		recentByMailbox.set(thread.mailboxId, list);
+		unreadByMailbox.set(thread.mailboxId, {
+			unreadThreads: Number(unreadThreadsInMailbox),
+			unreadCount: Number(unreadMessagesInMailbox),
+		});
 	}
 
 	return identityMailboxList.map((entry) => ({
@@ -281,6 +333,12 @@ const fetchMailboxOverviewUncached = async () => {
 		mailboxes: entry.mailboxes.map((mailbox) => ({
 			...mailbox,
 			totalThreads: 0,
+			...(mailbox.kind === "inbox"
+				? (unreadByMailbox.get(mailbox.id) ?? {
+						unreadThreads: 0,
+						unreadCount: 0,
+					})
+				: {}),
 			recentThreads: recentByMailbox.get(mailbox.id) ?? [],
 		})),
 	}));
@@ -291,6 +349,7 @@ export const fetchMailboxOverview = cache(async () => {
 	if (!user?.id) return fetchMailboxOverviewUncached();
 
 	return withServerCache(
+		user.id,
 		`mailbox-overview:${user.id}`,
 		10,
 		fetchMailboxOverviewUncached,
@@ -299,44 +358,6 @@ export const fetchMailboxOverview = cache(async () => {
 
 export type FetchMailboxOverviewResult = Awaited<
 	ReturnType<typeof fetchMailboxOverview>
->;
-
-export const fetchMailboxUnreadCounts = cache(async () => {
-	const rls = await rlsClient();
-
-	const unreadAgg = await rls((tx) =>
-		tx
-			.select({
-				mailboxId: mailboxThreads.mailboxId,
-				unreadThreads: sql<number>`
-        count(*) FILTER (WHERE ${mailboxThreads.unreadCount} > 0)
-      `.as("unread_threads"),
-				unreadTotal: sql<number>`
-        coalesce(sum(${mailboxThreads.unreadCount}), 0)
-      `.as("unread_total"),
-			})
-			.from(mailboxThreads)
-			.groupBy(mailboxThreads.mailboxId),
-	);
-
-	const aggByMailbox = new Map<
-		string,
-		{ unreadThreads: number; unreadTotal: number }
-	>(
-		unreadAgg.map((a) => [
-			a.mailboxId,
-			{
-				unreadThreads: Number(a.unreadThreads ?? 0),
-				unreadTotal: Number(a.unreadTotal ?? 0),
-			},
-		]),
-	);
-
-	return aggByMailbox;
-});
-
-export type FetchMailboxUnreadCountsResult = Awaited<
-	ReturnType<typeof fetchMailboxUnreadCounts>
 >;
 
 export const fetchMessageAttachments = cache(async (messageId: string) => {
@@ -355,6 +376,41 @@ export const revalidateMailbox = async (path: string) => {
 	revalidatePath(path);
 };
 
+// Mail actions are server actions and can be called with arbitrary ids, and
+// the worker processes their jobs with the service role. RLS only returns the
+// caller's own rows, so use it to check ownership before queueing anything.
+async function requireOwnedMailboxes(...mailboxIds: string[]) {
+	const ids = Array.from(new Set(mailboxIds.filter(Boolean).map(String)));
+	if (!ids.length) throw new Error("Mailbox not found");
+	const rls = await rlsClient();
+	const rows = await rls((tx) =>
+		tx
+			.select({ id: mailboxes.id })
+			.from(mailboxes)
+			.where(inArray(mailboxes.id, ids)),
+	);
+	if (rows.length !== ids.length) throw new Error("Mailbox not found");
+}
+
+async function requireOwnedIdentity(identityId: string) {
+	const rls = await rlsClient();
+	const [identity] = await rls((tx) =>
+		tx
+			.select({ id: identities.id })
+			.from(identities)
+			.where(eq(identities.id, String(identityId)))
+			.limit(1),
+	);
+	if (!identity) throw new Error("Identity not found");
+}
+
+// Cached sidebar/overview data must not outlive a change.
+async function afterMailMutation(refresh = true) {
+	const user = await isSignedIn();
+	await invalidateServerCache(user?.id);
+	if (refresh) revalidatePath("/dashboard/mail");
+}
+
 type AiReplySuggestionInput = {
 	mode: "reply" | "forward" | "compose" | string;
 	userInstruction?: string;
@@ -363,6 +419,7 @@ type AiReplySuggestionInput = {
 	originalText?: string | null;
 	originalHtml?: string | null;
 	originalFrom?: unknown;
+	originalMessageId?: string | null;
 };
 
 const stripHtmlForPrompt = (value?: string | null) =>
@@ -383,14 +440,6 @@ const stripHtmlForPrompt = (value?: string | null) =>
 		.trim()
 		.slice(0, 6000);
 
-type AiProvider = "ollama" | "lmstudio";
-
-const isAiProvider = (value: string): value is AiProvider =>
-	value === "ollama" || value === "lmstudio";
-
-const getAiAuthHeaders = (apiKey?: string | null): Record<string, string> =>
-	apiKey?.trim() ? { Authorization: `Bearer ${apiKey.trim()}` } : {};
-
 export async function generateAiReplySuggestion(
 	input: AiReplySuggestionInput,
 ): Promise<FormState> {
@@ -398,48 +447,64 @@ export async function generateAiReplySuggestion(
 	if (!user) return { success: false, error: "Please sign in first." };
 
 	const rls = await rlsClient();
-	const [settings] = await rls((tx) =>
-		tx
+	// Settings and the original message (the reply editor only has its
+	// trimmed header data) in one transaction, through RLS.
+	const { settings, original } = await rls(async (tx) => {
+		const [settings] = await tx
 			.select()
 			.from(userAiSettings)
 			.orderBy(desc(userAiSettings.updatedAt))
-			.limit(1),
-	);
+			.limit(1);
+		if (!settings?.enabled || !input.originalMessageId) {
+			return { settings, original: undefined };
+		}
+		const [original] = await tx
+			.select({
+				text: messages.text,
+				html: messages.html,
+				subject: messages.subject,
+			})
+			.from(messages)
+			.where(eq(messages.id, String(input.originalMessageId)))
+			.limit(1);
+		return { settings, original };
+	});
 
-	if (settings && !settings.enabled) {
+	if (!settings?.enabled) {
 		return {
 			success: false,
 			error: "AI drafts are disabled in Platform settings.",
 		};
 	}
 
-	const serverConfig = getServerEnv();
-	const provider: AiProvider = isAiProvider(settings?.provider || "")
-		? (settings.provider as AiProvider)
-		: "ollama";
-	const baseUrl = (
-		settings?.baseUrl ||
-		(provider === "lmstudio"
-			? "http://localhost:1234/v1"
-			: serverConfig.OLLAMA_BASE_URL || "http://10.0.252.12:11434")
-	).replace(/\/+$/, "");
-	const model =
-		settings?.model ||
-		(provider === "lmstudio" ? "" : serverConfig.OLLAMA_MODEL || "gemma3:12b");
+	const provider = toAiProvider(settings.provider);
+	const defaults = getAiDefaults(provider);
+	let baseUrl: string;
+	try {
+		baseUrl = await normalizeAiBaseUrl(settings.baseUrl || defaults.baseUrl);
+	} catch (error) {
+		return { success: false, error: (error as Error).message };
+	}
+	const model = settings.model || defaults.model;
 	if (!model) return { success: false, error: "No AI model is configured." };
-	const systemPrompt = (settings?.systemPrompt || "").trim();
-	const temperature = Number(settings?.temperature ?? 0.4);
-	const maxTokens = Number(settings?.maxTokens ?? 700);
-	const originalText = stripHtmlForPrompt(
-		input.originalText || input.originalHtml || "",
-	);
+	const systemPrompt = (settings.systemPrompt || "").trim();
+	const temperature = Number(settings.temperature ?? 0.4);
+	const maxTokens = Number(settings.maxTokens ?? 700);
+
+	let originalSource = input.originalText || input.originalHtml || "";
+	let originalSubject = input.originalSubject;
+	if (original) {
+		originalSource = original.text || original.html || originalSource;
+		originalSubject = originalSubject || original.subject;
+	}
+	const originalText = stripHtmlForPrompt(originalSource);
 	const currentDraft = stripHtmlForPrompt(input.currentHtml || "");
 	const instruction = (input.userInstruction || "").trim().slice(0, 1200);
 
 	const prompt = `You are drafting an email inside Kurrier. Return only the proposed email body, no explanations, no subject line.
 
 Mode: ${input.mode || "reply"}
-Subject: ${input.originalSubject || "(none)"}
+Subject: ${originalSubject || "(none)"}
 From: ${JSON.stringify(input.originalFrom || null)}
 
 Default instruction:
@@ -461,94 +526,29 @@ Rules:
 - Do not include greetings/signature if the current draft already contains them unless needed.
 - Output plain text paragraphs only.`;
 
+	const label = aiProviderLabel(provider);
 	try {
-		if (provider === "lmstudio") {
-			const response = await fetch(`${baseUrl}/chat/completions`, {
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					...getAiAuthHeaders(settings?.apiKey),
-				},
-				body: JSON.stringify({
-					model,
-					messages: [{ role: "user", content: prompt }],
-					stream: false,
-					temperature,
-					max_tokens: maxTokens,
-				}),
-				signal: AbortSignal.timeout(60_000),
-			});
-
-			if (!response.ok) {
-				return {
-					success: false,
-					error: `LM Studio request failed with HTTP ${response.status}.`,
-				};
-			}
-
-			const data = (await response.json()) as {
-				choices?: Array<{ message?: { content?: string } }>;
-				error?: { message?: string } | string;
-			};
-			if (data.error) {
-				return {
-					success: false,
-					error:
-						typeof data.error === "string"
-							? data.error
-							: data.error.message || "LM Studio returned an error.",
-				};
-			}
-
-			const suggestion = (data.choices?.[0]?.message?.content || "").trim();
-			if (!suggestion) {
-				return {
-					success: false,
-					error: "LM Studio returned an empty suggestion.",
-				};
-			}
-
-			return { success: true, data: { suggestion } };
-		}
-
-		const response = await fetch(`${baseUrl}/api/generate`, {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({
-				model,
-				prompt,
-				stream: false,
-				options: {
-					temperature,
-					num_predict: maxTokens,
-				},
-			}),
-			signal: AbortSignal.timeout(60_000),
+		const suggestion = await runAiPrompt({
+			provider,
+			baseUrl,
+			apiKey: settings.apiKey,
+			model,
+			prompt,
+			temperature,
+			maxTokens,
 		});
-
-		if (!response.ok) {
+		if (!suggestion) {
 			return {
 				success: false,
-				error: `Ollama request failed with HTTP ${response.status}.`,
+				error: `${label} returned an empty suggestion.`,
 			};
 		}
-
-		const data = (await response.json()) as {
-			response?: string;
-			error?: string;
-		};
-		if (data.error) return { success: false, error: data.error };
-
-		const suggestion = (data.response || "").trim();
-		if (!suggestion) {
-			return { success: false, error: "Ollama returned an empty suggestion." };
-		}
-
 		return { success: true, data: { suggestion } };
 	} catch (error) {
+		const message = (error as Error)?.message || "";
 		return {
 			success: false,
-			error: `${provider === "lmstudio" ? "LM Studio" : "Ollama"} is not reachable: ${String(error)}`,
+			error: message.startsWith(label) ? message : `${label} is not reachable.`,
 		};
 	}
 }
@@ -599,7 +599,11 @@ export async function sendMail(
 	const decodedForm = decode(formData) as any;
 	let sentMailboxId = String(decodedForm.sentMailboxId ?? "").trim();
 
+	// A mailbox resolved below went through RLS; one sent by the client
+	// still has to be checked.
+	let sentMailboxOwned = false;
 	if (!sentMailboxId || sentMailboxId === "undefined") {
+		sentMailboxOwned = true;
 		const messageMailboxId = String(
 			decodedForm.messageMailboxId ?? decodedForm.mailboxId ?? "",
 		).trim();
@@ -615,6 +619,14 @@ export async function sendMail(
 		};
 	}
 
+	// The worker sends as the identity of this mailbox with the service role.
+	if (!sentMailboxOwned) {
+		try {
+			await requireOwnedMailboxes(sentMailboxId);
+		} catch {
+			return { success: false, error: "Sender mailbox not found." };
+		}
+	}
 	decodedForm.sentMailboxId = sentMailboxId;
 
 	if (toArray(decodedForm.to as any).length === 0) {
@@ -636,32 +648,24 @@ export async function sendMail(
 			return { success: false, error: "Invalid scheduled time." };
 		}
 
-		const identityId = await rls(async (tx) => {
+		// Lookup and insert in one transaction.
+		const row = await rls(async (tx) => {
 			const [identity] = await tx
 				.select({
 					identityId: mailboxes.identityId,
 				})
 				.from(mailboxes)
 				.where(eq(mailboxes.id, decodedForm.mailboxId));
-			return identity?.identityId;
-		});
 
-		const parsed = DraftMessageInsertSchema.safeParse({
-			identityId,
-			mailboxId: decodedForm.mailboxId,
-			payload: decodedForm,
-			status: "scheduled",
-			scheduledAt: d.toDate(),
-		});
+			const parsed = DraftMessageInsertSchema.safeParse({
+				identityId: identity?.identityId,
+				mailboxId: decodedForm.mailboxId,
+				payload: decodedForm,
+				status: "scheduled",
+				scheduledAt: d.toDate(),
+			});
+			if (!parsed.success) return "invalid" as const;
 
-		if (!parsed.success) {
-			return {
-				success: false,
-				error: "There was an error trying to schedule your mail.",
-			};
-		}
-
-		const row = await rls(async (tx) => {
 			const [created] = await tx
 				.insert(draftMessages)
 				.values(parsed.data)
@@ -672,12 +676,19 @@ export async function sendMail(
 			return created ?? null;
 		});
 
+		if (row === "invalid") {
+			return {
+				success: false,
+				error: "There was an error trying to schedule your mail.",
+			};
+		}
+
 		if (!row?.id || !row.scheduledAt) {
 			return { success: false, error: "Failed to schedule your mail." };
 		}
 		if (draftId) await deleteDraft(draftId);
 
-		const { sendMailQueue } = await getRedis();
+		const sendMailQueue = getQueue("send-mail");
 		const delay = Math.max(
 			0,
 			Number(new Date(row.scheduledAt)) - Number(new Date()),
@@ -688,7 +699,7 @@ export async function sendMail(
 			{ draftMessageId: row.id },
 			{ jobId: row.id, delay },
 		);
-		revalidatePath("/dashboard/mail");
+		await afterMailMutation();
 		return {
 			success: true,
 			message: "Message scheduled",
@@ -696,11 +707,13 @@ export async function sendMail(
 		};
 	}
 
-	const { sendMailQueue, sendMailEvents } = await getRedis();
-	const job = await sendMailQueue.add("send-and-reconcile", decodedForm);
 	let result: FormState;
 	try {
-		result = await job.waitUntilFinished(sendMailEvents);
+		result = await addJobAndWait<FormState>(
+			"send-mail",
+			"send-and-reconcile",
+			decodedForm,
+		);
 	} catch (error) {
 		return {
 			success: false,
@@ -709,11 +722,12 @@ export async function sendMail(
 	}
 	if (result?.success && draftId) await deleteDraft(draftId);
 	// Show the sent reply in the open thread and the Sent folder.
-	revalidatePath("/dashboard/mail");
+	await afterMailMutation();
 	return result;
 }
 
 export const deltaFetch = async ({ identityId }: { identityId: string }) => {
+	await requireOwnedIdentity(identityId);
 	try {
 		const { smtpQueue } = await getSmtpQueue();
 		const job = await smtpQueue.add(
@@ -852,9 +866,14 @@ export const initSearch = async (
 	starred: boolean,
 	page: number,
 ): Promise<SearchThreadsResponse> => {
+	// Never trust the owner id sent by the client.
+	const user = await isSignedIn();
+	if (!user?.id || (ownerId && ownerId !== user.id)) {
+		return { items: [], totalThreads: 0, totalMessages: 0 };
+	}
 	const client = getTypeSenseClient();
 
-	const filters = [`ownerId:=${JSON.stringify(ownerId)}`];
+	const filters = [`ownerId:=${JSON.stringify(user.id)}`];
 	if (hasAttachment) filters.push("hasAttachment:=1");
 	if (onlyUnread) filters.push("unread:=1");
 	if (starred) filters.push("starred:=1"); // NEW
@@ -903,8 +922,9 @@ export const initSearch = async (
 };
 
 export const backfillMailboxes = async (identityId: string) => {
-	const { smtpQueue, smtpEvents } = await getRedis();
-	const job = await smtpQueue.add(
+	await requireOwnedIdentity(identityId);
+	await addJobAndWait(
+		"smtp-worker",
 		"imap:backfill-discover",
 		{ identityId },
 		{
@@ -916,12 +936,12 @@ export const backfillMailboxes = async (identityId: string) => {
 			},
 		},
 	);
-	await job.waitUntilFinished(smtpEvents);
-	backfillAccount(identityId);
+	await queueBackfill(identityId);
 };
 
-export const backfillAccount = async (identityId: string) => {
-	const { smtpQueue } = await getRedis();
+// Ownership is checked by the caller.
+async function queueBackfill(identityId: string) {
+	const smtpQueue = getQueue("smtp-worker");
 	await smtpQueue.add(
 		"imap:backfill-tick",
 		{},
@@ -941,7 +961,7 @@ export const backfillAccount = async (identityId: string) => {
 			backoff: { type: "exponential", delay: 1500 },
 		},
 	);
-};
+}
 
 export const fetchWebMailThreadDetail = cache(async (threadId: string) => {
 	const rls = await rlsClient();
@@ -1060,177 +1080,121 @@ export const fetchAdjacentMailboxThreads = cache(
 	},
 );
 
-export const markAsRead = async (
-	threadIds: string | string[],
+// RLS only updates the caller's own rows, so the returned thread ids are
+// exactly the ones the worker (service role) may touch.
+async function setThreadsSeen(
+	ids: string[],
 	mailboxId: string,
-	markSmtp: boolean,
-	refresh = true,
-) => {
-	const ids = (Array.isArray(threadIds) ? threadIds : [threadIds])
-		.map(String)
-		.filter(Boolean);
-
-	if (!ids.length || !mailboxId) return;
-
+	seen: boolean,
+): Promise<string[]> {
 	const now = new Date();
 	const rls = await rlsClient();
 
-	await rls(async (tx) => {
-		await tx
+	return rls(async (tx) => {
+		const updatedMessages = await tx
 			.update(messages)
-			.set({ seen: true, updatedAt: now })
+			.set({ seen, updatedAt: now })
 			.where(
 				and(inArray(messages.threadId, ids), eq(messages.mailboxId, mailboxId)),
-			);
+			)
+			.returning({ threadId: messages.threadId });
 
-		await tx
+		const updated = await tx
 			.update(mailboxThreads)
-			.set({ unreadCount: 0, updatedAt: now })
+			.set({
+				// Unread: one statement for all threads; falls back to 1 so a
+				// thread surfaces as unread even if no message row matched.
+				unreadCount: seen
+					? 0
+					: sql`greatest(1, (
+					select count(*) from ${messages}
+					where ${messages.threadId} = ${mailboxThreads.threadId}
+					and ${messages.mailboxId} = ${mailboxThreads.mailboxId}
+					and ${messages.seen} = false
+				))`,
+				updatedAt: now,
+			})
 			.where(
 				and(
 					inArray(mailboxThreads.threadId, ids),
 					eq(mailboxThreads.mailboxId, mailboxId),
 				),
-			);
+			)
+			.returning({ threadId: mailboxThreads.threadId });
+		// Every thread RLS let us touch, also those without a mailbox_threads
+		// row: the IMAP flags and the search index must follow the messages.
+		return Array.from(
+			new Set(
+				[...updatedMessages, ...updated].map((row) => String(row.threadId)),
+			),
+		);
 	});
+}
 
-	if (refresh) {
-		revalidatePath("/dashboard/mail");
+async function markThreadsSeen(
+	threadIds: string | string[],
+	mailboxId: string,
+	markSmtp: boolean,
+	refresh: boolean,
+	seen: boolean,
+) {
+	const ids = toIdList(threadIds);
+	if (!ids.length || !mailboxId) return;
+
+	const ownedIds = await setThreadsSeen(ids, mailboxId, seen);
+
+	await afterMailMutation(refresh);
+
+	if (markSmtp && ownedIds.length) {
+		await Promise.all([
+			enqueueThreadSmtpJobs("mail:set-flags", ownedIds, () => ({
+				mailboxId,
+				op: seen ? "read" : "unread",
+			})),
+			enqueueSearchRefresh(ownedIds),
+		]);
 	}
+}
 
-	if (markSmtp) {
-		const { smtpQueue, searchIngestQueue } = await getRedis();
-
-		await Promise.all(
-			ids.map((threadId) =>
-				smtpQueue.add(
-					"mail:set-flags",
-					{ threadId, mailboxId, op: "read" },
-					{
-						attempts: 3,
-						backoff: { type: "exponential", delay: 1500 },
-						removeOnComplete: true,
-						removeOnFail: false,
-					},
-				),
-			),
-		);
-
-		await Promise.all(
-			ids.map((threadId) =>
-				searchIngestQueue.add(
-					"refresh-thread",
-					{ threadId },
-					{
-						jobId: `refresh-${threadId}`,
-						removeOnComplete: true,
-						removeOnFail: false,
-						attempts: 3,
-						backoff: { type: "exponential", delay: 1500 },
-					},
-				),
-			),
-		);
-	}
-};
+export const markAsRead = async (
+	threadIds: string | string[],
+	mailboxId: string,
+	markSmtp: boolean,
+	refresh = true,
+) => markThreadsSeen(threadIds, mailboxId, markSmtp, refresh, true);
 
 export const markAsUnread = async (
 	threadIds: string | string[],
 	mailboxId: string,
 	markSmtp: boolean,
 	refresh: boolean,
-) => {
-	const ids = (Array.isArray(threadIds) ? threadIds : [threadIds])
-		.map(String)
-		.filter(Boolean);
+) => markThreadsSeen(threadIds, mailboxId, markSmtp, refresh, false);
+
+async function moveThreadsToSystemFolder(
+	op: "trash" | "spam",
+	threadIds: string | string[],
+	mailboxId: string,
+	moveImap: boolean,
+	refresh: boolean,
+	messageId?: string,
+) {
+	const ids = toIdList(threadIds);
 
 	if (!ids.length || !mailboxId) return;
+	await requireOwnedMailboxes(mailboxId);
 
-	const now = new Date();
-	const rls = await rlsClient();
+	await Promise.all([
+		enqueueThreadSmtpJobs("mail:move", ids, () => ({
+			mailboxId,
+			op,
+			messageId,
+			moveImap,
+		})),
+		enqueueSearchRefresh(ids),
+	]);
 
-	await rls(async (tx) => {
-		await tx
-			.update(messages)
-			.set({ seen: false, updatedAt: now })
-			.where(
-				and(inArray(messages.threadId, ids), eq(messages.mailboxId, mailboxId)),
-			);
-
-		const grouped = await tx
-			.select({
-				threadId: messages.threadId,
-				count: sql<number>`count(*)`,
-			})
-			.from(messages)
-			.where(
-				and(
-					inArray(messages.threadId, ids),
-					eq(messages.mailboxId, mailboxId),
-					eq(messages.seen, false),
-				),
-			)
-			.groupBy(messages.threadId);
-
-		const countMap = new Map<string, number>();
-		for (const g of grouped) countMap.set(String(g.threadId), Number(g.count));
-
-		for (const tid of ids) {
-			const unread = countMap.get(tid);
-			await tx
-				.update(mailboxThreads)
-				.set({
-					unreadCount: unread ?? 1, // fallback to 1 so it surfaces in UI if uncertain
-					updatedAt: now,
-				})
-				.where(
-					and(
-						eq(mailboxThreads.threadId, tid),
-						eq(mailboxThreads.mailboxId, mailboxId),
-					),
-				);
-		}
-	});
-
-	if (refresh) {
-		revalidatePath("/mail");
-	}
-
-	if (markSmtp) {
-		const { smtpQueue, searchIngestQueue } = await getRedis();
-
-		await Promise.all(
-			ids.map((threadId) =>
-				smtpQueue.add(
-					"mail:set-flags",
-					{ threadId, mailboxId, op: "unread" },
-					{
-						attempts: 3,
-						backoff: { type: "exponential", delay: 1500 },
-						removeOnComplete: true,
-						removeOnFail: false,
-					},
-				),
-			),
-		);
-
-		await Promise.all(
-			ids.map((threadId) =>
-				searchIngestQueue.add(
-					"refresh-thread",
-					{ threadId },
-					{
-						jobId: `refresh-${threadId}`,
-						removeOnComplete: true,
-						removeOnFail: false,
-						attempts: 3,
-						backoff: { type: "exponential", delay: 1500 },
-					},
-				),
-			),
-		);
-	}
-};
+	await afterMailMutation(refresh);
+}
 
 export const moveToTrash = async (
 	threadIds: string | string[],
@@ -1238,50 +1202,15 @@ export const moveToTrash = async (
 	moveImap: boolean,
 	refresh: boolean,
 	messageId?: string,
-) => {
-	const ids = (Array.isArray(threadIds) ? threadIds : [threadIds])
-		.map(String)
-		.filter(Boolean);
-
-	if (!ids.length || !mailboxId) return;
-
-	const { smtpQueue, searchIngestQueue } = await getRedis();
-
-	await Promise.all(
-		ids.map((threadId) =>
-			smtpQueue.add(
-				"mail:move",
-				{ threadId, mailboxId, op: "trash", messageId, moveImap },
-				{
-					attempts: 3,
-					backoff: { type: "exponential", delay: 1500 },
-					removeOnComplete: true,
-					removeOnFail: false,
-				},
-			),
-		),
+) =>
+	moveThreadsToSystemFolder(
+		"trash",
+		threadIds,
+		mailboxId,
+		moveImap,
+		refresh,
+		messageId,
 	);
-
-	await Promise.all(
-		ids.map((threadId) =>
-			searchIngestQueue.add(
-				"refresh-thread",
-				{ threadId },
-				{
-					jobId: `refresh-${threadId}`,
-					removeOnComplete: true,
-					removeOnFail: false,
-					attempts: 3,
-					backoff: { type: "exponential", delay: 1500 },
-				},
-			),
-		),
-	);
-
-	if (refresh) {
-		revalidatePath("/mail");
-	}
-};
 
 export const moveToSpam = async (
 	threadIds: string | string[],
@@ -1289,50 +1218,15 @@ export const moveToSpam = async (
 	moveImap: boolean,
 	refresh: boolean,
 	messageId?: string,
-) => {
-	const ids = (Array.isArray(threadIds) ? threadIds : [threadIds])
-		.map(String)
-		.filter(Boolean);
-
-	if (!ids.length || !mailboxId) return;
-
-	const { smtpQueue, searchIngestQueue } = await getRedis();
-
-	await Promise.all(
-		ids.map((threadId) =>
-			smtpQueue.add(
-				"mail:move",
-				{ threadId, mailboxId, op: "spam", messageId, moveImap },
-				{
-					attempts: 3,
-					backoff: { type: "exponential", delay: 1500 },
-					removeOnComplete: true,
-					removeOnFail: false,
-				},
-			),
-		),
+) =>
+	moveThreadsToSystemFolder(
+		"spam",
+		threadIds,
+		mailboxId,
+		moveImap,
+		refresh,
+		messageId,
 	);
-
-	await Promise.all(
-		ids.map((threadId) =>
-			searchIngestQueue.add(
-				"refresh-thread",
-				{ threadId },
-				{
-					jobId: `refresh-${threadId}`,
-					removeOnComplete: true,
-					removeOnFail: false,
-					attempts: 3,
-					backoff: { type: "exponential", delay: 1500 },
-				},
-			),
-		),
-	);
-
-	if (refresh) {
-		revalidatePath("/mail");
-	}
-};
 
 export const toggleStar = async (
 	threadId: string,
@@ -1341,34 +1235,23 @@ export const toggleStar = async (
 	starImap: boolean,
 ) => {
 	if (!threadId || !mailboxId) return;
-	const { smtpQueue, searchIngestQueue } = await getRedis();
+	await requireOwnedMailboxes(mailboxId);
+	const op = starred ? "unflag" : "flag";
 
 	if (starImap) {
-		await smtpQueue.add(
+		await enqueueThreadSmtpJobs(
 			"mail:set-flags",
-			{
-				threadId,
-				mailboxId,
-				op: starred ? "unflag" : "flag",
-			},
-			{
-				attempts: 3,
-				backoff: { type: "exponential", delay: 1500 },
-				removeOnComplete: true,
-				removeOnFail: true,
-			},
+			[threadId],
+			() => ({ mailboxId, op }),
+			() => ({ ...RETRY_JOB_OPTS, removeOnComplete: true, removeOnFail: true }),
 		);
 	} else {
 		const rls = await rlsClient();
-		const op = starred ? "unflag" : "flag";
 		await rls(async (tx) => {
-			const update: Record<string, any> = { updatedAt: new Date() };
-			if (op === "flag") update.flagged = true;
-			if (op === "unflag") update.flagged = false;
-
+			const now = new Date();
 			await tx
 				.update(messages)
-				.set(update)
+				.set({ flagged: op === "flag", updatedAt: now })
 				.where(
 					and(
 						eq(messages.threadId, threadId),
@@ -1378,15 +1261,8 @@ export const toggleStar = async (
 
 			const [agg] = await tx
 				.select({
-					unreadCount: sql<number>`count(*) filter (where
-                    ${messages.seen}
-                    =
-                    false
-                    )`,
-					anyFlagged: sql<boolean>`bool_or
-                    (
-                    ${messages.flagged}
-                    )`,
+					unreadCount: sql<number>`count(*) filter (where ${messages.seen} = false)`,
+					anyFlagged: sql<boolean>`bool_or(${messages.flagged})`,
 				})
 				.from(messages)
 				.where(
@@ -1401,7 +1277,7 @@ export const toggleStar = async (
 				.set({
 					unreadCount: agg.unreadCount ?? 0,
 					starred: agg.anyFlagged ?? false,
-					updatedAt: new Date(),
+					updatedAt: now,
 				})
 				.where(
 					and(
@@ -1412,19 +1288,9 @@ export const toggleStar = async (
 		});
 	}
 
-	await searchIngestQueue.add(
-		"refresh-thread",
-		{ threadId: threadId },
-		{
-			jobId: `refresh-${threadId}`,
-			removeOnComplete: true,
-			removeOnFail: false,
-			attempts: 3,
-			backoff: { type: "exponential", delay: 1500 },
-		},
-	);
+	await enqueueSearchRefresh([threadId]);
 
-	revalidatePath("/mail");
+	await afterMailMutation();
 };
 
 export const setStarForThreads = async (
@@ -1434,34 +1300,23 @@ export const setStarForThreads = async (
 	starImap: boolean,
 	refresh = true,
 ) => {
-	const ids = (Array.isArray(threadIds) ? threadIds : [threadIds])
-		.map(String)
-		.filter(Boolean);
+	const ids = toIdList(threadIds);
 
 	if (!ids.length || !mailboxId) return;
-	const { smtpQueue, searchIngestQueue } = await getRedis();
+	await requireOwnedMailboxes(mailboxId);
 
 	if (starImap) {
-		await Promise.all(
-			ids.map((threadId) =>
-				smtpQueue.add(
-					"mail:set-flags",
-					{ threadId, mailboxId, op: starred ? "flag" : "unflag" },
-					{
-						attempts: 3,
-						backoff: { type: "exponential", delay: 1500 },
-						removeOnComplete: true,
-						removeOnFail: false,
-					},
-				),
-			),
-		);
+		await enqueueThreadSmtpJobs("mail:set-flags", ids, () => ({
+			mailboxId,
+			op: starred ? "flag" : "unflag",
+		}));
 	} else {
 		const rls = await rlsClient();
 		await rls(async (tx) => {
+			const now = new Date();
 			await tx
 				.update(messages)
-				.set({ flagged: starred, updatedAt: new Date() })
+				.set({ flagged: starred, updatedAt: now })
 				.where(
 					and(
 						inArray(messages.threadId, ids),
@@ -1471,7 +1326,7 @@ export const setStarForThreads = async (
 
 			await tx
 				.update(mailboxThreads)
-				.set({ starred, updatedAt: new Date() })
+				.set({ starred, updatedAt: now })
 				.where(
 					and(
 						inArray(mailboxThreads.threadId, ids),
@@ -1481,47 +1336,9 @@ export const setStarForThreads = async (
 		});
 	}
 
-	await Promise.all(
-		ids.map((threadId) =>
-			searchIngestQueue.add(
-				"refresh-thread",
-				{ threadId },
-				{
-					jobId: `refresh-${threadId}`,
-					removeOnComplete: true,
-					removeOnFail: false,
-					attempts: 3,
-					backoff: { type: "exponential", delay: 1500 },
-				},
-			),
-		),
-	);
+	await enqueueSearchRefresh(ids);
 
-	if (refresh) revalidatePath("/mail");
-};
-
-export const fetchMailboxThreadsOld = async (
-	identityPublicId: string,
-	mailboxSlug: string,
-	page: number,
-) => {
-	page = page && page > 0 ? page : 1;
-	const rls = await rlsClient();
-	const threads = await rls((tx) => {
-		return tx
-			.select()
-			.from(mailboxThreads)
-			.where(
-				and(
-					eq(mailboxThreads.identityPublicId, identityPublicId),
-					eq(mailboxThreads.mailboxSlug, mailboxSlug),
-				),
-			)
-			.orderBy(desc(mailboxThreads.lastActivityAt))
-			.offset((page - 1) * PAGE_SIZE)
-			.limit(PAGE_SIZE);
-	});
-	return threads;
+	await afterMailMutation(refresh);
 };
 
 export const fetchMailboxThreads = async (
@@ -1611,57 +1428,39 @@ export async function deleteForever(
 	opts?: { emptyAll?: boolean },
 ) {
 	const { emptyAll = false } = opts ?? {};
-	const { smtpQueue, searchIngestQueue } = await getRedis();
+	if (!mailboxId) return;
+	await requireOwnedMailboxes(mailboxId);
+
+	const deleteOpts = {
+		...RETRY_JOB_OPTS,
+		removeOnComplete: true,
+		removeOnFail: true,
+	};
 
 	if (emptyAll) {
-		await smtpQueue.add(
+		await getQueue("smtp-worker").add(
 			"mail:delete-permanent",
 			{ mailboxId, emptyAll: true, imapDelete },
-			{
-				attempts: 3,
-				backoff: { type: "exponential", delay: 1500 },
-				removeOnComplete: true,
-				removeOnFail: true,
-			},
+			deleteOpts,
 		);
-		if (refresh) revalidatePath("/mail");
+		await afterMailMutation(refresh);
 		return;
 	}
 
-	const ids = (Array.isArray(threadIds) ? threadIds : [threadIds])
-		.filter(Boolean)
-		.map(String);
+	const ids = toIdList(threadIds);
+	if (!ids.length) return;
 
-	if (!ids.length || !mailboxId) return;
+	await Promise.all([
+		enqueueThreadSmtpJobs(
+			"mail:delete-permanent",
+			ids,
+			() => ({ mailboxId, imapDelete }),
+			() => deleteOpts,
+		),
+		enqueueSearchRefresh(ids),
+	]);
 
-	await Promise.all(
-		ids.map(async (threadId) => {
-			await smtpQueue.add(
-				"mail:delete-permanent",
-				{ threadId, mailboxId, imapDelete },
-				{
-					attempts: 3,
-					backoff: { type: "exponential", delay: 1500 },
-					removeOnComplete: true,
-					removeOnFail: true,
-				},
-			);
-
-			await searchIngestQueue.add(
-				"refresh-thread",
-				{ threadId },
-				{
-					jobId: `refresh-${threadId}`,
-					removeOnComplete: true,
-					removeOnFail: false,
-					attempts: 3,
-					backoff: { type: "exponential", delay: 1500 },
-				},
-			);
-		}),
-	);
-
-	if (refresh) revalidatePath("/mail");
+	await afterMailMutation(refresh);
 }
 
 export async function addNewMailboxFolder(
@@ -1671,9 +1470,14 @@ export async function addNewMailboxFolder(
 	const decodedForm = decode(formData);
 	const isImapOp = String(decodedForm.imapOp).trim().length > 0;
 	const user = await isSignedIn();
+	if (!user?.id) return { success: false, error: "Please sign in first." };
+	await requireOwnedIdentity(String(decodedForm.identityId));
+	if (decodedForm.parentId && decodedForm.parentId !== "none") {
+		await requireOwnedMailboxes(String(decodedForm.parentId));
+	}
 	if (isImapOp) {
-		const { smtpQueue, smtpEvents } = await getRedis();
-		const job = await smtpQueue.add(
+		await addJobAndWait(
+			"smtp-worker",
 			"mailbox:add-new",
 			{
 				name: decodedForm.name,
@@ -1683,16 +1487,9 @@ export async function addNewMailboxFolder(
 				kind: "custom",
 				slug: slugify(String(decodedForm.name)),
 			},
-			{
-				attempts: 3,
-				backoff: { type: "exponential", delay: 1500 },
-				removeOnComplete: true,
-				removeOnFail: true,
-			},
+			{ ...RETRY_JOB_OPTS, removeOnComplete: true, removeOnFail: true },
 		);
-
-		await job.waitUntilFinished(smtpEvents);
-		revalidatePath("/dashboard/mail");
+		await afterMailMutation();
 	} else {
 		const name = String(decodedForm.name ?? "").trim();
 		if (!name)
@@ -1731,7 +1528,7 @@ export async function addNewMailboxFolder(
 			})
 			.returning();
 
-		revalidatePath("/dashboard/mail");
+		await afterMailMutation();
 	}
 
 	return {
@@ -1749,6 +1546,8 @@ export async function deleteMailboxFolder({
 	mailboxId: string;
 }): Promise<FormState> {
 	const user = await isSignedIn();
+	if (!user?.id) return { success: false, error: "Please sign in first." };
+	await requireOwnedMailboxes(mailboxId);
 
 	if (!imapOp) {
 		const [mailbox] = await db
@@ -1768,36 +1567,31 @@ export async function deleteMailboxFolder({
 		await db.delete(mailboxSync).where(eq(mailboxSync.mailboxId, mailboxId));
 		await db.delete(mailboxes).where(eq(mailboxes.id, mailboxId));
 
-		revalidatePath("/dashboard/mail");
+		await afterMailMutation();
 		return { success: true };
 	}
 
 	const [ident] = await db
 		.select({ id: identities.id })
 		.from(identities)
-		.where(eq(identities.publicId, identityId))
+		.where(
+			and(eq(identities.publicId, identityId), eq(identities.ownerId, user.id)),
+		)
 		.limit(1);
 
 	if (!ident) throw new Error("Identity not found");
 
-	const { smtpQueue, smtpEvents } = await getRedis();
-
-	const job = await smtpQueue.add(
+	await addJobAndWait(
+		"smtp-worker",
 		"mailbox:delete-folder",
 		{
 			mailboxId,
 			identityId: ident.id,
 			ownerId: user?.id,
 		},
-		{
-			attempts: 3,
-			backoff: { type: "exponential", delay: 1500 },
-			removeOnComplete: true,
-			removeOnFail: true,
-		},
+		{ ...RETRY_JOB_OPTS, removeOnComplete: true, removeOnFail: true },
 	);
-
-	await job.waitUntilFinished(smtpEvents);
+	await invalidateServerCache(user.id);
 	redirect(`/dashboard/mail/${identityId}/inbox`);
 	return { success: true };
 }
@@ -1810,9 +1604,7 @@ export const moveToFolder = async (
 	refresh: boolean,
 	messageId?: string,
 ) => {
-	const ids = (Array.isArray(threadIds) ? threadIds : [threadIds])
-		.map(String)
-		.filter(Boolean);
+	const ids = toIdList(threadIds);
 
 	if (
 		!ids.length ||
@@ -1821,62 +1613,38 @@ export const moveToFolder = async (
 		fromMailboxId === toMailboxId
 	)
 		return;
+	await requireOwnedMailboxes(fromMailboxId, toMailboxId);
 
-	const { smtpQueue, searchIngestQueue } = await getRedis();
-
-	await Promise.all(
-		ids.map((threadId) =>
-			smtpQueue.add(
-				"mail:move",
-				{
-					threadId,
-					mailboxId: fromMailboxId,
-					op: "move",
-					toMailboxId,
-					messageId,
-					moveImap,
-				},
-				{
-					jobId: `move:${threadId}:${fromMailboxId}->${toMailboxId}`,
-					attempts: 3,
-					backoff: { type: "exponential", delay: 1500 },
-					removeOnComplete: true,
-					removeOnFail: false,
-				},
-			),
+	await Promise.all([
+		enqueueThreadSmtpJobs(
+			"mail:move",
+			ids,
+			() => ({
+				mailboxId: fromMailboxId,
+				op: "move",
+				toMailboxId,
+				messageId,
+				moveImap,
+			}),
+			(threadId) => ({
+				...RETRY_JOB_OPTS,
+				jobId: `move:${threadId}:${fromMailboxId}->${toMailboxId}`,
+				removeOnComplete: true,
+				removeOnFail: false,
+			}),
 		),
-	);
+		enqueueSearchRefresh(ids),
+	]);
 
-	await Promise.all(
-		ids.map((threadId) =>
-			searchIngestQueue.add(
-				"refresh-thread",
-				{ threadId },
-				{
-					jobId: `refresh-${threadId}`,
-					removeOnComplete: true,
-					removeOnFail: false,
-					attempts: 3,
-					backoff: { type: "exponential", delay: 1500 },
-				},
-			),
-		),
-	);
-
-	if (refresh) revalidatePath("/mail");
+	await afterMailMutation(refresh);
 };
 
 export const clearImapClients = async (identityId: string) => {
-	const { smtpQueue } = await getRedis();
-	await smtpQueue.add(
+	await requireOwnedIdentity(identityId);
+	await getQueue("smtp-worker").add(
 		"imap:stop-idle",
 		{ identityId },
-		{
-			removeOnComplete: true,
-			removeOnFail: false,
-			attempts: 3,
-			backoff: { type: "exponential", delay: 1500 },
-		},
+		{ ...RETRY_JOB_OPTS, removeOnComplete: true, removeOnFail: false },
 	);
 };
 
@@ -1951,8 +1719,20 @@ export async function saveDraft(input: {
 				.insert(draftMessages)
 				.values({ ...values, status: "draft" })
 				.returning({ id: draftMessages.id });
-			return { draftId: created?.id ?? null };
-		});
+			return { draftId: created?.id ?? null, created: true };
+		}).then(
+			async ({
+				created,
+				...result
+			}: {
+				draftId: string | null;
+				created?: boolean;
+			}) => {
+				// A new draft changes the sidebar draft count.
+				if (created) await afterMailMutation(false);
+				return result;
+			},
+		);
 	} catch (error) {
 		return {
 			draftId: input.draftId ?? null,
@@ -1971,7 +1751,7 @@ export async function deleteDraft(draftId: string) {
 				and(eq(draftMessages.id, draftId), eq(draftMessages.status, "draft")),
 			),
 	);
-	revalidatePath("/dashboard/mail");
+	await afterMailMutation();
 }
 
 export async function fetchDraftForMessage(originalMessageId: string) {
@@ -1994,54 +1774,44 @@ export async function fetchDraftForMessage(originalMessageId: string) {
 
 export const fetchDrafts = async (identityPublicId: string) => {
 	const rls = await rlsClient();
-	return rls(async (tx) => {
-		const [identity] = await tx
-			.select({ id: identities.id })
-			.from(identities)
-			.where(eq(identities.publicId, identityPublicId));
-		if (!identity) return [];
-		return tx
-			.select()
+	return rls((tx) =>
+		tx
+			.select(getTableColumns(draftMessages))
 			.from(draftMessages)
+			.innerJoin(identities, eq(identities.id, draftMessages.identityId))
 			.where(
 				and(
 					eq(draftMessages.status, "draft"),
-					eq(draftMessages.identityId, identity.id),
+					eq(identities.publicId, identityPublicId),
 				),
 			)
-			.orderBy(desc(draftMessages.updatedAt));
-	});
+			.orderBy(desc(draftMessages.updatedAt)),
+	);
 };
 
 export const fetchScheduledDraftCounts = cache(async () => {
 	const user = await isSignedIn();
 	if (!user?.id) return fetchScheduledDraftCountsUncached();
 
-	return withServerCache(`scheduled-draft-counts:${user.id}`, 15, () =>
+	return withServerCache(user.id, `scheduled-draft-counts:${user.id}`, 15, () =>
 		fetchScheduledDraftCountsUncached(),
 	);
 });
 
 export const fetchScheduledDrafts = async (identityPublicId: string) => {
 	const rls = await rlsClient();
-	const [identity] = await rls((tx) =>
+	return rls((tx) =>
 		tx
-			.select()
-			.from(identities)
-			.where(eq(identities.publicId, identityPublicId)),
-	);
-	const rows = await rls((tx) =>
-		tx
-			.select()
+			.select(getTableColumns(draftMessages))
 			.from(draftMessages)
+			.innerJoin(identities, eq(identities.id, draftMessages.identityId))
 			.where(
 				and(
 					eq(draftMessages.status, "scheduled"),
-					eq(draftMessages.identityId, identity.id),
+					eq(identities.publicId, identityPublicId),
 				),
 			),
 	);
-	return rows;
 };
 
 export async function deleteScheduledDraft(
@@ -2050,14 +1820,26 @@ export async function deleteScheduledDraft(
 ): Promise<FormState> {
 	return handleAction(async () => {
 		const decodedForm = decode(formData) as Record<string, unknown>;
+		const draftId = String(decodedForm.draftId);
 		const rls = await rlsClient();
-		await rls(async (tx) => {
-			await tx
+		const deleted = await rls((tx) =>
+			tx
 				.delete(draftMessages)
-				.where(eq(draftMessages.id, String(decodedForm.draftId)));
-		});
+				.where(eq(draftMessages.id, draftId))
+				.returning({ id: draftMessages.id }),
+		);
 
-		revalidatePath("/dashboard/mail");
+		// Also drop the delayed send job (jobId = draft id).
+		if (deleted.length) {
+			try {
+				const job = await getQueue("send-mail").getJob(draftId);
+				await job?.remove();
+			} catch (error) {
+				console.warn("Could not remove scheduled send job", error);
+			}
+		}
+
+		await afterMailMutation();
 		return { success: true };
 	});
 }
@@ -2088,7 +1870,7 @@ export async function snoozeThread(input: {
 				.returning();
 		});
 
-		revalidatePath("/dashboard/mail");
+		await afterMailMutation();
 		return { success: true };
 	});
 }
@@ -2129,6 +1911,7 @@ export const fetchIdentitySnoozedThreads = cache(
 		if (!user?.id) return fetchIdentitySnoozedThreadsUncached(identityPublicId);
 
 		return withServerCache(
+			user.id,
 			`snoozed-threads:${user.id}:${identityPublicId ?? "all"}`,
 			15,
 			() => fetchIdentitySnoozedThreadsUncached(identityPublicId),
@@ -2175,11 +1958,21 @@ function subscriptionKeyFromHeadersJson(headersJson: any) {
 	return null;
 }
 
+type MailSubscriptionRow = typeof mailSubscriptions.$inferSelect;
+
 export async function fetchThreadMailSubscriptions(opts: {
 	ownerId: string;
 	messages: Array<{ id: string; headersJson: any }>;
 }) {
 	const keysByMessageId = new Map<string, string>();
+	// Callable as a server action: only ever read the caller's own rows.
+	const user = await isSignedIn();
+	if (!user?.id || user.id !== opts.ownerId) {
+		return {
+			byMessageId: new Map<string, MailSubscriptionRow | null>(),
+			keysByMessageId,
+		};
+	}
 
 	for (const m of opts.messages) {
 		const key = subscriptionKeyFromHeadersJson(m.headersJson);
@@ -2188,7 +1981,10 @@ export async function fetchThreadMailSubscriptions(opts: {
 
 	const uniqueKeys = Array.from(new Set(keysByMessageId.values()));
 	if (!uniqueKeys.length) {
-		return { byMessageId: new Map<string, any>(), keysByMessageId };
+		return {
+			byMessageId: new Map<string, MailSubscriptionRow | null>(),
+			keysByMessageId,
+		};
 	}
 
 	const rows = await db
@@ -2202,7 +1998,7 @@ export async function fetchThreadMailSubscriptions(opts: {
 		);
 
 	const byKey = new Map(rows.map((r) => [r.subscriptionKey, r]));
-	const byMessageId = new Map<string, any>();
+	const byMessageId = new Map<string, MailSubscriptionRow | null>();
 
 	for (const [messageId, key] of keysByMessageId.entries()) {
 		byMessageId.set(messageId, byKey.get(key) ?? null);
@@ -2302,7 +2098,11 @@ export async function oneClickUnsubscribe(
 				})
 				.where(eq(mailSubscriptions.id, id)),
 		);
-		revalidatePath(String(decodedForm.pathname));
+		revalidatePath(
+			typeof decodedForm.pathname === "string" && decodedForm.pathname
+				? decodedForm.pathname
+				: "/dashboard/mail",
+		);
 		return { success: true };
 	});
 }

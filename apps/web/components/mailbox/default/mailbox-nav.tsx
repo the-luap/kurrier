@@ -4,8 +4,17 @@ import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import { Inbox, Send, FileText, Archive, Ban, Trash2, Folder } from "lucide-react";
-import { MailboxEntity } from "@db";
+import {
+	Inbox,
+	Send,
+	FileText,
+	Archive,
+	Ban,
+	Trash2,
+	Folder,
+} from "lucide-react";
+import type { MailboxEntity } from "@db";
+import type React from "react";
 
 type Mailbox = MailboxEntity & {
 	unreadCount?: number | null;
@@ -38,6 +47,52 @@ const iconFor: Record<Mailbox["kind"], React.ElementType> = {
 	custom: Folder,
 };
 
+// Module scope: defining the item inside MailboxNav created a new component
+// type on every render, remounting every link on each navigation.
+function MailboxNavItem({
+	mailbox,
+	identityPublicId,
+	pathname,
+	activeSlugParam,
+}: {
+	mailbox: Mailbox;
+	identityPublicId: string;
+	pathname: string;
+	activeSlugParam?: string;
+}) {
+	const Icon = iconFor[mailbox.kind] ?? Folder;
+	const slug = mailbox.slug ?? "inbox";
+	const href = `/dashboard/mail/${identityPublicId}/${slug}`;
+	const unreadCount = Number(mailbox.unreadCount ?? 0);
+
+	const isActive =
+		pathname === href || (activeSlugParam == null && slug === "inbox");
+
+	return (
+		<Link
+			href={href}
+			prefetch={false}
+			className={cn(
+				"group flex items-center gap-2 rounded-md px-2 py-1.5 text-sm",
+				"hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+				isActive && "bg-sidebar-accent text-sidebar-accent-foreground",
+			)}
+		>
+			<Icon className="h-4 w-4 shrink-0" />
+			<span className="min-w-0 truncate">
+				{mailbox.kind === "custom"
+					? (mailbox.name ?? "Folder")
+					: titleFor(mailbox.kind)}
+			</span>
+			{unreadCount > 0 ? (
+				<Badge variant={isActive ? "secondary" : "outline"} className="ml-auto">
+					{unreadCount}
+				</Badge>
+			) : null}
+		</Link>
+	);
+}
+
 export function MailboxNav({
 	mailboxes,
 	identityPublicId,
@@ -56,45 +111,17 @@ export function MailboxNav({
 		return (a.name ?? a.slug ?? "").localeCompare(b.name ?? b.slug ?? "");
 	});
 
-	const Item = ({ mailbox }: { mailbox: Mailbox }) => {
-		const Icon = iconFor[mailbox.kind] ?? Folder;
-		const slug = mailbox.slug ?? "inbox";
-		const href = `/dashboard/mail/${identityPublicId}/${slug}`;
-		const unreadCount = Number(mailbox.unreadCount ?? 0);
-
-		const isActive =
-			pathname === href || (params.mailboxSlug == null && slug === "inbox");
-
-		return (
-			<Link
-				href={href}
-				prefetch={false}
-				className={cn(
-					"group flex items-center gap-2 rounded-md px-2 py-1.5 text-sm",
-					"hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
-					isActive && "bg-sidebar-accent text-sidebar-accent-foreground",
-				)}
-			>
-				<Icon className="h-4 w-4 shrink-0" />
-				<span className="min-w-0 truncate">
-					{mailbox.kind === "custom"
-						? (mailbox.name ?? "Folder")
-						: titleFor(mailbox.kind)}
-				</span>
-				{unreadCount > 0 ? (
-					<Badge variant={isActive ? "secondary" : "outline"} className="ml-auto">
-						{unreadCount}
-					</Badge>
-				) : null}
-			</Link>
-		);
-	};
-
 	return (
 		<div className="space-y-4 px-2">
 			<div className="space-y-1">
 				{sortedMailboxes.map((mailbox) => (
-					<Item key={mailbox.id} mailbox={mailbox} />
+					<MailboxNavItem
+						key={mailbox.id}
+						mailbox={mailbox}
+						identityPublicId={identityPublicId}
+						pathname={pathname}
+						activeSlugParam={params.mailboxSlug}
+					/>
 				))}
 			</div>
 		</div>

@@ -2,7 +2,7 @@ import React from "react";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Separator } from "@/components/ui/separator";
 import DriveTopBar from "@/components/dashboard/drive/drive-top-bar";
-import { normalizeWithinPath } from "@/lib/actions/drive";
+import { getDriveRouteContext } from "./route-context";
 import { isSignedIn } from "@/lib/actions/auth";
 
 export default async function DriveSegmentsLayout({
@@ -10,11 +10,13 @@ export default async function DriveSegmentsLayout({
 	params,
 }: {
 	children: React.ReactNode;
-	params: Record<any, any>;
+	params: Promise<{ segments?: string[] }>;
 }) {
 	const { segments } = await params;
-	const ctx = await normalizeWithinPath(segments ?? []);
-	const user = await isSignedIn();
+	const [ctx, user] = await Promise.all([
+		getDriveRouteContext(segments),
+		isSignedIn(),
+	]);
 
 	return (
 		<>

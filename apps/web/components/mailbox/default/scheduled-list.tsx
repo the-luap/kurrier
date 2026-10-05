@@ -5,6 +5,7 @@ import { useMemo } from "react";
 import { Clock, Paperclip, Trash } from "lucide-react";
 import dayjs from "dayjs";
 import { ReusableFormButton } from "@/components/common/reusable-form-button";
+import { useIsClient } from "@/components/mailbox/default/thread-list-utils";
 import { deleteScheduledDraft } from "@/lib/actions/mailbox";
 
 type DraftMessageRow = {
@@ -83,9 +84,14 @@ function hasAttachments(payload: Record<string, any>) {
 }
 
 function ScheduledListItem({ draft }: { draft: DraftMessageRow }) {
-	const scheduledLabel = formatDateLabel(
-		draft.scheduledAt ?? draft.updatedAt ?? draft.createdAt ?? Date.now(),
-	);
+	// Local-timezone label: client only, so SSR (server timezone) and
+	// hydration never disagree.
+	const isClient = useIsClient();
+	const scheduledLabel = isClient
+		? formatDateLabel(
+				draft.scheduledAt ?? draft.updatedAt ?? draft.createdAt ?? Date.now(),
+			)
+		: "";
 	const toLabel = getToLabel(draft.payload);
 	const subject = getSubject(draft.payload);
 	const preview = getPreview(draft.payload);
@@ -143,8 +149,8 @@ export default function ScheduledList({
 		return drafts
 			.filter((d) => String(d.status) === "scheduled")
 			.sort((a, b) => {
-				const aa = a.scheduledAt ? dayjs(a.scheduledAt).valueOf() : 0;
-				const bb = b.scheduledAt ? dayjs(b.scheduledAt).valueOf() : 0;
+				const aa = a.scheduledAt ? new Date(a.scheduledAt).getTime() : 0;
+				const bb = b.scheduledAt ? new Date(b.scheduledAt).getTime() : 0;
 				return aa - bb;
 			});
 	}, [drafts]);

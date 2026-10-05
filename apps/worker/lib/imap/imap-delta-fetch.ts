@@ -6,13 +6,20 @@ import {
 	messages,
 	mailboxThreads,
 } from "@db";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { parseAndStoreEmail } from "../message-payload-parser";
 import { initSmtpClient } from "./imap-client";
 import type { ImapFlow } from "imapflow";
 import { syncMailbox } from "./imap-sync-mailbox";
 import { upsertMailboxThreadItem } from "@common";
-import { getRedis } from "../../lib/get-redis";
+import { enqueueThreadRefresh } from "../../lib/get-redis";
+
+// One delta fetch per identity at a time. IDLE "exists" events and
+// delta-fetch jobs share the same IMAP client; running them concurrently
+// raced on the selected mailbox and inserted the same messages twice.
+// Calls arriving while a fetch runs are coalesced into one follow-up run.
+const running = new Map<string, Promise<void>>();
+const rerunRequested = new Set<string>();
 
 /**
  * Incremental sync for all mailboxes of an identity.
@@ -24,7 +31,40 @@ import { getRedis } from "../../lib/get-redis";
  *     * mailboxThreads (re-upsert from newest msg)
  *     * search index (refresh-thread)
  */
-export const deltaFetch = async (
+export const deltaFetch = (
+	identityId: string,
+	imapInstances: Map<string, ImapFlow>,
+): Promise<void> => {
+	const current = running.get(identityId);
+	if (current) {
+		rerunRequested.add(identityId);
+		return current;
+	}
+
+	const run = (async () => {
+		try {
+			do {
+				rerunRequested.delete(identityId);
+				await deltaFetchOnce(identityId, imapInstances);
+			} while (rerunRequested.has(identityId));
+		} finally {
+			running.delete(identityId);
+			// If a run failed while new mail was announced, don't drop that
+			// request: start one more run (it fails or succeeds on its own).
+			if (rerunRequested.delete(identityId)) {
+				queueMicrotask(() => {
+					deltaFetch(identityId, imapInstances).catch((error) =>
+						console.error("[delta-fetch] follow-up run failed", error),
+					);
+				});
+			}
+		}
+	})();
+	running.set(identityId, run);
+	return run;
+};
+
+const deltaFetchOnce = async (
 	identityId: string,
 	imapInstances: Map<string, ImapFlow>,
 ) => {
@@ -43,19 +83,20 @@ export const deltaFetch = async (
 		.from(mailboxes)
 		.where(eq(mailboxes.identityId, identityId));
 
-	for (const row of mailboxRows) {
-		// only when fully idle
-		const [syncRow] = await db
-			.select()
-			.from(mailboxSync)
-			.where(
-				and(
-					eq(mailboxSync.identityId, identityId),
-					eq(mailboxSync.mailboxId, row.id),
-				),
-			);
+	// One query for all sync rows instead of one per mailbox.
+	const syncedMailboxIds = new Set(
+		(
+			await db
+				.select({ mailboxId: mailboxSync.mailboxId })
+				.from(mailboxSync)
+				.where(eq(mailboxSync.identityId, identityId))
+		).map((r) => r.mailboxId),
+	);
 
-		if (!syncRow) continue;
+	const knownMessageIds = new Set<string>();
+
+	for (const row of mailboxRows) {
+		if (!syncedMailboxIds.has(row.id)) continue;
 		// if (syncRow.phase !== "IDLE" || Number(syncRow.backfillCursorUid || 0) > 0)
 		// 	continue;
 
@@ -65,6 +106,36 @@ export const deltaFetch = async (
 			mailboxId: row.id,
 			path: String((row?.metaData as any)?.imap?.path ?? row.name),
 			window: 500,
+			// Messages whose Message-ID is already stored (moves, duplicates)
+			// are handled from their envelope: their source is not downloaded,
+			// and new messages skip the per-message existence query below.
+			selectSkipSource: async (headers) => {
+				knownMessageIds.clear();
+				const ids = [
+					...new Set(
+						headers
+							.map((h) => h.envelope?.messageId?.trim())
+							.filter((id): id is string => !!id),
+					),
+				];
+				if (!ids.length) return new Set<number>();
+				const known = await db
+					.select({ messageId: messages.messageId })
+					.from(messages)
+					.where(
+						and(
+							eq(messages.ownerId, ownerId),
+							inArray(messages.messageId, ids),
+						),
+					);
+				for (const k of known) knownMessageIds.add(k.messageId);
+				const skip = new Set<number>();
+				for (const h of headers) {
+					const id = h.envelope?.messageId?.trim();
+					if (id && h.uid && knownMessageIds.has(id)) skip.add(h.uid);
+				}
+				return skip;
+			},
 			onMessage: async (msg, path: string) => {
 				const messageId = msg.envelope?.messageId?.trim() || null;
 				const uid = msg.uid;
@@ -97,19 +168,22 @@ export const deltaFetch = async (
 					});
 				}
 
-				const [existing] = await db
-					.select({
-						id: messages.id,
-						mailboxId: messages.mailboxId,
-						threadId: messages.threadId,
-					})
-					.from(messages)
-					.where(
-						and(
-							eq(messages.ownerId, ownerId),
-							eq(messages.messageId, messageId),
-						),
-					);
+				// Not known when the window was checked: a new message.
+				const [existing] = !knownMessageIds.has(messageId)
+					? []
+					: await db
+							.select({
+								id: messages.id,
+								mailboxId: messages.mailboxId,
+								threadId: messages.threadId,
+							})
+							.from(messages)
+							.where(
+								and(
+									eq(messages.ownerId, ownerId),
+									eq(messages.messageId, messageId),
+								),
+							);
 
 				if (existing) {
 					if (existing.mailboxId !== row.id) {
@@ -132,21 +206,32 @@ export const deltaFetch = async (
 								),
 							);
 
+						// Messages already present in the destination mailbox, looked up
+						// in one query instead of one per thread message.
+						const candidateIds = all
+							.filter((m) => m.mailboxId !== row.id)
+							.map((m) => m.messageId);
+						const dupMessageIds = new Set(
+							candidateIds.length
+								? (
+										await db
+											.select({ messageId: messages.messageId })
+											.from(messages)
+											.where(
+												and(
+													eq(messages.ownerId, ownerId),
+													eq(messages.mailboxId, row.id),
+													inArray(messages.messageId, candidateIds),
+												),
+											)
+									).map((d) => d.messageId)
+								: [],
+						);
+
 						for (const m of all) {
 							if (m.mailboxId === row.id) continue;
 
-							const [dup] = await db
-								.select({ id: messages.id })
-								.from(messages)
-								.where(
-									and(
-										eq(messages.ownerId, ownerId),
-										eq(messages.messageId, m.messageId),
-										eq(messages.mailboxId, row.id),
-									),
-								);
-
-							if (dup?.id) {
+							if (dupMessageIds.has(m.messageId)) {
 								await db.delete(messages).where(eq(messages.id, m.id));
 								continue;
 							}
@@ -188,18 +273,7 @@ export const deltaFetch = async (
 						}
 
 						try {
-							const { searchIngestQueue } = await getRedis();
-							await searchIngestQueue.add(
-								"refresh-thread",
-								{ threadId: existing.threadId },
-								{
-									jobId: `refresh-${existing.threadId}`,
-									attempts: 3,
-									backoff: { type: "exponential", delay: 1500 },
-									removeOnComplete: true,
-									removeOnFail: false,
-								},
-							);
+							await enqueueThreadRefresh(existing.threadId);
 						} catch (e) {
 							console.warn("[deltaFetch] enqueue refresh-thread failed", e);
 						}
@@ -210,7 +284,28 @@ export const deltaFetch = async (
 					return;
 				}
 
-				await parseAndStoreEmail(raw, {
+				let source = raw;
+				if (!source && uid) {
+					// Skipped as known in the envelope pass, but the row is gone by
+					// now (e.g. deleted meanwhile): download it after all, otherwise
+					// lastSeenUid moves past it and it is never imported. Skipped
+					// messages are handled outside the fetch iterator, so another
+					// command is safe here.
+					const full = await client.fetchOne(
+						String(uid),
+						{ source: true },
+						{ uid: true },
+					);
+					source = full ? full.source?.toString() || "" : "";
+				}
+				if (!source) {
+					console.warn(
+						`[deltaFetch] No source for ${messageId} — path=${path} uid=${uid}`,
+					);
+					return;
+				}
+
+				await parseAndStoreEmail(source, {
 					ownerId,
 					mailboxId: row.id,
 					rawStorageKey: `eml/${ownerId}/${row.id}/${uid}.eml`,

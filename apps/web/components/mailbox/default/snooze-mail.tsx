@@ -1,14 +1,17 @@
 "use client";
 
-import { getDayjsTz } from "@common/day-js-extended";
-import { Button, Divider, Modal, Tooltip } from "@mantine/core";
-import { DateTimePicker } from "@mantine/dates";
-import { useDisclosure } from "@mantine/hooks";
-import { getTimeZones } from "@vvo/tzdb";
-import type { Dayjs } from "dayjs";
-import { CalendarClock, Clock4, X } from "lucide-react";
-import React, { useMemo, useState } from "react";
+import { Tooltip } from "@mantine/core";
+import { Clock4 } from "lucide-react";
+import dynamic from "next/dynamic";
+import { useState } from "react";
 import { snoozeThread } from "@/lib/actions/mailbox";
+
+// Loaded on first open: keeps @vvo/tzdb, @mantine/dates and two Modals out
+// of every mailbox row.
+const SnoozeMailDialog = dynamic(
+	() => import("@/components/mailbox/default/snooze-mail-dialog"),
+	{ ssr: false },
+);
 
 function formatWhen(d: Date) {
 	const pad = (n: number) => String(n).padStart(2, "0");
@@ -33,59 +36,15 @@ export default function SnoozeMail({
 		initialSnoozedUntil,
 	);
 	const [saving, setSaving] = useState(false);
-
-	const [presetsOpened, presetsDisclosure] = useDisclosure(false);
-	const [pickerOpened, pickerDisclosure] = useDisclosure(false);
-
-	// This component is rendered once per mailbox row: keep the render cheap
-	// and only build the timezone data / presets while the dialog is open.
-	const localTz = useMemo(
-		() => Intl.DateTimeFormat().resolvedOptions().timeZone,
-		[],
-	);
-	const dayjsTz = useMemo(() => getDayjsTz(localTz), [localTz]);
-	const tzName = useMemo(
-		() =>
-			presetsOpened
-				? getTimeZones().find((tz) => tz.group.includes(localTz))
-				: undefined,
-		[presetsOpened, localTz],
-	);
-
-	const presets = useMemo(
-		() =>
-			!presetsOpened
-				? []
-				: [
-						{ label: "Later today", date: dayjsTz().add(2, "h") },
-						{
-							label: "Tomorrow morning",
-							date: dayjsTz().endOf("d").add(8, "h").add(1, "m"),
-						},
-						{
-							label: "Tomorrow afternoon",
-							date: dayjsTz().endOf("d").add(13, "h").add(1, "m"),
-						},
-						{
-							label: "Monday morning",
-							date: dayjsTz().endOf("w").add(8, "h").add(1, "m"),
-						},
-					],
-		[dayjsTz, presetsOpened],
-	);
-
-	const [pickerValue, setPickerValue] = useState<Dayjs>(() => dayjsTz());
-	const pickerDateValue = useMemo(
-		() => (pickerValue.isValid() ? pickerValue.toDate() : null),
-		[pickerValue],
-	);
+	const [dialogOpen, setDialogOpen] = useState(false);
+	// Mount the (lazy) dialog on first open and keep it mounted afterwards so
+	// the Modal open/close transitions still play.
+	const [dialogLoaded, setDialogLoaded] = useState(false);
 
 	const snoozed = !!snoozedUntil;
-
-	const label = useMemo(() => {
-		if (!snoozedUntil) return "Snooze";
-		return `Snoozed • ${formatWhen(snoozedUntil)}`;
-	}, [snoozedUntil]);
+	const label = snoozedUntil
+		? `Snoozed • ${formatWhen(snoozedUntil)}`
+		: "Snooze";
 
 	async function commit(next: Date | null) {
 		if (saving) return;
@@ -99,8 +58,7 @@ export default function SnoozeMail({
 			});
 
 			setSnoozedUntil(next);
-			presetsDisclosure.close();
-			pickerDisclosure.close();
+			setDialogOpen(false);
 		} finally {
 			setSaving(false);
 		}
@@ -108,99 +66,28 @@ export default function SnoozeMail({
 
 	return (
 		<>
-			<Modal
-				centered
-				opened={pickerOpened}
-				onClose={pickerDisclosure.close}
-				title={<span className="text-xl">Snooze</span>}
-				size="sm"
-				zIndex={1003}
-			>
-				<DateTimePicker
-					label="Pick date and time"
-					placeholder="Pick date and time"
-					value={pickerDateValue}
-					onChange={(val) => {
-						if (!val) return;
-						const d = dayjsTz(val);
-						if (d.isValid()) setPickerValue(d);
-					}}
-					valueFormat="DD MMM hh:mm A"
-					popoverProps={{ zIndex: 1004 }}
-					className="my-4"
-					timePickerProps={{
-						withDropdown: true,
-						popoverProps: { withinPortal: false },
-						format: "12h",
-					}}
-					disabled={saving}
+			{dialogLoaded && (
+				<SnoozeMailDialog
+					opened={dialogOpen}
+					saving={saving}
+					onCommit={(next) => void commit(next)}
+					onClose={() => setDialogOpen(false)}
 				/>
-
-				<Button
-					fullWidth
-					loading={saving}
-					onClick={() => {
-						if (!pickerValue?.isValid?.()) return;
-						commit(pickerValue.toDate());
-					}}
-				>
-					Snooze
-				</Button>
-			</Modal>
-
-			<Modal
-				centered
-				opened={presetsOpened}
-				closeOnClickOutside={false}
-				onClose={presetsDisclosure.close}
-				title={<span className="text-xl">Snooze</span>}
-				size="sm"
-				zIndex={1001}
-			>
-				<div className="my-2 p-2 font-semibold">
-					{tzName?.alternativeName} ({tzName?.abbreviation})
-				</div>
-
-				{presets.map((preset) => (
-					<button
-						key={preset.label}
-						type="button"
-						disabled={saving}
-						className="w-full items-center px-2 text-left rounded hover:bg-gray-100 flex gap-4 justify-between dark:hover:bg-neutral-700 disabled:opacity-50"
-						onClick={() => commit(preset.date.toDate())}
-					>
-						<span className="my-1">{preset.label}</span>
-						<span>{preset.date.format("MMM DD, hh:mm A")}</span>
-					</button>
-				))}
-
-				<Divider my="lg" variant="dashed" />
-
-				<Button
-					leftSection={<CalendarClock size={16} />}
-					variant="light"
-					fullWidth
-					disabled={saving}
-					onClick={() => {
-						presetsDisclosure.close();
-						pickerDisclosure.open();
-					}}
-				>
-					Pick date and time
-				</Button>
-			</Modal>
+			)}
 
 			<div className="inline-flex items-center gap-1 mx-1">
 				<Tooltip label={label} withArrow position="top" openDelay={250}>
 					<button
 						type="button"
 						disabled={saving}
+						aria-label={label}
 						onClick={() => {
 							if (snoozed) {
-								commit(null);
+								void commit(null);
 								return;
 							}
-							presetsDisclosure.open();
+							setDialogLoaded(true);
+							setDialogOpen(true);
 						}}
 					>
 						<Clock4 size={16} />

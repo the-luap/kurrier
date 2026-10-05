@@ -7,6 +7,7 @@ import {
 	davAccounts,
 	driveVolumes,
 	getSecret,
+	getSecrets,
 	type IdentityCreate,
 	type IdentityEntity,
 	IdentityInsertSchema,
@@ -33,6 +34,7 @@ import {
 	defaultImapQuota,
 	type FormState,
 	getPublicEnv,
+	getServerEnv,
 	handleAction,
 	MailboxKindDisplay,
 	ProviderAccountFormSchema,
@@ -41,52 +43,50 @@ import {
 	SYSTEM_MAILBOXES,
 } from "@schema";
 import slugify from "@sindresorhus/slugify";
-import type { AuthSession } from "@supabase/supabase-js";
 import { decode } from "decode-formdata";
 import { and, count, desc, eq, gte, sql } from "drizzle-orm";
 import type { PgColumn, PgTable } from "drizzle-orm/pg-core";
 import { nanoid } from "nanoid";
 import { revalidatePath } from "next/cache";
-import { redirect } from "next/navigation";
 import { v4 as uuidv4 } from "uuid";
 import type { z } from "zod";
 import { currentSession, isSignedIn } from "@/lib/actions/auth";
-import { rlsClient } from "@/lib/actions/clients";
-import { getRedis } from "@/lib/actions/get-redis";
+import { requireSession, rlsClient } from "@/lib/actions/clients";
+import { addJobAndWait } from "@/lib/actions/get-redis";
 import { backfillMailboxes, clearImapClients } from "@/lib/actions/mailbox";
-import { withServerCache } from "@/lib/server-cache";
+import { invalidateServerCache, withServerCache } from "@/lib/server-cache";
 import { parseSecret } from "@/lib/utils";
+import {
+	type AiProvider,
+	aiAuthHeaders,
+	aiProviderLabel,
+	fetchAiEndpoint,
+	getAiDefaults,
+	isAiProvider,
+	normalizeAiBaseUrl,
+	resolveAiApiKey,
+	runAiPrompt,
+} from "@/lib/ai-endpoint";
 
 const DASHBOARD_PATH = "/dashboard/platform/providers";
 const CURRENT_API_VERSION = 1;
-type AiProvider = "ollama" | "lmstudio";
-
 const DEFAULT_AI_PROVIDER: AiProvider = "ollama";
-const DEFAULT_OLLAMA_BASE_URL = "http://10.0.252.12:11434";
-const DEFAULT_OLLAMA_MODEL = "gemma3:12b";
-const DEFAULT_LMSTUDIO_BASE_URL = "http://localhost:1234/v1";
-const DEFAULT_LMSTUDIO_MODEL = "";
 
-const requireSession = (session: AuthSession | null): AuthSession => {
-	if (!session) {
-		redirect("/auth/login");
-	}
-	return session;
+// Mailgun, Postmark and SendGrid can't send custom headers, so the worker
+// also accepts the inbound webhook secret as a ?token= query parameter.
+const withInboundWebhookToken = (url: string) => {
+	const secret = getServerEnv().INBOUND_WEBHOOK_SECRET;
+	if (!secret) return url;
+	const withToken = new URL(url);
+	withToken.searchParams.set("token", secret);
+	return withToken.toString();
 };
 
-const isAiProvider = (value: string): value is AiProvider =>
-	value === "ollama" || value === "lmstudio";
-
-const getAiDefaults = (provider: AiProvider) =>
-	provider === "lmstudio"
-		? { baseUrl: DEFAULT_LMSTUDIO_BASE_URL, model: DEFAULT_LMSTUDIO_MODEL }
-		: { baseUrl: DEFAULT_OLLAMA_BASE_URL, model: DEFAULT_OLLAMA_MODEL };
-
-const normalizeAiBaseUrl = (provider: AiProvider, value: string) =>
-	(value || getAiDefaults(provider).baseUrl).trim().replace(/\/+$/, "");
-
-const getAuthHeaders = (apiKey?: string | null): Record<string, string> =>
-	apiKey?.trim() ? { Authorization: `Bearer ${apiKey.trim()}` } : {};
+const toAiBaseUrl = (
+	provider: AiProvider,
+	value: string,
+	opts?: { resolveHost?: boolean },
+) => normalizeAiBaseUrl(value?.trim() || getAiDefaults(provider).baseUrl, opts);
 
 const fetchAiModelsForProvider = async ({
 	provider,
@@ -97,19 +97,13 @@ const fetchAiModelsForProvider = async ({
 	baseUrl: string;
 	apiKey?: string | null;
 }) => {
-	const normalizedBaseUrl = normalizeAiBaseUrl(provider, baseUrl);
 	if (provider === "lmstudio") {
-		const response = await fetch(`${normalizedBaseUrl}/models`, {
+		const data = (await fetchAiEndpoint(`${baseUrl}/models`, {
+			label: "LM Studio",
 			method: "GET",
-			headers: getAuthHeaders(apiKey),
+			headers: aiAuthHeaders(apiKey),
 			signal: AbortSignal.timeout(10_000),
-		});
-
-		if (!response.ok) {
-			throw new Error(`LM Studio returned HTTP ${response.status}`);
-		}
-
-		const data = (await response.json()) as {
+		})) as {
 			data?: Array<{ id?: string; object?: string; owned_by?: string }>;
 		};
 
@@ -123,16 +117,12 @@ const fetchAiModelsForProvider = async ({
 			.filter((model) => model.name);
 	}
 
-	const response = await fetch(`${normalizedBaseUrl}/api/tags`, {
+	const data = (await fetchAiEndpoint(`${baseUrl}/api/tags`, {
+		label: "Ollama",
 		method: "GET",
+		headers: aiAuthHeaders(apiKey),
 		signal: AbortSignal.timeout(10_000),
-	});
-
-	if (!response.ok) {
-		throw new Error(`Ollama returned HTTP ${response.status}`);
-	}
-
-	const data = (await response.json()) as {
+	})) as {
 		models?: Array<{
 			name?: string;
 			model?: string;
@@ -143,12 +133,24 @@ const fetchAiModelsForProvider = async ({
 
 	return (data.models || [])
 		.map((model) => ({
-			name: model.name || model.model || "",
-			size: model.size || 0,
-			parameterSize: model.details?.parameter_size || "",
-			quantization: model.details?.quantization_level || "",
+			name: String(model.name || model.model || ""),
+			size: Number(model.size || 0),
+			parameterSize: String(model.details?.parameter_size || ""),
+			quantization: String(model.details?.quantization_level || ""),
 		}))
 		.filter((model) => model.name);
+};
+
+const fetchSavedAiSettings = async (provider: AiProvider) => {
+	const rls = await rlsClient();
+	const [saved] = await rls((tx) =>
+		tx
+			.select()
+			.from(userAiSettings)
+			.where(eq(userAiSettings.provider, provider))
+			.limit(1),
+	);
+	return saved;
 };
 
 export const fetchAiSettings = async () => {
@@ -174,7 +176,8 @@ export const fetchAiSettings = async () => {
 		systemPrompt: settings?.systemPrompt ?? "",
 		temperature: settings?.temperature ?? "0.4",
 		maxTokens: settings?.maxTokens ?? 700,
-		enabled: settings?.enabled ?? true,
+		// AI stays off until the user has saved a configuration.
+		enabled: settings?.enabled ?? false,
 		hasApiKey: Boolean(settings?.apiKey),
 	};
 };
@@ -185,29 +188,21 @@ export const listAiModels = async (input: {
 	apiKey?: string;
 }): Promise<FormState> => {
 	return handleAction(async () => {
-		await isSignedIn();
+		const user = await isSignedIn();
+		if (!user?.id) throw new Error("Please sign in first.");
 		const provider = isAiProvider(input.provider || "")
 			? (input.provider as AiProvider)
 			: DEFAULT_AI_PROVIDER;
-		const rls = await rlsClient();
-		const [saved] = await rls((tx) =>
-			tx
-				.select()
-				.from(userAiSettings)
-				.where(eq(userAiSettings.provider, provider))
-				.limit(1),
-		);
+		const baseUrl = await toAiBaseUrl(provider, input.baseUrl);
+		const saved = await fetchSavedAiSettings(provider);
 		const models = await fetchAiModelsForProvider({
 			provider,
-			baseUrl: input.baseUrl,
-			apiKey: input.apiKey || saved?.apiKey,
+			baseUrl,
+			apiKey: resolveAiApiKey(input.apiKey, saved, baseUrl),
 		});
 		return { success: true, data: { models } };
 	});
 };
-
-export const listOllamaModels = async (baseUrl: string): Promise<FormState> =>
-	listAiModels({ provider: "ollama", baseUrl });
 
 export async function saveAiSettings(
 	_prev: FormState,
@@ -221,9 +216,10 @@ export async function saveAiSettings(
 			? (String(formData.get("provider")) as AiProvider)
 			: DEFAULT_AI_PROVIDER;
 		const defaults = getAiDefaults(provider);
-		const baseUrl = normalizeAiBaseUrl(
+		const baseUrl = await toAiBaseUrl(
 			provider,
 			String(formData.get("baseUrl") ?? defaults.baseUrl),
+			{ resolveHost: false },
 		);
 		const model = String(formData.get("model") ?? defaults.model).trim();
 		const submittedApiKey = String(formData.get("apiKey") ?? "").trim();
@@ -251,9 +247,10 @@ export async function saveAiSettings(
 				.where(eq(userAiSettings.provider, provider))
 				.limit(1),
 		);
+		// Keep the stored key only while the base URL stays the same.
 		const apiKey = clearApiKey
 			? null
-			: submittedApiKey || existingSettings?.apiKey || null;
+			: resolveAiApiKey(submittedApiKey, existingSettings, baseUrl);
 
 		await rls((tx) =>
 			tx
@@ -298,95 +295,29 @@ export const testAiSettings = async (input: {
 	maxTokens?: number;
 }): Promise<FormState> => {
 	return handleAction(async () => {
-		await isSignedIn();
+		const user = await isSignedIn();
+		if (!user?.id) throw new Error("Please sign in first.");
 		const provider = isAiProvider(input.provider || "")
 			? (input.provider as AiProvider)
 			: DEFAULT_AI_PROVIDER;
-		const rls = await rlsClient();
-		const [saved] = await rls((tx) =>
-			tx
-				.select()
-				.from(userAiSettings)
-				.where(eq(userAiSettings.provider, provider))
-				.limit(1),
-		);
-		const apiKey = input.apiKey || saved?.apiKey || null;
-		const normalizedBaseUrl = normalizeAiBaseUrl(provider, input.baseUrl);
-
-		if (provider === "lmstudio") {
-			const response = await fetch(`${normalizedBaseUrl}/chat/completions`, {
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					...getAuthHeaders(apiKey),
-				},
-				body: JSON.stringify({
-					model: input.model,
-					messages: [
-						{
-							role: "user",
-							content:
-								"Reply with one short German sentence confirming that Kurrier AI is ready.",
-						},
-					],
-					temperature: input.temperature ?? 0.2,
-					max_tokens: input.maxTokens ?? 80,
-					stream: false,
-				}),
-				signal: AbortSignal.timeout(60_000),
-			});
-
-			if (!response.ok)
-				throw new Error(`LM Studio returned HTTP ${response.status}`);
-
-			const data = (await response.json()) as {
-				choices?: Array<{ message?: { content?: string } }>;
-				error?: { message?: string } | string;
-			};
-			if (data.error) {
-				throw new Error(
-					typeof data.error === "string"
-						? data.error
-						: data.error.message || "LM Studio returned an error",
-				);
-			}
-
-			return {
-				success: true,
-				message: "LM Studio test successful",
-				data: { response: (data.choices?.[0]?.message?.content || "").trim() },
-			};
-		}
-
-		const response = await fetch(`${normalizedBaseUrl}/api/generate`, {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({
-				model: input.model,
-				prompt:
-					"Reply with one short German sentence confirming that Kurrier AI is ready.",
-				stream: false,
-				options: {
-					temperature: input.temperature ?? 0.2,
-					num_predict: input.maxTokens ?? 80,
-				},
-			}),
-			signal: AbortSignal.timeout(60_000),
+		const baseUrl = await toAiBaseUrl(provider, input.baseUrl);
+		const saved = await fetchSavedAiSettings(provider);
+		const apiKey = resolveAiApiKey(input.apiKey, saved, baseUrl);
+		const response = await runAiPrompt({
+			provider,
+			baseUrl,
+			apiKey,
+			model: input.model,
+			prompt:
+				"Reply with one short sentence confirming that Kurrier AI is ready.",
+			temperature: input.temperature ?? 0.2,
+			maxTokens: input.maxTokens ?? 80,
 		});
-
-		if (!response.ok)
-			throw new Error(`Ollama returned HTTP ${response.status}`);
-
-		const data = (await response.json()) as {
-			response?: string;
-			error?: string;
-		};
-		if (data.error) throw new Error(data.error);
 
 		return {
 			success: true,
-			message: "Ollama test successful",
-			data: { response: (data.response || "").trim() },
+			message: `${aiProviderLabel(provider)} test successful`,
+			data: { response },
 		};
 	});
 };
@@ -480,8 +411,8 @@ export async function upsertSMTPAccount(
 					value: JSON.stringify(smtpConfig),
 				});
 				await rls((tx) =>
-					tx.insert(accountSecret).values({
-						providerId: String(parsed.accountId),
+					tx.insert(smtpAccountSecrets).values({
+						accountId: String(parsed.accountId),
 						secretId: newSecret.id,
 					}),
 				);
@@ -496,19 +427,17 @@ export async function upsertSMTPAccount(
 				value: JSON.stringify(smtpConfig),
 			});
 
-			const [smtpAccount] = await rls((tx) =>
-				tx.insert(smtpAccounts).values({}).returning(),
-			);
-
-			await rls((tx) =>
-				tx
-					.insert(smtpAccountSecrets)
-					.values({
-						accountId: smtpAccount.id,
-						secretId: secretMeta.id,
-					})
-					.returning(),
-			);
+			// Account and its secret link in one transaction.
+			await rls(async (tx) => {
+				const [smtpAccount] = await tx
+					.insert(smtpAccounts)
+					.values({})
+					.returning({ id: smtpAccounts.id });
+				await tx.insert(smtpAccountSecrets).values({
+					accountId: smtpAccount.id,
+					secretId: secretMeta.id,
+				});
+			});
 		}
 
 		revalidatePath(DASHBOARD_PATH);
@@ -555,29 +484,34 @@ export async function fetchDecryptedSecrets({
 		return q;
 	});
 
-	return Promise.all(
-		rows.map(async (r) => {
-			const metaId = String(r.metaId);
-			const { vault } = await getSecret(session, metaId);
-
-			const payload = {
-				linkRow: r.linkRow,
-				metaId,
-				vault,
-				providerId: r.linkRow?.providerId,
-				accountId: r.linkRow?.accountId,
-				provider: r.provider,
-				smtpAccount: r.smtpAccount,
-			};
-			const parsedSecret = parseSecret(
-				payload as FetchDecryptedSecretsResult[number],
-			);
-			return {
-				...payload,
-				parsedSecret: parsedSecret,
-			};
-		}),
+	// One batched vault read instead of three round trips per row.
+	const secrets = await getSecrets(
+		session,
+		rows.map((r) => String(r.metaId)),
 	);
+	return rows.map((r) => {
+		const metaId = String(r.metaId);
+		const secret = secrets.get(metaId);
+		if (!secret) throw new Error("Not found or not allowed");
+		const { vault } = secret;
+
+		const payload = {
+			linkRow: r.linkRow,
+			metaId,
+			vault,
+			providerId: r.linkRow?.providerId,
+			accountId: r.linkRow?.accountId,
+			provider: r.provider,
+			smtpAccount: r.smtpAccount,
+		};
+		const parsedSecret = parseSecret(
+			payload as FetchDecryptedSecretsResult[number],
+		);
+		return {
+			...payload,
+			parsedSecret: parsedSecret,
+		};
+	});
 }
 
 export type FetchDecryptedSecretsResult = Awaited<
@@ -672,7 +606,9 @@ export async function initializeDomainIdentity(
 			const { WEB_URL } = getPublicEnv();
 			const localTunnelUrl = await kvGet("local-tunnel-url");
 			const url = localTunnelUrl ? localTunnelUrl : WEB_URL;
-			opts.webHookUrl = `${url}/api/v1/hooks/sendgrid/inbound`;
+			opts.webHookUrl = withInboundWebhookToken(
+				`${url}/api/v1/hooks/sendgrid/inbound`,
+			);
 		}
 		const identity = await mailer.addDomain(String(data?.value), opts);
 
@@ -736,9 +672,13 @@ export async function verifyDomainIdentity(
 			const localTunnelUrl = await kvGet("local-tunnel-url");
 			const url = localTunnelUrl ? localTunnelUrl : WEB_URL;
 			if (providerAccount?.provider?.type === "mailgun") {
-				opts.webHookUrl = `${url}/api/v1/hooks/${providerAccount?.provider?.type}/mime`;
+				opts.webHookUrl = withInboundWebhookToken(
+					`${url}/api/v1/hooks/${providerAccount?.provider?.type}/mime`,
+				);
 			} else {
-				opts.webHookUrl = `${url}/api/v1/hooks/${providerAccount?.provider?.type}/inbound`;
+				opts.webHookUrl = withInboundWebhookToken(
+					`${url}/api/v1/hooks/${providerAccount?.provider?.type}/inbound`,
+				);
 			}
 		}
 
@@ -975,11 +915,12 @@ export const deleteDomainIdentity = async (
 		const rls = await rlsClient();
 		const emailsUsingThisDomain = await rls((tx) =>
 			tx
-				.select()
+				.select({ id: identities.id })
 				.from(identities)
 				.where(
 					eq(identities.domainIdentityId, userDomainIdentity?.identities.id),
-				),
+				)
+				.limit(1),
 		);
 		if (emailsUsingThisDomain.length > 0) {
 			throw new Error(
@@ -1046,146 +987,55 @@ export const verifyProviderAccount = async (
 ) => {
 	return handleAction(async () => {
 		let res = { ok: false, message: "Not implemented" } as VerifyResult;
+		const metaId = String(providerSecret?.metaId);
 		if (providerType === "ses") {
-			const mailer = createMailer("ses", providerSecret.parsedSecret);
 			const { WEB_URL } = getPublicEnv();
 			const localTunnelUrl = await kvGet("local-tunnel-url");
-			res = await mailer.verify(String(providerSecret?.metaId), {
-				webHookUrl: `${localTunnelUrl ? localTunnelUrl : WEB_URL}/api/v1/hooks/aws/ses/inbound`,
-			});
-
-			const data = providerSecret.parsedSecret;
-			data.verified = res.ok;
-
-			const session = requireSession(await currentSession());
-			await updateSecret(session, String(providerSecret?.linkRow?.secretId), {
-				value: JSON.stringify(data),
-			});
-
-			if (res.ok) {
-				const rls = await rlsClient();
-				await rls((tx) =>
-					tx
-						.update(providers)
-						.set({
-							metaData: {
-								...(providerSecret?.provider?.metaData ?? {}),
-								...{ verification: res.meta },
-							},
-						})
-						.where(
-							eq(providers.id, String(providerSecret?.linkRow?.providerId)),
-						),
-				);
-			}
+			res = await createMailer("ses", providerSecret.parsedSecret).verify(
+				metaId,
+				{
+					webHookUrl: `${localTunnelUrl ? localTunnelUrl : WEB_URL}/api/v1/hooks/aws/ses/inbound`,
+				},
+			);
 		} else if (providerType === "s3") {
-			const store = createStore(providerType, providerSecret.parsedSecret);
-			res = await store.verify(String(providerSecret?.metaId), {});
-			const data = providerSecret.parsedSecret;
-			data.verified = res.ok;
-			const session = requireSession(await currentSession());
-			await updateSecret(session, String(providerSecret?.linkRow?.secretId), {
-				value: JSON.stringify(data),
-			});
+			res = await createStore(providerType, providerSecret.parsedSecret).verify(
+				metaId,
+				{},
+			);
+		} else if (
+			providerType === "mailgun" ||
+			providerType === "postmark" ||
+			providerType === "sendgrid"
+		) {
+			res = await createMailer(
+				providerType,
+				providerSecret.parsedSecret,
+			).verify(metaId, {});
+		} else {
+			return { success: true, data: res };
+		}
 
-			if (res.ok) {
-				const rls = await rlsClient();
-				await rls((tx) =>
-					tx
-						.update(providers)
-						.set({
-							metaData: {
-								...(providerSecret?.provider?.metaData ?? {}),
-								...{ verification: res.meta },
-							},
-						})
-						.where(
-							eq(providers.id, String(providerSecret?.linkRow?.providerId)),
-						),
-				);
-			}
-		} else if (providerType === "mailgun") {
-			const mailer = createMailer(providerType, providerSecret.parsedSecret);
-			res = await mailer.verify(String(providerSecret?.metaId), {});
+		const data = providerSecret.parsedSecret;
+		data.verified = res.ok;
 
-			const data = providerSecret.parsedSecret;
-			data.verified = res.ok;
+		const session = requireSession(await currentSession());
+		await updateSecret(session, String(providerSecret?.linkRow?.secretId), {
+			value: JSON.stringify(data),
+		});
 
-			const session = requireSession(await currentSession());
-			await updateSecret(session, String(providerSecret?.linkRow?.secretId), {
-				value: JSON.stringify(data),
-			});
-
-			if (res.ok) {
-				const rls = await rlsClient();
-				await rls((tx) =>
-					tx
-						.update(providers)
-						.set({
-							metaData: {
-								...(providerSecret?.provider?.metaData ?? {}),
-								...{ verification: res.meta },
-							},
-						})
-						.where(
-							eq(providers.id, String(providerSecret?.linkRow?.providerId)),
-						),
-				);
-			}
-		} else if (providerType === "postmark") {
-			const mailer = createMailer(providerType, providerSecret.parsedSecret);
-			res = await mailer.verify(String(providerSecret?.metaId), {});
-			const data = providerSecret.parsedSecret;
-			data.verified = res.ok;
-
-			const session = requireSession(await currentSession());
-			await updateSecret(session, String(providerSecret?.linkRow?.secretId), {
-				value: JSON.stringify(data),
-			});
-
-			if (res.ok) {
-				const rls = await rlsClient();
-				await rls((tx) =>
-					tx
-						.update(providers)
-						.set({
-							metaData: {
-								...(providerSecret?.provider?.metaData ?? {}),
-								...{ verification: res.meta },
-							},
-						})
-						.where(
-							eq(providers.id, String(providerSecret?.linkRow?.providerId)),
-						),
-				);
-			}
-		} else if (providerType === "sendgrid") {
-			const mailer = createMailer(providerType, providerSecret.parsedSecret);
-			res = await mailer.verify(String(providerSecret?.metaId), {});
-			const data = providerSecret.parsedSecret;
-			data.verified = res.ok;
-
-			const session = requireSession(await currentSession());
-			await updateSecret(session, String(providerSecret?.linkRow?.secretId), {
-				value: JSON.stringify(data),
-			});
-
-			if (res.ok) {
-				const rls = await rlsClient();
-				await rls((tx) =>
-					tx
-						.update(providers)
-						.set({
-							metaData: {
-								...(providerSecret?.provider?.metaData ?? {}),
-								...{ verification: res.meta },
-							},
-						})
-						.where(
-							eq(providers.id, String(providerSecret?.linkRow?.providerId)),
-						),
-				);
-			}
+		if (res.ok) {
+			const rls = await rlsClient();
+			await rls((tx) =>
+				tx
+					.update(providers)
+					.set({
+						metaData: {
+							...(providerSecret?.provider?.metaData ?? {}),
+							...{ verification: res.meta },
+						},
+					})
+					.where(eq(providers.id, String(providerSecret?.linkRow?.providerId))),
+			);
 		}
 
 		revalidatePath(DASHBOARD_PATH);
@@ -1204,6 +1054,7 @@ export const getDashboardStats = async () => {
 		const rls = await rlsClient();
 
 		const data = await withServerCache(
+			session.user.id,
 			`dashboard-stats:${session.user.id}`,
 			30,
 			() =>
@@ -1323,19 +1174,19 @@ export const fetchUserAPIKeys = async () => {
 			.orderBy(desc(apiKeys.createdAt)),
 	);
 
-	const userApiKeys = await Promise.all(
-		apiKeyRows.map(async (r) => {
-			const { vault } = await getSecret(session, String(r.metaId));
-			return {
-				...r.key,
-				vault: vault?.decrypted_secret
-					? JSON.parse(vault.decrypted_secret)
-					: {},
-			};
-		}),
+	const secrets = await getSecrets(
+		session,
+		apiKeyRows.map((r) => String(r.metaId)),
 	);
-
-	return userApiKeys;
+	return apiKeyRows.map((r) => {
+		const secret = secrets.get(String(r.metaId));
+		if (!secret) throw new Error("Not found or not allowed");
+		const { vault } = secret;
+		return {
+			...r.key,
+			vault: vault?.decrypted_secret ? JSON.parse(vault.decrypted_secret) : {},
+		};
+	});
 };
 
 export type FetchUserAPIKeysResult = Awaited<
@@ -1358,6 +1209,7 @@ export const fetchUserDavAccounts = async () => {
 			.limit(1),
 	);
 
+	if (!row) throw new Error("No DAV account found");
 	const { vault } = await getSecret(session, String(row.metaId));
 	return {
 		...row.account,
@@ -1366,12 +1218,13 @@ export const fetchUserDavAccounts = async () => {
 };
 
 export const regenerateDavPassword = async () => {
-	const { davEvents, davQueue } = await getRedis();
 	const user = await isSignedIn();
-	const job = await davQueue.add("dav:update-password", { userId: user?.id });
-	await job.waitUntilFinished(davEvents);
+	if (!user?.id) throw new Error("Please sign in first.");
+	const result = await addJobAndWait("dav-worker", "dav:update-password", {
+		userId: user.id,
+	});
 	revalidatePath("/dashboard/platform/sync-services");
-	return job.returnvalue;
+	return result;
 };
 
 export async function addNewVolume(_prev: FormState, formData: FormData) {
@@ -1408,6 +1261,8 @@ export async function addNewVolume(_prev: FormState, formData: FormData) {
 			throw new Error(`Failed to create volume: ${bucket.message}`);
 		}
 
+		// The drive volume list is cached per user.
+		await invalidateServerCache((await isSignedIn())?.id);
 		revalidatePath("/dashboard/platform/storage");
 		return {
 			success: true,
