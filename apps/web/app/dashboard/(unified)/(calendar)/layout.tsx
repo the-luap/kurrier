@@ -1,7 +1,6 @@
 import { SidebarInset } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/ui/dashboards/unified/default/app-sidebar";
-import { fetchIdentityMailboxList } from "@/lib/actions/mailbox";
-import { CalendarState, getPublicEnv } from "@schema";
+import type { CalendarState } from "@schema";
 import { isSignedIn } from "@/lib/actions/auth";
 import CalendarSideBar from "@/components/dashboard/calendars/calendar-side-bar";
 import * as React from "react";
@@ -15,24 +14,17 @@ export default async function DashboardLayout({
 }: {
 	children: React.ReactNode;
 }) {
-	const publicConfig = getPublicEnv();
-	const [identityMailboxes, user] = await Promise.all([
-		fetchIdentityMailboxList(),
+	const [user, defaultCalendar, organizers] = await Promise.all([
 		isSignedIn(),
-		fetchDefaultCalendar(),
-	]);
-
-	const [defaultCalendar, organizers] = await Promise.all([
 		fetchDefaultCalendar(),
 		fetchOrganizers(),
 	]);
 
 	const timeZones = getTimeZones({ includeUtc: true });
-	let defaultTzAbbr = "UTC";
 	const abbr = timeZones.find(
 		(tz) => tz.name === defaultCalendar.timezone,
 	)?.abbreviation;
-	const tzAbbr = abbr ?? defaultTzAbbr;
+	const tzAbbr = abbr ?? "UTC";
 	const tzName =
 		timeZones.find((tz) => tz.abbreviation === tzAbbr)?.name ?? tzAbbr;
 	const initialState: CalendarState = {
@@ -58,9 +50,7 @@ export default async function DashboardLayout({
 				initialState={initialState}
 			>
 				<AppSidebar
-					publicConfig={publicConfig}
 					user={user}
-					identityMailboxes={identityMailboxes}
 					sidebarSectionContent={
 						<CalendarSideBar defaultCalendar={defaultCalendar} />
 					}

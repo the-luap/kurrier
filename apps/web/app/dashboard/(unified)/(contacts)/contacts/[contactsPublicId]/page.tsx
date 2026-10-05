@@ -4,11 +4,7 @@ import { rlsClient } from "@/lib/actions/clients";
 import { contacts } from "@db";
 import { createClient } from "@/lib/supabase/server";
 import { ActionIcon } from "@mantine/core";
-import {
-	IconEdit,
-	IconLabelFilled,
-	IconMap,
-} from "@tabler/icons-react";
+import { IconEdit, IconLabelFilled, IconMap } from "@tabler/icons-react";
 import Link from "next/link";
 import DeleteContactButton from "@/components/dashboard/contacts/delete-contact-button";
 import { revalidatePath } from "next/cache";
@@ -26,7 +22,20 @@ import { getRedis } from "@/lib/actions/get-redis";
 import { isSignedIn } from "@/lib/actions/auth";
 import ContactListAvatar from "@/components/dashboard/contacts/contact-list-avatar";
 
-async function Page({ params }: { params: { contactsPublicId: string } }) {
+// Static country -> dialing-code lookup, built once per server instance
+// instead of on every request.
+const phoneByCountry = new Map<string, string>(
+	getCountryDataList().map((c) => [
+		c.iso2,
+		String(c.phone).split(",")[0].trim(),
+	]),
+);
+
+async function Page({
+	params,
+}: {
+	params: Promise<{ contactsPublicId: string }>;
+}) {
 	const { contactsPublicId } = await params;
 
 	const rls = await rlsClient();
@@ -46,11 +55,21 @@ async function Page({ params }: { params: { contactsPublicId: string } }) {
 	const phones = Array.isArray(contact.phones) ? contact.phones : [];
 	const addresses = Array.isArray(contact.addresses) ? contact.addresses : [];
 
-	const supabase = await createClient();
-	const { data } = await supabase.storage
-		.from("attachments")
-		.createSignedUrl(String(contact.profilePicture), 600);
-	const profilePictureUrl = data?.signedUrl || null;
+	// Independent lookups in parallel (previously 3 sequential round trips);
+	// skip signing when the contact has no picture.
+	const [profilePictureUrl, allLabels, labelsByContactId] = await Promise.all([
+		contact.profilePicture
+			? createClient()
+					.then((supabase) =>
+						supabase.storage
+							.from("attachments")
+							.createSignedUrl(String(contact.profilePicture), 600),
+					)
+					.then(({ data }) => data?.signedUrl || null)
+			: Promise.resolve(null),
+		fetchLabels("contact" as LabelScope),
+		fetchContactLabelsByContactIds([contact.id]),
+	]);
 
 	const onDeleteAction = async (id: string) => {
 		"use server";
@@ -66,16 +85,8 @@ async function Page({ params }: { params: { contactsPublicId: string } }) {
 		return { success: true };
 	};
 
-	const allLabels = await fetchLabels("contact" as LabelScope);
-	const labelsByContactId = await fetchContactLabelsByContactIds([contact.id]);
-
 	const isFavorite = labelsByContactId[contact.id]?.some(
 		(entry) => entry.label.name === "Favorite",
-	);
-
-	const countryData = getCountryDataList();
-	const phoneByCountry = new Map<string, string>(
-		countryData.map((c) => [c.iso2, String(c.phone).split(",")[0].trim()]),
 	);
 
 	function formatPhone(p: any) {
@@ -113,7 +124,11 @@ async function Page({ params }: { params: { contactsPublicId: string } }) {
 			<div className="bg-gradient-to-b from-primary/5 via-background to-background/80 dark:from-primary/15 dark:via-background dark:to-background/40 px-3 py-4 sm:px-6 lg:px-8 shadow-[0_1px_0_rgba(15,23,42,0.04)] dark:shadow-[0_1px_0_rgba(15,23,42,0.6)]">
 				<div className="mx-auto flex max-w-5xl flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
 					<div className="flex items-start gap-4">
-                        <ContactListAvatar signedUrl={profilePictureUrl} alt={contact?.firstName} size={64} />
+						<ContactListAvatar
+							signedUrl={profilePictureUrl}
+							alt={contact?.firstName}
+							size={64}
+						/>
 
 						<div className="min-w-0 flex-1 space-y-1.5">
 							<div className="flex flex-wrap items-center gap-2">
@@ -127,6 +142,7 @@ async function Page({ params }: { params: { contactsPublicId: string } }) {
 										type="submit"
 										variant="subtle"
 										title="Toggle favorite"
+										aria-label="Toggle favorite"
 										className="h-7 w-7 rounded-full bg-primary/5 text-amber-400 hover:bg-primary/10 dark:bg-primary/20 dark:hover:bg-primary/30"
 									>
 										<Star
@@ -169,7 +185,7 @@ async function Page({ params }: { params: { contactsPublicId: string } }) {
 
 								<div className="ml-auto sm:ml-0">
 									<ContactLabelHoverButtons
-										contact={contact}
+										contact={{ id: contact.id }}
 										allLabels={allLabels}
 										labelsByContactId={labelsByContactId}
 									/>
@@ -179,19 +195,24 @@ async function Page({ params }: { params: { contactsPublicId: string } }) {
 					</div>
 
 					<div className="flex items-center gap-2 sm:self-start">
-						<Link href={`/dashboard/contacts/${contact.publicId}/edit`}>
-							<ActionIcon
-								size="sm"
-								variant="outline"
-								title="Edit contact"
-								className="border-transparent bg-background/60 hover:bg-primary/5 dark:bg-background/80 dark:hover:bg-primary/15"
-							>
-								<IconEdit size={14} stroke={1.5} />
-							</ActionIcon>
-						</Link>
+						<ActionIcon
+							component={Link}
+							href={`/dashboard/contacts/${contact.publicId}/edit`}
+							size="sm"
+							variant="outline"
+							title="Edit contact"
+							aria-label="Edit contact"
+							className="border-transparent bg-background/60 hover:bg-primary/5 dark:bg-background/80 dark:hover:bg-primary/15"
+						>
+							<IconEdit size={14} stroke={1.5} />
+						</ActionIcon>
 
 						<DeleteContactButton
-							contact={contact}
+							contact={{
+								id: contact.id,
+								firstName: contact.firstName,
+								lastName: contact.lastName,
+							}}
 							onDeleteAction={onDeleteAction}
 						/>
 					</div>

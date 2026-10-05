@@ -22,20 +22,34 @@ import { Avatar as MantineAvatar } from "@mantine/core";
 import { getGravatarUrl, signOut } from "@/lib/actions/auth";
 import { useEffect, useState } from "react";
 
+// Every dashboard section mounts its own sidebar, so cache the resolved URL
+// per email for the lifetime of the tab instead of calling the server action
+// on every section switch / router.refresh().
+const gravatarCache = new Map<string, string>();
+
 export function NavUser({ user }: { user: UserResponse["data"]["user"] }) {
 	const { isMobile } = useSidebar();
-	const [gravatarUrl, setGravatarUrl] = useState<string | null>(null);
-
-	const fetchGravatar = async () => {
-		const avatar = await getGravatarUrl(String(user?.email));
-		setGravatarUrl(avatar);
-	};
+	const email = user?.email;
+	const [gravatarUrl, setGravatarUrl] = useState<string | null>(
+		() => (email && gravatarCache.get(email)) || null,
+	);
 
 	useEffect(() => {
-		if (user) {
-			fetchGravatar();
+		if (!email) return;
+		const cached = gravatarCache.get(email);
+		if (cached) {
+			setGravatarUrl(cached);
+			return;
 		}
-	}, [user]);
+		let cancelled = false;
+		getGravatarUrl(email).then((avatar) => {
+			gravatarCache.set(email, avatar);
+			if (!cancelled) setGravatarUrl(avatar);
+		});
+		return () => {
+			cancelled = true;
+		};
+	}, [email]);
 
 	return (
 		<SidebarMenu>

@@ -38,10 +38,8 @@ export default async function Page() {
 									</p>
 								</div>
 								<div className="mt-4 md:mt-0 flex gap-3">
-									<Button>
-										<Link href="/dashboard/platform/providers">
-											Add Provider
-										</Link>
+									<Button component={Link} href="/dashboard/platform/providers">
+										Add Provider
 									</Button>
 									<Link
 										href="/dashboard/platform/identities"

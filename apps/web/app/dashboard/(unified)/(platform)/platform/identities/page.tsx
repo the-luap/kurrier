@@ -3,7 +3,7 @@ import MailIdentities from "@/components/dashboard/identities/mail-identities";
 import {
 	fetchDecryptedSecrets,
 	fetchUserIdentities,
-	getProviderById,
+	syncProviders,
 } from "@/lib/actions/dashboard";
 import { smtpAccountSecrets, providerSecrets } from "@db";
 import { ProviderLabels } from "@schema";
@@ -12,7 +12,12 @@ import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Separator } from "@/components/ui/separator";
 
 async function Page() {
-	const [userSmtpAccounts, userProviderAccounts] = await Promise.all([
+	const [
+		userSmtpAccounts,
+		userProviderAccounts,
+		userIdentities,
+		userProviders,
+	] = await Promise.all([
 		fetchDecryptedSecrets({
 			linkTable: smtpAccountSecrets,
 			foreignCol: smtpAccountSecrets.accountId,
@@ -23,19 +28,22 @@ async function Page() {
 			foreignCol: providerSecrets.providerId,
 			secretIdCol: providerSecrets.secretId,
 		}),
+		fetchUserIdentities(),
+		// one query for all providers instead of one getProviderById per account
+		syncProviders(),
 	]);
-	const userIdentities = await fetchUserIdentities();
+	const providersById = new Map(userProviders.map((p) => [p.id, p]));
 
 	const options = [];
 	for (const providerAccount of userProviderAccounts) {
 		const secret = parseSecret(providerAccount);
 		if (secret.verified) {
-			const provider = await getProviderById(
+			const provider = providersById.get(
 				String(providerAccount.linkRow.providerId),
 			);
-			const providerName =
-				ProviderLabels[provider?.type || "unknown"] || "Unknown Provider";
 			if (provider) {
+				const providerName =
+					ProviderLabels[provider.type] || "Unknown Provider";
 				options.push({
 					label: providerName,
 					value: `provider-${String(providerAccount.linkRow.id)}`,

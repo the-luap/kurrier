@@ -1,8 +1,7 @@
 import { SidebarInset } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/ui/dashboards/unified/default/app-sidebar";
-import { fetchIdentityMailboxList } from "@/lib/actions/mailbox";
 import { fetchContactLabelsWithCounts } from "@/lib/actions/labels";
-import { getPublicEnv, LabelScope } from "@schema";
+import type { LabelScope } from "@schema";
 import { isSignedIn } from "@/lib/actions/auth";
 import ContactsNav from "@/components/dashboard/contacts/contacts-sidebar";
 import { DynamicContextProvider } from "@/hooks/use-dynamic-context";
@@ -15,9 +14,7 @@ export default async function DashboardLayout({
 }: {
 	children: React.ReactNode;
 }) {
-	const publicConfig = getPublicEnv();
-	const [identityMailboxes, user, contactLabels] = await Promise.all([
-		fetchIdentityMailboxList(),
+	const [user, contactLabels] = await Promise.all([
 		isSignedIn(),
 		fetchContactLabelsWithCounts(),
 	]);
@@ -25,9 +22,7 @@ export default async function DashboardLayout({
 	return (
 		<>
 			<AppSidebar
-				publicConfig={publicConfig}
 				user={user}
-				identityMailboxes={identityMailboxes}
 				sidebarTopContent={
 					<>
 						<div className={"-mt-1"}>

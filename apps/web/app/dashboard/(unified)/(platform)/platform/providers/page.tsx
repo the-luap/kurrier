@@ -9,13 +9,14 @@ import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Separator } from "@/components/ui/separator";
 
 export default async function ProvidersPage() {
-	const userProviders = await syncProviders();
-
-	const smtpSecrets = await fetchDecryptedSecrets({
-		linkTable: smtpAccountSecrets,
-		foreignCol: smtpAccountSecrets.accountId,
-		secretIdCol: smtpAccountSecrets.secretId,
-	});
+	const [userProviders, smtpSecrets] = await Promise.all([
+		syncProviders(),
+		fetchDecryptedSecrets({
+			linkTable: smtpAccountSecrets,
+			foreignCol: smtpAccountSecrets.accountId,
+			secretIdCol: smtpAccountSecrets.secretId,
+		}),
+	]);
 
 	return (
 		<>

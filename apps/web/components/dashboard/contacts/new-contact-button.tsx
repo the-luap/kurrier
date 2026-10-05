@@ -1,6 +1,6 @@
 "use client";
 import React from "react";
-import { X, Plus } from "lucide-react";
+import { Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ActionIcon } from "@mantine/core";
 import { useIsMobile } from "@/hooks/use-mobile";
@@ -16,10 +16,12 @@ export default function NewContactButton({
 	return (
 		<>
 			{isMobile ? (
-				<ActionIcon>
-					<Link href={"/dashboard/contacts/new"}>
-						<Plus className="h-4 w-4" />
-					</Link>
+				<ActionIcon
+					component={Link}
+					href={"/dashboard/contacts/new"}
+					aria-label="Create contact"
+				>
+					<Plus className="h-4 w-4" />
 				</ActionIcon>
 			) : (
 				<Button asChild={true} hidden={!hideOnMobile} size="lg">

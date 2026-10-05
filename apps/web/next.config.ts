@@ -5,8 +5,16 @@ const nextConfig: NextConfig = {
 	output: "standalone",
 	serverExternalPackages: ["pino", "pino-pretty", "thread-stream"],
 	reactCompiler: true,
+	poweredByHeader: false,
 	experimental: {
 		proxyClientMaxBodySize: "10gb",
+		// lucide-react and @tabler/icons-react are optimized by Next by default;
+		// Mantine recommends adding its barrel packages explicitly.
+		optimizePackageImports: [
+			"@mantine/core",
+			"@mantine/hooks",
+			"@mantine/dates",
+		],
 	},
 	// cacheComponents: true,
 	images: {

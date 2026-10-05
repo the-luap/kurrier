@@ -10,7 +10,11 @@ import { eq } from "drizzle-orm";
 import { createClient } from "@/lib/supabase/server";
 import { getRedis } from "@/lib/actions/get-redis";
 
-async function Page({ params }: { params: { contactsPublicId: string } }) {
+async function Page({
+	params,
+}: {
+	params: Promise<{ contactsPublicId: string }>;
+}) {
 	const { contactsPublicId } = await params;
 
 	const rls = await rlsClient();
@@ -26,13 +30,18 @@ async function Page({ params }: { params: { contactsPublicId: string } }) {
 		);
 	}
 
-	const supabase = await createClient();
-	const { data } = await supabase.storage
-		.from("attachments")
-		.createSignedUrl(String(contact.profilePicture), 600);
-	const profilePictureUrl = data?.signedUrl || null;
-
-	const user = await isSignedIn();
+	const [profilePictureUrl, user] = await Promise.all([
+		contact.profilePicture
+			? createClient()
+					.then((supabase) =>
+						supabase.storage
+							.from("attachments")
+							.createSignedUrl(String(contact.profilePicture), 600),
+					)
+					.then(({ data }) => data?.signedUrl || null)
+			: Promise.resolve(null),
+		isSignedIn(),
+	]);
 	const publicConfig = getPublicEnv();
 	const updateContactAction = async (_prev: FormState, formData: FormData) => {
 		"use server";

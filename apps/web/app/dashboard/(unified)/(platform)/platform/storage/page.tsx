@@ -1,46 +1,40 @@
 import * as React from "react";
 import { Container } from "@/components/common/containers";
 import { ProviderLabels, STORAGE_PROVIDERS } from "@schema";
-import {
-	fetchDecryptedSecrets,
-	getProviderById,
-	syncProviders,
-} from "@/lib/actions/dashboard";
+import { fetchDecryptedSecrets, syncProviders } from "@/lib/actions/dashboard";
 import ProviderCardShell from "@/components/dashboard/providers/provider-card-shell";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Separator } from "@/components/ui/separator";
 import VolumesManager from "@/components/dashboard/storage/volumes-manager";
 import { rlsClient } from "@/lib/actions/clients";
-import { driveVolumes, providerSecrets, smtpAccountSecrets } from "@db";
+import { driveVolumes, providerSecrets } from "@db";
 import { parseSecret } from "@/lib/utils";
 
 export default async function ProvidersPage() {
-	const userProviders = await syncProviders();
 	const rls = await rlsClient();
-	const vols = await rls((tx) => tx.select().from(driveVolumes));
-	const [, userProviderAccounts] = await Promise.all([
-		fetchDecryptedSecrets({
-			linkTable: smtpAccountSecrets,
-			foreignCol: smtpAccountSecrets.accountId,
-			secretIdCol: smtpAccountSecrets.secretId,
-		}),
+	// Independent reads in parallel. The SMTP secrets were previously decrypted
+	// here too but never used.
+	const [userProviders, vols, userProviderAccounts] = await Promise.all([
+		syncProviders(),
+		rls((tx) => tx.select().from(driveVolumes)),
 		fetchDecryptedSecrets({
 			linkTable: providerSecrets,
 			foreignCol: providerSecrets.providerId,
 			secretIdCol: providerSecrets.secretId,
 		}),
 	]);
+	const providersById = new Map(userProviders.map((p) => [p.id, p]));
 
 	const options = [];
 	for (const providerAccount of userProviderAccounts) {
 		const secret = parseSecret(providerAccount);
 		if (secret.verified) {
-			const provider = await getProviderById(
+			const provider = providersById.get(
 				String(providerAccount.linkRow.providerId),
 			);
-			const providerName =
-				ProviderLabels[provider?.type || "unknown"] || "Unknown Provider";
 			if (provider) {
+				const providerName =
+					ProviderLabels[provider.type] || "Unknown Provider";
 				options.push({
 					label: providerName,
 					value: String(providerAccount.providerId),

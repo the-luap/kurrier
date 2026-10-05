@@ -7,7 +7,7 @@ import type { UserResponse } from "@supabase/supabase-js";
 import { IconFrame } from "@tabler/icons-react";
 import { Calendar, Contact, HardDrive, Inbox, MailOpen } from "lucide-react";
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import * as React from "react";
 import KurrierLogo from "@/components/common/kurrier-logo";
 import ThemeColorPicker from "@/components/common/theme-color-picker";
@@ -29,12 +29,56 @@ import type { FetchIdentityMailboxListResult } from "@/lib/actions/mailbox";
 import { cn } from "@/lib/utils";
 
 type UnifiedSidebarProps = React.ComponentProps<typeof Sidebar> & {
-	publicConfig: PublicConfig;
+	/** @deprecated unused by the sidebar; kept optional for compatibility */
+	publicConfig?: PublicConfig;
 	user: UserResponse["data"]["user"];
-	identityMailboxes: FetchIdentityMailboxListResult;
+	/** @deprecated unused by the sidebar; kept optional for compatibility */
+	identityMailboxes?: FetchIdentityMailboxListResult;
 	sidebarSectionContent?: React.ReactNode;
 	sidebarTopContent?: React.ReactNode;
 };
+
+type NavItem = {
+	title: string;
+	url: string;
+	icon: React.ComponentType<{ className?: string }>;
+	/** pathname fragment that marks this section as active */
+	match: string;
+};
+
+// Static: defined once at module level so it is not recreated per render.
+const NAV_MAIN: NavItem[] = [
+	{ title: "All Mail", url: "/dashboard/mail", icon: Inbox, match: "/mail" },
+	{
+		title: "Contacts",
+		url: "/dashboard/contacts",
+		icon: Contact,
+		match: "/contacts",
+	},
+	{
+		title: "Calendar",
+		url: "/dashboard/calendar",
+		icon: Calendar,
+		match: "/calendar",
+	},
+	{ title: "Drive", url: "/dashboard/drive", icon: HardDrive, match: "/drive" },
+	{
+		title: "Platform",
+		url: "/dashboard/platform/overview",
+		icon: IconFrame,
+		match: "/platform",
+	},
+];
+
+function sectionTitleForPath(pathName: string | null): string {
+	// Order matters: platform wins over the others (e.g. /platform/contacts).
+	for (const match of ["/platform", "/contacts", "/calendar", "/drive"]) {
+		if (pathName?.includes(match)) {
+			return NAV_MAIN.find((i) => i.match === match)?.title ?? "All Mail";
+		}
+	}
+	return "All Mail";
+}
 
 export function AppSidebar({ ...props }: UnifiedSidebarProps) {
 	const {
@@ -47,147 +91,20 @@ export function AppSidebar({ ...props }: UnifiedSidebarProps) {
 	} = props;
 
 	const isMobile = useMediaQuery("(max-width: 768px)");
-
-	const allMailUrl = "/dashboard/mail";
-
-	const data = {
-		navMain: [
-			{
-				title: "All Mail",
-				url: allMailUrl,
-				icon: Inbox,
-				isActive: true,
-			},
-			{
-				title: "Contacts",
-				url: "/dashboard/contacts",
-				icon: Contact,
-				isActive: true,
-			},
-			{
-				title: "Calendar",
-				url: "/dashboard/calendar",
-				icon: Calendar,
-				isActive: true,
-			},
-			{
-				title: "Drive",
-				url: "/dashboard/drive",
-				icon: HardDrive,
-				isActive: true,
-			},
-			{
-				title: "Platform",
-				url: "/dashboard/platform/overview",
-				icon: IconFrame,
-				isActive: false,
-			},
-		],
-		// navPlatform: [
-		// 	{
-		// 		title: "Overview",
-		// 		url: "/dashboard/platform/overview",
-		// 		icon: LayoutDashboard,
-		// 		items: [],
-		// 	},
-		// 	{
-		// 		title: "Providers",
-		// 		url: "/dashboard/platform/providers",
-		// 		icon: Plug,
-		// 		items: [],
-		// 	},
-		// 	{
-		// 		title: "Identities",
-		// 		url: "/dashboard/platform/identities",
-		// 		icon: Send,
-		// 		items: [],
-		// 	},
-		// 	{
-		// 		title: "Sync Services",
-		// 		url: "/dashboard/platform/sync-services",
-		// 		icon: FolderSync,
-		// 		items: [],
-		// 	},
-		// 	{
-		// 		title: "API Keys",
-		// 		url: "/dashboard/platform/api-keys",
-		// 		icon: Key,
-		// 		items: [],
-		// 	},
-		// ],
-	};
-
 	const pathName = usePathname();
-	const isOnPlatform = pathName?.includes("/platform");
-	const isOnContacts = pathName?.includes("/contacts");
-	const isOnCalendar = pathName?.includes("/calendar");
-	const isOnDrive = pathName?.includes("/drive");
 
-	type SidebarSection = "mail" | "contacts" | "platform" | "calendar" | "drive";
-
-	const section: SidebarSection = isOnPlatform
-		? "platform"
-		: isOnContacts
-			? "contacts"
-			: isOnCalendar
-				? "calendar"
-				: isOnDrive
-					? "drive"
-					: "mail";
-
-	const [activeItem, setActiveItem] = React.useState(() => {
-		if (section === "platform") {
-			return (
-				data.navMain.find((i) => i.url.includes("/platform")) ?? data.navMain[0]
-			);
-		}
-		if (section === "contacts") {
-			return (
-				data.navMain.find((i) => i.url.includes("/contacts")) ?? data.navMain[0]
-			);
-		}
-		if (section === "calendar") {
-			return (
-				data.navMain.find((i) => i.url.includes("/calendar")) ?? data.navMain[0]
-			);
-		}
-		if (section === "drive") {
-			return (
-				data.navMain.find((i) => i.url.includes("/drive")) ?? data.navMain[0]
-			);
-		}
-		return data.navMain.find((i) => i.url.includes("/mail")) ?? data.navMain[0];
-	});
-
-	React.useEffect(() => {
-		if (section === "platform") {
-			setActiveItem(
-				data.navMain.find((i) => i.url.includes("/platform")) ??
-					data.navMain[0],
-			);
-		} else if (section === "calendar") {
-			setActiveItem(
-				data.navMain.find((i) => i.url.includes("/calendar")) ??
-					data.navMain[0],
-			);
-		} else if (section === "contacts") {
-			setActiveItem(
-				data.navMain.find((i) => i.url.includes("/contacts")) ??
-					data.navMain[0],
-			);
-		} else if (section === "drive") {
-			setActiveItem(
-				data.navMain.find((i) => i.url.includes("/drive")) ?? data.navMain[0],
-			);
-		} else {
-			setActiveItem(
-				data.navMain.find((i) => i.url.includes("/mail")) ?? data.navMain[0],
-			);
-		}
-	}, [section, data.navMain]);
+	// Active item is derived from the URL. A click highlights the target
+	// immediately (optimistic) until the navigation changes the pathname.
+	const [pendingNav, setPendingNav] = React.useState<{
+		title: string;
+		fromPath: string | null;
+	} | null>(null);
+	const activeTitle =
+		pendingNav && pendingNav.fromPath === pathName
+			? pendingNav.title
+			: sectionTitleForPath(pathName);
 
 	const { setOpen, toggleSidebar } = useSidebar();
-	const router = useRouter();
 
 	return (
 		<Sidebar
@@ -228,46 +145,54 @@ export function AppSidebar({ ...props }: UnifiedSidebarProps) {
 					<SidebarGroup className={"mt-8"}>
 						<SidebarGroupContent className="px-1.5 md:px-0">
 							<SidebarMenu>
-								{data.navMain.map((item) => (
-									<SidebarMenuItem
-										key={item.title}
-										onClick={() => {
-											if (isMobile) {
-												toggleSidebar();
-											}
-										}}
-									>
-										<SidebarMenuButton
-											tooltip={{
-												children: item.title,
-												hidden: false,
-											}}
+								{NAV_MAIN.map((item) => {
+									const isActive = activeTitle === item.title;
+									return (
+										<SidebarMenuItem
+											key={item.title}
 											onClick={() => {
-												setActiveItem(item);
-												setOpen(true);
-												router.push(item.url);
-											}}
-											isActive={activeItem?.title === item.title}
-											className={cn(
-												"relative px-2.5 transition-colors md:px-2",
-												activeItem?.title === item.title &&
-													"bg-primary/10 text-sidebar-accent-foreground dark:bg-primary/20",
-											)}
-										>
-											{item.title === activeItem?.title ? (
-												<span className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-primary" />
-											) : null}
-											<item.icon
-												className={
-													item.title === activeItem?.title
-														? "text-primary dark:text-primary"
-														: ""
+												if (isMobile) {
+													toggleSidebar();
 												}
-											/>
-											<span>{item.title}</span>
-										</SidebarMenuButton>
-									</SidebarMenuItem>
-								))}
+											}}
+										>
+											<SidebarMenuButton
+												asChild
+												tooltip={{
+													children: item.title,
+													hidden: false,
+												}}
+												isActive={isActive}
+												className={cn(
+													"relative px-2.5 transition-colors md:px-2",
+													isActive &&
+														"bg-primary/10 text-sidebar-accent-foreground dark:bg-primary/20",
+												)}
+											>
+												<Link
+													href={item.url}
+													onClick={() => {
+														setPendingNav({
+															title: item.title,
+															fromPath: pathName,
+														});
+														setOpen(true);
+													}}
+												>
+													{isActive ? (
+														<span className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-primary" />
+													) : null}
+													<item.icon
+														className={
+															isActive ? "text-primary dark:text-primary" : ""
+														}
+													/>
+													<span>{item.title}</span>
+												</Link>
+											</SidebarMenuButton>
+										</SidebarMenuItem>
+									);
+								})}
 
 								{isMobile ? (
 									<>

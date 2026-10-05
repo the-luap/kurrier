@@ -91,10 +91,10 @@ function CalendarTopBar() {
 				</Button>
 
 				<div className="flex gap-2 items-center">
-					<ActionIcon variant="subtle" onClick={prev}>
+					<ActionIcon variant="subtle" onClick={prev} aria-label="Previous">
 						<ChevronLeft size={24} />
 					</ActionIcon>
-					<ActionIcon variant="subtle" onClick={next}>
+					<ActionIcon variant="subtle" onClick={next} aria-label="Next">
 						<ChevronRight size={24} />
 					</ActionIcon>
 				</div>

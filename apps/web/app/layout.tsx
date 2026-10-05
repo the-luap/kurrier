@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { cookies } from "next/headers";
 import { JetBrains_Mono, Plus_Jakarta_Sans } from "next/font/google";
 import "./globals.css";
@@ -31,12 +31,24 @@ const jakartaSans = Plus_Jakarta_Sans({
 const jetbrains = JetBrains_Mono({
 	variable: "--font-mono",
 	subsets: ["latin"],
+	// Only used on a few settings screens; don't preload it on every page.
+	preload: false,
 });
 
 export const metadata: Metadata = {
 	title: "Kurrier",
 	description: "Mailbox, but nice.",
 };
+
+export const viewport: Viewport = {
+	width: "device-width",
+	initialScale: 1,
+};
+
+// In "system" mode the server cannot know the OS preference on the first
+// visit (no resolved cookie yet). Resolve it before first paint so the page
+// does not flash light -> dark while waiting for hydration.
+const SYSTEM_MODE_SCRIPT = `try{var d=window.matchMedia("(prefers-color-scheme: dark)").matches,e=document.documentElement;e.classList.toggle("dark",d);e.style.colorScheme=d?"dark":"light"}catch(_){}`;
 
 export default async function RootLayout({
 	children,
@@ -51,9 +63,11 @@ export default async function RootLayout({
 		jar.get(MODE_COOKIE)?.value,
 	);
 
-	const resolved = jar.get(RESOLVED_COOKIE)?.value as
-		| Partial<ThemeMode>
-		| undefined;
+	const resolvedCookie = jar.get(RESOLVED_COOKIE)?.value;
+	const resolved =
+		resolvedCookie === "dark" || resolvedCookie === "light"
+			? resolvedCookie
+			: undefined;
 	const initialDark =
 		mode === "dark" ? true : mode === "light" ? false : resolved === "dark";
 
@@ -75,11 +89,21 @@ export default async function RootLayout({
 					defaultColorScheme={colorScheme}
 					nonce="8IBTHwOdqNKAWeKl7plt8g=="
 				/>
+				{mode === "system" && (
+					<script
+						// biome-ignore lint/security/noDangerouslySetInnerHtml: static, inline pre-paint theme script
+						dangerouslySetInnerHTML={{ __html: SYSTEM_MODE_SCRIPT }}
+					/>
+				)}
 			</head>
 			<body
 				className={`${jakartaSans.variable} ${jetbrains.variable} font-sans bg-background text-foreground antialiased`}
 			>
-				<AppearanceProvider initialTheme={theme} initialMode={mode}>
+				<AppearanceProvider
+					initialTheme={theme}
+					initialMode={mode}
+					initialResolved={resolved}
+				>
 					<ConfigProvider value={publicConfig}>
 						<MantineProvider
 							theme={mantineTheme}
