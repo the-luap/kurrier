@@ -1,2 +1,3 @@
-ALTER TABLE "calendar_events" ADD COLUMN "recurrence_rule" text;--> statement-breakpoint
-ALTER TABLE "calendar_events" ADD COLUMN "recurrence_exdates" timestamp with time zone[] DEFAULT '{}'::timestamptz[] NOT NULL;
+ALTER TABLE "workspaces" ADD COLUMN "theme" text DEFAULT 'indigo' NOT NULL;--> statement-breakpoint
+ALTER TABLE "workspaces" ADD COLUMN "custom_color" text;--> statement-breakpoint
+ALTER TABLE "workspaces" ADD COLUMN "logo_key" text;

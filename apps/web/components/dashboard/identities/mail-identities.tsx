@@ -1,14 +1,9 @@
 "use client";
 
-import { ActionIcon, Button, CopyButton, Tooltip } from "@mantine/core";
-import { modals } from "@mantine/modals";
-import type { DnsRecord } from "@providers";
-import {
-	type FormState,
-	type IdentityStatus,
-	IdentityStatusMeta,
-} from "@schema";
-import { IconCheck, IconCopy, IconSend } from "@tabler/icons-react";
+import * as React from "react";
+import { Container } from "@/components/common/containers";
+import { Card, CardContent } from "@/components/ui/card";
+import {ActionIcon, Button, CopyButton, Tooltip} from "@mantine/core";
 import {
 	ArrowDownFromLine,
 	ArrowUpFromLine,
@@ -16,34 +11,65 @@ import {
 	CheckCircle,
 	Clock,
 	Eye,
-	Globe,
+	Globe, LoaderCircle,
 	Mail,
-	PencilLine,
 	Plus,
 	RefreshCw,
 	Trash2,
-	Verified,
+	Verified, XCircle,
 } from "lucide-react";
-import * as React from "react";
-import { useMemo, useState } from "react";
-import { toast } from "sonner";
-import { Container } from "@/components/common/containers";
-import AddDomainIdentityForm from "@/components/dashboard/identities/add-domain-identity-form";
+import { parseSecret } from "@/lib/utils";
+import { modals } from "@mantine/modals";
 import AddEmailIdentityForm from "@/components/dashboard/identities/add-email-identity-form";
-import EmailIdentityStatus from "@/components/dashboard/identities/email-identity-status";
-import IdentitySignatureForm from "@/components/dashboard/identities/identity-signature-form";
-import ProviderBadge from "@/components/dashboard/identities/provider-badge";
-import IsVerifiedStatus from "@/components/dashboard/providers/is-verified-status";
-import { Card, CardContent } from "@/components/ui/card";
 import {
 	deleteDomainIdentity,
 	deleteEmailIdentity,
-	type FetchDecryptedSecretsResult,
-	type FetchUserIdentitiesResult,
+	FetchDecryptedSecretsResult, FetchGoogleAccountsResult,
+	FetchUserIdentitiesResult,
 	testSendingEmail,
 	verifyDomainIdentity,
 } from "@/lib/actions/dashboard";
-import { parseSecret } from "@/lib/utils";
+import ProviderBadge from "@/components/dashboard/identities/provider-badge";
+import IsVerifiedStatus from "@/components/dashboard/providers/is-verified-status";
+import { IconCheck, IconCopy, IconSend } from "@tabler/icons-react";
+import { useMemo, useState } from "react";
+import { toast } from "sonner";
+import { responsiveModalActionsClassName } from "@/components/common/modal-actions";
+import AddDomainIdentityForm from "@/components/dashboard/identities/add-domain-identity-form";
+import { FormState, IdentityStatus, IdentityStatusMeta } from "@schema";
+import EmailIdentityStatus from "@/components/dashboard/identities/email-identity-status";
+import { DnsRecord } from "@providers";
+import MarkDefaultDentity from "@/components/dashboard/identities/mark-default-dentity";
+import {WorkspaceEntity} from "@db";
+import {
+	FetchAdminWorkspaceIdentitiesResult,
+	FetchWorkspaceMembersResult
+} from "@/lib/actions/workspace";
+import AddVirtualEmailIdentityForm from "@/components/dashboard/identities/add-virtual-email-identity-form";
+import { useOptionalDictionary } from "@/components/providers/dictionary-provider";
+import ManageIdentityAccess from "@/components/dashboard/identities/manage-identity-access";
+
+type Dict = ReturnType<typeof useOptionalDictionary>;
+
+const IDENTITY_STATUS_KEYS: Record<
+	IdentityStatus,
+	{ label: string; note: string }
+> = {
+	unverified: { label: "identityStatusUnverifiedLabel", note: "identityStatusUnverifiedNote" },
+	pending: { label: "identityStatusPendingLabel", note: "identityStatusPendingNote" },
+	verified: { label: "identityStatusVerifiedLabel", note: "identityStatusVerifiedNote" },
+	failed: { label: "identityStatusFailedLabel", note: "identityStatusFailedNote" },
+};
+
+function getIdentityStatusMeta(status: IdentityStatus, dict: Dict) {
+	const keys = IDENTITY_STATUS_KEYS[status];
+	const fallback = IdentityStatusMeta[status];
+	const platformDict = dict?.platform as Record<string, string> | undefined;
+	return {
+		label: platformDict?.[keys.label] ?? fallback.label,
+		note: platformDict?.[keys.note] ?? fallback.note,
+	};
+}
 
 function SectionHeader({
 	title,
@@ -57,8 +83,8 @@ function SectionHeader({
 	action?: React.ReactNode;
 }) {
 	return (
-		<div className="flex items-start justify-between">
-			<div>
+		<div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-start sm:justify-between">
+			<div className="min-w-0">
 				<div className="flex items-center gap-2">
 					<h2 className="text-sm font-medium uppercase tracking-wide text-muted-foreground">
 						{title}
@@ -71,7 +97,7 @@ function SectionHeader({
 					<p className="mt-1 text-xs text-muted-foreground">{subtitle}</p>
 				) : null}
 			</div>
-			{action ? <div className="ml-4">{action}</div> : null}
+			{action ? <div className="w-full sm:ml-4 sm:w-auto">{action}</div> : null}
 		</div>
 	);
 }
@@ -80,13 +106,24 @@ export default function MailIdentities({
 	userIdentities,
 	smtpAccounts,
 	providerAccounts,
+	googleAccounts,
 	providerOptions,
+	workspace,
+	workspaceMembers,
+	workspaceUserIdentities,
+	canManageIdentityAccess
 }: {
 	userIdentities: FetchUserIdentitiesResult;
 	smtpAccounts: FetchDecryptedSecretsResult;
 	providerAccounts: FetchDecryptedSecretsResult;
+	googleAccounts: FetchGoogleAccountsResult;
 	providerOptions: { label: string; value: string }[];
+	workspace: WorkspaceEntity;
+	workspaceMembers: FetchWorkspaceMembersResult;
+	workspaceUserIdentities: FetchAdminWorkspaceIdentitiesResult;
+	canManageIdentityAccess: boolean;
 }) {
+	const dict = useOptionalDictionary();
 	const userEmailIdentities = useMemo(
 		() => userIdentities.filter((i) => i.identities.kind === "email"),
 		[userIdentities],
@@ -114,25 +151,30 @@ export default function MailIdentities({
 	) => {
 		// setSendTesting(true);
 		setSendingEmailId(userIdentity.identities.id);
-		const res = await testSendingEmail(userIdentity, decryptedSecrets);
-		if (res.success) {
-			toast.success(res.message, {
-				description: res.message,
-			});
-		} else {
-			toast.error(res.error, {
-				description: res.message,
-			});
+		try {
+			const res = await testSendingEmail(userIdentity, decryptedSecrets);
+			if (res.success) {
+				toast.success(res.message);
+			} else {
+				toast.error(res.error, {
+					description: res.message,
+				});
+			}
+		} catch (error) {
+			// A thrown action must not leave the button spinning forever.
+			toast.error(
+				error instanceof Error ? error.message : "Failed to send test email.",
+			);
+		} finally {
+			setSendingEmailId(null);
 		}
-		// setSendTesting(false);
-		setSendingEmailId(null);
 	};
 
 	const openAddEmailForm = async () => {
 		const openModalId = modals.open({
 			title: (
 				<div className="font-semibold text-brand-foreground">
-					Add Email Identity
+					{dict?.platform?.addEmailIdentity ?? "Add Email Identity"}
 				</div>
 			),
 			closeOnEscape: false,
@@ -144,7 +186,36 @@ export default function MailIdentities({
 						smtpAccounts={smtpAccounts}
 						providerOptions={providerOptions}
 						providerAccounts={providerAccounts}
+						googleAccounts={googleAccounts}
 						userDomainIdentities={userDomainIdentities}
+						workspaceMembers={workspaceMembers}
+						userEmailIdentities={userEmailIdentities}
+						onCompleted={() => modals.close(openModalId)}
+					/>
+				</div>
+			),
+		});
+	};
+
+	const openAddVirtualEmailForm = async () => {
+		const openModalId = modals.open({
+			title: (
+				<div className="font-semibold text-brand-foreground">
+					{dict?.platform?.addVirtualEmailIdentity ?? "Add Virtual Email Identity"}
+				</div>
+			),
+			closeOnEscape: false,
+			closeOnClickOutside: false,
+			size: "lg",
+			children: (
+				<div className="p-2">
+					<AddVirtualEmailIdentityForm
+						smtpAccounts={smtpAccounts}
+						providerOptions={providerOptions}
+						providerAccounts={providerAccounts}
+						userDomainIdentities={userDomainIdentities}
+						workspaceMembers={workspaceMembers}
+						userEmailIdentities={userEmailIdentities}
 						onCompleted={() => modals.close(openModalId)}
 					/>
 				</div>
@@ -156,7 +227,7 @@ export default function MailIdentities({
 		const openModalId = modals.open({
 			title: (
 				<div className="font-semibold text-brand-foreground">
-					Add Domain Identity
+					{dict?.platform?.addDomainIdentity ?? "Add Domain Identity"}
 				</div>
 			),
 			closeOnEscape: false,
@@ -176,54 +247,84 @@ export default function MailIdentities({
 		});
 	};
 
-	const openSignatureForm = async (
-		userIdentity: FetchUserIdentitiesResult[number],
-	) => {
-		const openModalId = modals.open({
-			title: (
-				<div className="font-semibold text-brand-foreground">
-					Signature for <strong>{userIdentity.identities.value}</strong>
-				</div>
-			),
-			closeOnEscape: false,
-			closeOnClickOutside: false,
-			size: "lg",
-			children: (
-				<div className="p-2">
-					<IdentitySignatureForm
-						identityId={userIdentity.identities.id}
-						identityValue={userIdentity.identities.value}
-						defaultSignature={userIdentity.identities.signatureHtml}
-						onCompleted={() => modals.close(openModalId)}
-					/>
-				</div>
-			),
-		});
-	};
 
 	const confirmDeleteIdentity = async (
 		userIdentity: FetchUserIdentitiesResult[number],
 	) => {
 		modals.openConfirmModal({
-			title: (
-				<div className={"font-semibold text-brand-foreground"}>
-					Delete Identity
-				</div>
-			),
+			title: <div className="font-semibold text-brand-foreground">{dict?.platform?.deleteIdentity ?? "Delete Identity"}</div>,
 			centered: true,
 			children: (
-				<div className="text-sm ">
-					Are you sure you want to delete <b>{userIdentity.identities.value}</b>
-					? This will remove the identity permanently and unlink any associated
-					secrets.
+				<div className="text-sm">
+					{dict?.platform?.confirmDeleteIdentityPrefix ?? "Are you sure you want to delete "}<b>{userIdentity.identities.value}</b>{dict?.platform?.confirmDeleteIdentitySuffix ?? "? This will remove the identity permanently and unlink any associated secrets."}
 				</div>
 			),
-			labels: { confirm: "Delete", cancel: "Cancel" },
+			labels: { confirm: dict?.platform?.delete ?? "Delete", cancel: dict?.platform?.cancel ?? "Cancel" },
 			confirmProps: { color: "red" },
+			groupProps: { className: responsiveModalActionsClassName },
 			onConfirm: async () => {
-				const { success, message } = await deleteEmailIdentity(userIdentity);
-				if (success) {
-					toast.success(message);
+				const modalId = modals.open({
+					title: <div className="font-semibold text-brand-foreground">{dict?.platform?.deletingIdentity ?? "Deleting identity"}</div>,
+					centered: true,
+					closeOnEscape: false,
+					closeOnClickOutside: false,
+					withCloseButton: false,
+					children: (
+						<div className={"my-4"}>
+							<div className={"my-4"}>
+								{dict?.platform?.deletingPrefix ?? "Deleting "}<b>{userIdentity.identities.value}</b>{dict?.platform?.deletingSuffix ?? ". This may take a moment."}
+							</div>
+							<div className="flex justify-center py-4">
+								<LoaderCircle className="h-8 w-8 animate-spin text-brand dark:text-brand-foreground" />
+							</div>
+						</div>
+					),
+				});
+
+				const res = await deleteEmailIdentity(userIdentity);
+
+				if (res.success) {
+					toast.success(res.message);
+
+					modals.updateModal({
+						modalId,
+						title: <div className="font-semibold text-brand-foreground">{dict?.platform?.identityDeleted ?? "Identity deleted"}</div>,
+						closeOnEscape: true,
+						closeOnClickOutside: true,
+						withCloseButton: true,
+						children: (
+							<div className={"my-4"}>
+								<div className={"my-4"}>{res.message}</div>
+								<div className={"my-4 flex justify-center"}>
+									<CheckCircle className="h-8 w-8 text-teal-600" />
+								</div>
+								<Button fullWidth onClick={() => modals.close(modalId)}>
+									{dict?.platform?.close ?? "Close"}
+								</Button>
+							</div>
+						),
+					});
+				} else {
+					toast.error(dict?.platform?.failedToDeleteIdentity ?? "Failed to delete identity");
+
+					modals.updateModal({
+						modalId,
+						title: <div className="font-semibold text-brand-foreground">{dict?.platform?.deleteFailed ?? "Delete failed"}</div>,
+						closeOnEscape: true,
+						closeOnClickOutside: true,
+						withCloseButton: true,
+						children: (
+							<div className={"my-4"}>
+								<div className={"my-4"}>{res.message || (dict?.platform?.failedToDeleteIdentity ?? "Failed to delete identity.")}</div>
+								<div className={"my-4 flex justify-center"}>
+									<XCircle className="h-8 w-8 text-red-600" />
+								</div>
+								<Button fullWidth onClick={() => modals.close(modalId)}>
+									{dict?.platform?.close ?? "Close"}
+								</Button>
+							</div>
+						),
+					});
 				}
 			},
 		});
@@ -234,36 +335,115 @@ export default function MailIdentities({
 	) => {
 		modals.openConfirmModal({
 			title: (
-				<div className={"font-semibold text-brand-foreground"}>
-					Delete Identity
+				<div className="font-semibold text-brand-foreground">
+					{dict?.platform?.deleteIdentity ?? "Delete Identity"}
 				</div>
 			),
 			centered: true,
 			children: (
-				<div className="text-sm ">
-					Are you sure you want to delete{" "}
-					<b>{userDomainIdentity.identities.value}</b>? This will remove the
-					identity permanently and unlink any associated secrets.
+				<div className="text-sm">
+					{dict?.platform?.confirmDeleteIdentityPrefixSpace ?? "Are you sure you want to delete"}{" "}
+					<b>{userDomainIdentity.identities.value}</b>{dict?.platform?.confirmDeleteIdentitySuffix ?? "? This will remove the identity permanently and unlink any associated secrets."}
 				</div>
 			),
-			labels: { confirm: "Delete", cancel: "Cancel" },
+			labels: { confirm: dict?.platform?.delete ?? "Delete", cancel: dict?.platform?.cancel ?? "Cancel" },
 			confirmProps: { color: "red" },
+			groupProps: { className: responsiveModalActionsClassName },
 			onConfirm: async () => {
-				const providerAccount = providerAccounts.find((acc) => {
-					return (
-						acc.linkRow.providerId === userDomainIdentity.identities.providerId
-					);
+				const modalId = modals.open({
+					title: (
+						<div className="font-semibold text-brand-foreground">
+							{dict?.platform?.deletingDomainIdentityEllipsis ?? "Deleting domain identity..."}
+						</div>
+					),
+					centered: true,
+					closeOnEscape: false,
+					closeOnClickOutside: false,
+					withCloseButton: false,
+					children: (
+						<div className="space-y-4">
+							<p className="text-sm text-muted-foreground">
+								{dict?.platform?.deletingPrefixSpace ?? "Deleting"}{" "}
+								<span className="font-semibold text-foreground">
+								{userDomainIdentity.identities.value}
+							</span>
+								{dict?.platform?.deletingSuffix ?? ". This may take a moment."}
+							</p>
+
+							<div className="flex justify-center py-4">
+								<div className="h-8 w-8 animate-spin rounded-full border-2 border-muted-foreground/30 border-t-brand-foreground" />
+							</div>
+						</div>
+					),
 				});
-				const { error } = await deleteDomainIdentity(
-					userDomainIdentity,
-					providerAccount,
-				);
-				if (error) {
-					toast.error("Failed to delete domain identity", {
-						description: error,
+
+				const providerAccount = providerAccounts.find((acc) => {
+					return acc.linkRow.providerId === userDomainIdentity.identities.providerId;
+				});
+
+				const res = await deleteDomainIdentity(userDomainIdentity, providerAccount);
+
+				if (res.success) {
+					toast.success(dict?.platform?.domainIdentityDeleted ?? "Domain identity deleted");
+
+					modals.updateModal({
+						modalId,
+						title: (
+							<div className="font-semibold text-brand-foreground">
+								{dict?.platform?.domainIdentityDeleted ?? "Domain identity deleted"}
+							</div>
+						),
+						closeOnEscape: true,
+						closeOnClickOutside: true,
+						withCloseButton: true,
+						children: (
+							<div className="space-y-4">
+								<p className="text-sm text-muted-foreground">
+								<span className="font-semibold text-foreground">
+									{userDomainIdentity.identities.value}
+								</span>{" "}
+									{dict?.platform?.wasDeletedSuccessfully ?? "was deleted successfully."}
+								</p>
+
+								<div className="flex justify-center py-4">
+									<CheckCircle className="h-8 w-8 text-teal-600" />
+								</div>
+
+								<Button fullWidth onClick={() => modals.close(modalId)}>
+									{dict?.platform?.close ?? "Close"}
+								</Button>
+							</div>
+						),
 					});
 				} else {
-					toast.success("Domain identity deleted");
+					toast.error(dict?.platform?.failedToDeleteDomainIdentity ?? "Failed to delete domain identity");
+
+					modals.updateModal({
+						modalId,
+						title: (
+							<div className="font-semibold text-brand-foreground">
+								{dict?.platform?.deleteFailed ?? "Delete failed"}
+							</div>
+						),
+						closeOnEscape: true,
+						closeOnClickOutside: true,
+						withCloseButton: true,
+						children: (
+							<div className="space-y-4">
+								<p className="text-sm text-red-600">
+									{dict?.platform?.failedToDeleteDomainIdentityPeriod ?? "Failed to delete domain identity."}
+								</p>
+
+								<div className="flex justify-center py-4">
+									<BadgeMinus className="h-8 w-8 text-red-600" />
+								</div>
+
+								<Button fullWidth onClick={() => modals.close(modalId)}>
+									{dict?.platform?.close ?? "Close"}
+								</Button>
+							</div>
+						),
+					});
 				}
 			},
 		});
@@ -275,7 +455,7 @@ export default function MailIdentities({
 		modals.open({
 			title: (
 				<div className="font-semibold text-brand-foreground">
-					DNS Records for <strong>{userDomainIdentity.identities.value}</strong>
+					{dict?.platform?.dnsRecordsForPrefix ?? "DNS Records for "}<strong>{userDomainIdentity.identities.value}</strong>
 				</div>
 			),
 			closeOnEscape: false,
@@ -297,14 +477,14 @@ export default function MailIdentities({
 										</span>
 										{record.ttl && (
 											<span className="text-muted-foreground">
-												TTL: {record.ttl}
+												{dict?.platform?.ttlPrefix ?? "TTL: "}{record.ttl}
 											</span>
 										)}
 									</div>
 
 									{/* Name row with copy */}
 									<div className="flex items-center gap-2">
-										<span className="text-muted-foreground">Name:</span>
+										<span className="text-muted-foreground">{dict?.platform?.dnsName ?? "Name:"}</span>
 										<code className="break-all">
 											{record?.name
 												? record?.name
@@ -319,7 +499,7 @@ export default function MailIdentities({
 											timeout={2000}
 										>
 											{({ copied, copy }) => (
-												<Tooltip label={copied ? "Copied!" : "Copy"} withArrow>
+												<Tooltip label={copied ? (dict?.platform?.copiedExclaim ?? "Copied!") : (dict?.platform?.copy ?? "Copy")} withArrow>
 													<ActionIcon
 														color={copied ? "teal" : "gray"}
 														onClick={copy}
@@ -339,11 +519,11 @@ export default function MailIdentities({
 
 									{/* Value row with copy */}
 									<div className="flex items-center gap-2">
-										<span className="text-muted-foreground">Value:</span>
+										<span className="text-muted-foreground">{dict?.platform?.dnsValue ?? "Value:"}</span>
 										<code className="break-all">{record.value}</code>
 										<CopyButton value={record.value} timeout={1000}>
 											{({ copied, copy }) => (
-												<Tooltip label={copied ? "Copied!" : "Copy"} withArrow>
+												<Tooltip label={copied ? (dict?.platform?.copiedExclaim ?? "Copied!") : (dict?.platform?.copy ?? "Copy")} withArrow>
 													<ActionIcon
 														color={copied ? "teal" : "gray"}
 														onClick={copy}
@@ -363,7 +543,7 @@ export default function MailIdentities({
 
 									{record.priority && (
 										<div>
-											<span className="text-muted-foreground">Priority:</span>{" "}
+											<span className="text-muted-foreground">{dict?.platform?.dnsPriority ?? "Priority:"}</span>{" "}
 											{record?.priority || "10"}
 										</div>
 									)}
@@ -384,19 +564,18 @@ export default function MailIdentities({
 	return (
 		<Container variant="wide">
 			<div className="flex items-center justify-between my-4">
-				<h1 className="text-xl font-bold text-foreground">Mail Identities</h1>
+				<h1 className="text-xl font-bold text-foreground">{dict?.platform?.mailIdentities ?? "Mail Identities"}</h1>
 			</div>
 
 			<p className="max-w-prose text-sm text-muted-foreground my-6">
-				Manage domains and email addresses for sending across providers like
-				Amazon SES, Postmark, SendGrid, and custom SMTP.
+				{dict?.platform?.mailIdentitiesDescription ?? "Manage domains and email addresses for sending across providers like Amazon SES, Postmark, SendGrid, and custom SMTP."}
 			</p>
 
 			<Card className="shadow-none">
 				<CardContent className="space-y-10">
 					<div className="space-y-3">
 						<SectionHeader
-							title="Domains"
+							title={dict?.platform?.domains ?? "Domains"}
 							count={userDomainIdentities.length}
 							action={
 								<Button
@@ -404,10 +583,10 @@ export default function MailIdentities({
 									variant="outline"
 									size="sm"
 									className="gap-2"
-									aria-label="Add domain"
+									aria-label={dict?.platform?.addDomainAriaLabel ?? "Add domain"}
 								>
 									<Plus className="size-4" />
-									Add Domain
+									{dict?.platform?.addDomain ?? "Add Domain"}
 								</Button>
 							}
 						/>
@@ -440,10 +619,11 @@ export default function MailIdentities({
 																	<Verified size={16} />
 																	<span>
 																		{
-																			IdentityStatusMeta[
+																			getIdentityStatusMeta(
 																				userDomainIdentity.identities
-																					.status as IdentityStatus
-																			].label
+																					.status as IdentityStatus,
+																				dict,
+																			).label
 																		}
 																	</span>
 
@@ -451,12 +631,12 @@ export default function MailIdentities({
 																		.incomingDomain && (
 																		<div className={"flex mx-2 gap-2"}>
 																			<ArrowDownFromLine size={16} />
-																			<span>Incoming</span>
+																			<span>{dict?.platform?.incoming ?? "Incoming"}</span>
 																		</div>
 																	)}
 
 																	<ArrowUpFromLine size={16} />
-																	<span>Outgoing</span>
+																	<span>{dict?.platform?.outgoing ?? "Outgoing"}</span>
 																</div>
 															) : (
 																<div
@@ -467,10 +647,11 @@ export default function MailIdentities({
 																	<BadgeMinus size={16} />
 																	<span>
 																		{
-																			IdentityStatusMeta[
+																			getIdentityStatusMeta(
 																				userDomainIdentity.identities
-																					.status as IdentityStatus
-																			].label
+																					.status as IdentityStatus,
+																				dict,
+																			).label
 																		}
 																	</span>
 																</div>
@@ -485,10 +666,11 @@ export default function MailIdentities({
 																	<Clock className="size-3.5" />
 																)}
 																{
-																	IdentityStatusMeta[
+																	getIdentityStatusMeta(
 																		userDomainIdentity.identities
-																			.status as IdentityStatus
-																	].note
+																			.status as IdentityStatus,
+																		dict,
+																	).note
 																}
 															</span>
 														</div>
@@ -521,18 +703,18 @@ export default function MailIdentities({
 																		);
 																	if (response?.status === "verified") {
 																		toast.success(
-																			"Domain verified successfully",
+																			dict?.platform?.domainVerifiedSuccessfully ?? "Domain verified successfully",
 																		);
 																	} else {
-																		toast.error("Domain verification failed", {
+																		toast.error(dict?.platform?.domainVerificationFailed ?? "Domain verification failed", {
 																			description:
-																				"Please check your DNS records. If you've just added them, it may take some time for changes to propagate.",
+																				dict?.platform?.domainVerificationFailedDescription ?? "Please check your DNS records. If you've just added them, it may take some time for changes to propagate.",
 																		});
 																	}
 																	setVerifyingDomainId(null);
 																}}
 															>
-																Verify
+																{dict?.platform?.verify ?? "Verify"}
 															</Button>
 
 															<Button
@@ -545,13 +727,13 @@ export default function MailIdentities({
 																}
 																onClick={() => openShowDNS(userDomainIdentity)}
 															>
-																Show DNS Records
+																{dict?.platform?.showDnsRecords ?? "Show DNS Records"}
 															</Button>
 
 															<ActionIcon
 																color="red"
 																className="shrink-0"
-																aria-label="Remove identity"
+																aria-label={dict?.platform?.removeIdentityAriaLabel ?? "Remove identity"}
 																onClick={() =>
 																	confirmDeleteDomainIdentity(
 																		userDomainIdentity,
@@ -575,19 +757,31 @@ export default function MailIdentities({
 
 					<div className="space-y-3">
 						<SectionHeader
-							title="Email Addresses"
+							title={dict?.platform?.emailAddresses ?? "Email Addresses"}
 							count={userEmailIdentities.length}
 							action={
-								<Button
-									onClick={openAddEmailForm}
-									variant="outline"
-									size="sm"
-									className="gap-2"
-									aria-label="Add email"
-								>
-									<Plus className="size-4" />
-									Add Email
-								</Button>
+								<div className={"flex gap-4"}>
+									<Button
+										onClick={openAddEmailForm}
+										variant="outline"
+										size="sm"
+										className="gap-2"
+										aria-label={dict?.platform?.addEmailAriaLabel ?? "Add email"}
+									>
+										<Plus className="size-4" />
+										{dict?.platform?.addEmail ?? "Add Email"}
+									</Button>
+									{/*<Button*/}
+									{/*	onClick={openAddVirtualEmailForm}*/}
+									{/*	variant="outline"*/}
+									{/*	size="sm"*/}
+									{/*	className="gap-2"*/}
+									{/*	aria-label="Add virtual email"*/}
+									{/*>*/}
+									{/*	<Plus className="size-4" />*/}
+									{/*	Add Virtual Email*/}
+									{/*</Button>*/}
+								</div>
 							}
 						/>
 
@@ -626,6 +820,7 @@ export default function MailIdentities({
 												<div className="min-w-0">
 													<div className="truncate font-semibold text-brand-foreground">
 														{userIdentity.identities.value}
+														<MarkDefaultDentity workspaceUserIdentities={workspaceUserIdentities} workspace={workspace} userIdentity={userIdentity.identities} />
 													</div>
 
 													<div className="mt-2 flex flex-wrap items-center gap-2">
@@ -634,11 +829,11 @@ export default function MailIdentities({
 															<>
 																<IsVerifiedStatus
 																	verified={!!decrypted.sendVerified}
-																	statusName="Outgoing"
+																	statusName={dict?.platform?.outgoing ?? "Outgoing"}
 																/>
 																<IsVerifiedStatus
 																	verified={!!decrypted.receiveVerified}
-																	statusName="Incoming"
+																	statusName={dict?.platform?.incoming ?? "Incoming"}
 																/>
 															</>
 														) : (
@@ -652,21 +847,24 @@ export default function MailIdentities({
 															/>
 														)}
 													</div>
+													<div className="flex flex-wrap items-center gap-2 text-xxs mt-2 text-foreground dark:text-muted-foreground">
+														{dict?.platform?.idPrefix ?? "ID: "}<code>{userIdentity.identities.id}</code>
+													</div>
 												</div>
 											</div>
 										</div>
 
 										<div className="flex gap-2 sm:gap-3 w-full sm:w-auto">
-											<Button
-												leftSection={<IconSend size={16} />}
-												size="xs"
-												className="flex-1 sm:flex-none"
-												href={`/dashboard/mail/${userIdentity.identities.publicId}/inbox`}
-												target={"_blank"}
-												component="a"
-											>
-												Mailbox
-											</Button>
+											{/*<Button*/}
+											{/*	leftSection={<IconSend size={16} />}*/}
+											{/*	size="xs"*/}
+											{/*	className="flex-1 sm:flex-none"*/}
+											{/*	href={`/dashboard/mail/${userIdentity.identities.publicId}/inbox`}*/}
+											{/*	target={"_blank"}*/}
+											{/*	component="a"*/}
+											{/*>*/}
+											{/*	Mailbox*/}
+											{/*</Button>*/}
 											<Button
 												leftSection={<IconSend size={16} />}
 												size="xs"
@@ -674,27 +872,23 @@ export default function MailIdentities({
 												loading={sendingEmailId === userIdentity.identities.id}
 												onClick={() => initTestEmail(userIdentity, decrypted)}
 											>
-												Send Test Email
+												{dict?.platform?.sendTestEmail ?? "Send Test Email"}
 											</Button>
 
-											<Button
-												leftSection={<PencilLine size={16} />}
-												size="xs"
-												variant={
-													userIdentity.identities.signatureHtml
-														? "light"
-														: "outline"
+											<ManageIdentityAccess
+												identity={userIdentity.identities}
+												workspace={workspace}
+												workspaceMembers={workspaceMembers}
+												workspaceUserIdentities={
+													workspaceUserIdentities
 												}
-												className="flex-1 sm:flex-none"
-												onClick={() => openSignatureForm(userIdentity)}
-											>
-												Signature
-											</Button>
+												canManage={canManageIdentityAccess}
+											/>
 
 											<ActionIcon
 												color="red"
 												className="shrink-0"
-												aria-label="Remove identity"
+												aria-label={dict?.platform?.removeIdentityAriaLabel ?? "Remove identity"}
 												onClick={() => confirmDeleteIdentity(userIdentity)}
 											>
 												<Trash2 className="h-4 w-4" />
@@ -718,19 +912,21 @@ function EmptyState({
 	kind: "domain" | "email";
 	query: string;
 }) {
+	const dict = useOptionalDictionary();
 	const searching = query.trim().length > 0;
-	const label = kind === "domain" ? "domains" : "email addresses";
+	const label = kind === "domain" ? (dict?.platform?.domainsLower ?? "domains") : (dict?.platform?.emailAddressesLower ?? "email addresses");
 	return (
 		<div className="rounded-lg border border-dashed p-6 text-center">
 			<p className="text-sm text-muted-foreground">
 				{searching ? (
 					<>
-						No {label} match{" "}
-						<span className="font-medium text-foreground">“{query}”</span>. Try
-						a different search.
+						{dict?.platform?.noItemsMatchPrefix ?? "No "}{label}{dict?.platform?.noItemsMatchMiddle ?? " match"}{" "}
+						<span className="font-medium text-foreground">“{query}”</span>{dict?.platform?.noItemsMatchSuffix ?? ". Try a different search."}
 					</>
+				) : kind === "domain" ? (
+					dict?.platform?.noDomainsYet ?? "No domains yet — add your first one to get started."
 				) : (
-					<>No {label} yet — add your first one to get started.</>
+					dict?.platform?.noEmailAddressesYet ?? "No email addresses yet — add your first one to get started."
 				)}
 			</p>
 		</div>

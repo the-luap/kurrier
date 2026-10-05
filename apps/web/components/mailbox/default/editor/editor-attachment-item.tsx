@@ -1,18 +1,19 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
 import type { MessageAttachmentEntity } from "@db";
 import type { PublicConfig } from "@schema";
-import { createClient } from "@/lib/supabase/client";
 import {
-	FileText,
-	FileImage,
-	FileVideo,
-	FileAudio,
 	CalendarDays,
+	FileAudio,
+	FileImage,
+	FileText,
+	FileVideo,
 	Paperclip,
 } from "lucide-react";
 import mime from "mime-types";
+import React from "react";
+import type { MessageAttachmentWithUrl } from "@/components/mailbox/default/email-renderer";
+import { useOptionalDictionary } from "@/components/providers/dictionary-provider";
 
 function formatBytes(bytes?: number | null) {
 	if (!bytes || bytes <= 0) return null;
@@ -54,34 +55,13 @@ function KindIcon({ kind }: { kind: string }) {
 export default function EditorAttachmentItem({
 	attachment,
 	publicConfig,
-	signedUrl,
 }: {
-	attachment: MessageAttachmentEntity;
+	// attachment: MessageAttachmentEntity;
+	attachment: MessageAttachmentWithUrl;
 	publicConfig: PublicConfig;
-	/** Pre-signed on the server (thread view); skips the client round trip. */
-	signedUrl?: string | null;
 }) {
-	const supabase = useMemo(() => createClient(publicConfig), [publicConfig]);
-
-	const [fetchedUrl, setFetchedUrl] = useState<string | null>(null);
-	const url = signedUrl ?? fetchedUrl;
-
-	useEffect(() => {
-		if (signedUrl) return;
-		let cancelled = false;
-
-		(async () => {
-			const { data } = await supabase.storage
-				.from("attachments")
-				.createSignedUrl(String(attachment.path), 300);
-
-			if (!cancelled) setFetchedUrl(data?.signedUrl || null);
-		})();
-
-		return () => {
-			cancelled = true;
-		};
-	}, [attachment.id, attachment.path, supabase, signedUrl]);
+	const dict = useOptionalDictionary();
+	const url = attachment.signedUrl;
 
 	const kind = getKind(attachment);
 	const sizeLabel = formatBytes(attachment.sizeBytes);
@@ -100,33 +80,24 @@ export default function EditorAttachmentItem({
 		>
 			<div className="h-44 bg-neutral-50 dark:bg-neutral-900/40 overflow-hidden">
 				{url && kind === "image" ? (
-					<img
-						src={url}
-						alt={title}
-						loading="lazy"
-						decoding="async"
-						className="h-full w-full object-cover"
-					/>
+					<img src={url} alt={title} className="h-full w-full object-cover" />
 				) : url && kind === "video" ? (
 					<video
 						src={url}
 						className="h-full w-full object-cover"
 						muted
 						controls={false}
-						preload="metadata"
 					/>
 				) : url && kind === "audio" ? (
 					<div className="h-full w-full flex items-center justify-center">
 						<div className="flex items-center gap-2 text-sm text-neutral-600 dark:text-neutral-300">
 							<KindIcon kind={kind} />
-							<span>Audio</span>
+							<span>{dict?.mailbox?.audio ?? "Audio"}</span>
 						</div>
 					</div>
 				) : url && kind === "pdf" ? (
 					<iframe
 						src={url}
-						title={title}
-						loading="lazy"
 						className={"h-full w-full scale-120 overflow-hidden object-cover"}
 						style={{
 							pointerEvents: "none",
@@ -138,7 +109,9 @@ export default function EditorAttachmentItem({
 						<div className="flex items-center gap-2 text-sm text-neutral-600 dark:text-neutral-300">
 							<KindIcon kind={kind} />
 							<span className="capitalize">
-								{kind === "file" ? "Attachment" : kind}
+								{kind === "file"
+									? (dict?.mailbox?.attachment ?? "Attachment")
+									: kind}
 							</span>
 						</div>
 					</div>

@@ -5,13 +5,12 @@ import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { db, driveUploadIntents, driveVolumes } from "@db";
 import { and, eq, isNull } from "drizzle-orm";
+import { resolveLocalDrivePath } from "../../../../lib/dav/drive/safe-local-path";
 
 const LOCAL_ROOT =
 	process.env.NODE_ENV === "production"
 		? "/data"
 		: path.join(process.cwd(), "../../db/webdav/data");
-
-const trimSlashes = (s: string) => s.replace(/^\/+|\/+$/g, "");
 
 const saveFilePath = async (outPath: string, event: H3Event) => {
 	await mkdir(path.dirname(outPath), { recursive: true });
@@ -27,21 +26,6 @@ const saveFilePath = async (outPath: string, event: H3Event) => {
 		return { ok: false, error: e?.message ?? "upload failed" };
 	}
 };
-
-function normalizeTargetPath(p: string) {
-	const raw = String(p || "").trim();
-	const parts = raw
-		.split("/")
-		.filter(Boolean)
-		.map((seg) => decodeURIComponent(seg));
-
-	for (const seg of parts) {
-		if (seg === "." || seg === ".." || seg.includes("\0"))
-			throw new Error("Invalid path");
-	}
-
-	return "/" + parts.join("/");
-}
 
 export default defineEventHandler(async (event) => {
 	const query = getQuery(event);
@@ -114,25 +98,23 @@ export default defineEventHandler(async (event) => {
 		return "Volume missing basePath";
 	}
 
-	let normalizedTargetPath: string;
+	let outPath: string;
 	try {
-		normalizedTargetPath = normalizeTargetPath(intentRow.targetPath);
+		outPath = resolveLocalDrivePath(
+			LOCAL_ROOT,
+			String(intentRow.volumeBasePath),
+			intentRow.targetPath,
+		);
 	} catch {
 		setResponseStatus(event, 400);
 		return "Invalid targetPath";
 	}
 
-	const filePath = path.posix.join(
-		String(intentRow.volumeBasePath),
-		trimSlashes(normalizedTargetPath),
-	);
-
-	const outPath = path.join(LOCAL_ROOT, filePath);
-
 	const res = await saveFilePath(outPath, event);
 	if (!res.ok) {
+		console.error("[webdav] upload failed", res.error);
 		setResponseStatus(event, 500);
-		return res.error ?? "Upload failed";
+		return "Upload failed";
 	}
 
 	return { ok: true };

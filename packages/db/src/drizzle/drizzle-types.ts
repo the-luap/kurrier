@@ -18,9 +18,9 @@ import {
     calendarEventAttendees,
     driveVolumes,
     driveEntries,
-    draftMessages, mailSubscriptions, userAiSettings,
+    draftMessages, mailSubscriptions, users, workspaces, emailAssets,
+    userAiSettings,
 } from "./schema";
-import { decryptedSecrets } from "./supabase-schema";
 import { z } from "zod";
 import {
 	createInsertSchema,
@@ -67,7 +67,7 @@ export type MailboxSyncCreate = typeof mailboxSync.$inferInsert;
 
 export type MailboxThreadEntity = typeof mailboxThreads.$inferSelect;
 
-export type DecryptedEntity = typeof decryptedSecrets.$inferSelect;
+// export type DecryptedEntity = typeof decryptedSecrets.$inferSelect;
 
 export const ProviderSchema = createSelectSchema(providers);
 export const SMTPAccountSchema = createSelectSchema(smtpAccounts);
@@ -116,6 +116,15 @@ export type DraftMessageEntity = typeof draftMessages.$inferSelect;
 export const DraftMessageInsertSchema = createInsertSchema(draftMessages);
 
 export type MailSubscriptionEntity = typeof mailSubscriptions.$inferSelect;
+export type UserEntity = typeof users.$inferSelect;
+export const WorkspaceRolesList = ["owner", "admin", "member"] as const;
+export type WorkspaceRolesListType = z.infer<typeof WorkspaceRolesList>;
+export type WorkspaceEntity = typeof workspaces.$inferSelect;
 
+export type EmailAssetEntity = typeof emailAssets.$inferSelect;
+export type EmailAssetInsert = typeof emailAssets.$inferInsert;
+
+// Fork: per-user AI provider settings (fork_001_user_ai_settings.sql)
 export type UserAiSettingsEntity = typeof userAiSettings.$inferSelect;
 export type UserAiSettingsCreate = typeof userAiSettings.$inferInsert;
+export type UserAiSettingsUpdate = Partial<UserAiSettingsCreate>;

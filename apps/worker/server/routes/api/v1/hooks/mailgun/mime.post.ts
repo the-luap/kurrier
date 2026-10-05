@@ -9,8 +9,12 @@ import {
 	assertInboundWebhookAuthorized,
 	extractEmailAddresses,
 	storeInboundRawEmail,
-} from "../../../../../utils/inbound-email";
+} from "../../../../../../lib/inbound-email";
 
+/**
+ * Mailgun "forward" routes post multipart/form-data (readBody does not parse
+ * it, so `body-mime` used to be undefined); other setups post urlencoded.
+ */
 async function readMailgunFields(
 	event: H3Event,
 ): Promise<Record<string, unknown>> {
@@ -36,12 +40,16 @@ export default defineEventHandler(async (event) => {
 	try {
 		const fields = await readMailgunFields(event);
 		const rawMime = fields["body-mime"];
+		// Permanent rejects resolve with { ok: false } and HTTP 200, so
+		// Mailgun does not retry them; unexpected errors return 5xx and are
+		// retried.
 		return await storeInboundRawEmail(
 			String(rawMime || ""),
 			extractEmailAddresses(fields.recipient),
+			"mailgun",
 		);
 	} catch (err) {
-		console.error("[Webhook] Mailgun inbound error:", err);
+		console.error("[Webhook] Mailgun inbound error", err);
 		throw err;
 	}
 });

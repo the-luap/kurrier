@@ -1,0 +1,274 @@
+import "server-only";
+import { createLocaleFormatter } from "@/lib/locale-format";
+import { hasLocale, type Locale } from "@/lib/locale";
+
+async function loadEn() {
+	const [
+		common,
+		auth,
+		mailbox,
+		platform,
+		contacts,
+		calendar,
+		drive,
+		dashboard,
+		validation,
+		actions,
+		vault,
+		releases,
+		ai
+	] = await Promise.all([
+		import("@/lib/dictionaries/en/common.json").then((m) => m.default),
+		import("@/lib/dictionaries/en/auth.json").then((m) => m.default),
+		import("@/lib/dictionaries/en/mailbox.json").then((m) => m.default),
+		import("@/lib/dictionaries/en/platform.json").then((m) => m.default),
+		import("@/lib/dictionaries/en/contacts.json").then((m) => m.default),
+		import("@/lib/dictionaries/en/calendar.json").then((m) => m.default),
+		import("@/lib/dictionaries/en/drive.json").then((m) => m.default),
+		import("@/lib/dictionaries/en/dashboard.json").then((m) => m.default),
+		import("@/lib/dictionaries/en/validation.json").then((m) => m.default),
+		import("@/lib/dictionaries/en/actions.json").then((m) => m.default),
+		import("@/lib/dictionaries/en/vault.json").then((m) => m.default),
+		import("@/lib/dictionaries/en/releases.json").then((m) => m.default),
+		import("@/lib/dictionaries/en/ai.json").then((m) => m.default),
+	]);
+
+	return {
+		locale: "en" as Locale,
+		common,
+		auth,
+		mailbox,
+		platform,
+		contacts,
+		calendar,
+		drive,
+		dashboard,
+		validation,
+		actions,
+		vault,
+		releases,
+		ai
+	};
+}
+
+// "en" is the source of truth for the shape every other locale must match.
+// scripts/check-locales.ts verifies that structurally at build/review time.
+export type Dictionary = Awaited<ReturnType<typeof loadEn>>;
+
+async function loadPtBr(): Promise<Dictionary> {
+	const [
+		common,
+		auth,
+		mailbox,
+		platform,
+		contacts,
+		calendar,
+		drive,
+		dashboard,
+		validation,
+		actions,
+		vault,
+		releases,
+		ai
+	] = await Promise.all([
+		import("@/lib/dictionaries/pt-BR/common.json").then((m) => m.default),
+		import("@/lib/dictionaries/pt-BR/auth.json").then((m) => m.default),
+		import("@/lib/dictionaries/pt-BR/mailbox.json").then((m) => m.default),
+		import("@/lib/dictionaries/pt-BR/platform.json").then((m) => m.default),
+		import("@/lib/dictionaries/pt-BR/contacts.json").then((m) => m.default),
+		import("@/lib/dictionaries/pt-BR/calendar.json").then((m) => m.default),
+		import("@/lib/dictionaries/pt-BR/drive.json").then((m) => m.default),
+		import("@/lib/dictionaries/pt-BR/dashboard.json").then((m) => m.default),
+		import("@/lib/dictionaries/pt-BR/validation.json").then((m) => m.default),
+		import("@/lib/dictionaries/pt-BR/actions.json").then((m) => m.default),
+		import("@/lib/dictionaries/pt-BR/vault.json").then((m) => m.default),
+		import("@/lib/dictionaries/pt-BR/releases.json").then((m) => m.default),
+		import("@/lib/dictionaries/pt-BR/ai.json").then((m) => m.default),
+	]);
+
+	return {
+		locale: "pt-BR",
+		common,
+		auth,
+		mailbox,
+		platform,
+		contacts,
+		calendar,
+		drive,
+		dashboard,
+		validation,
+		actions,
+		vault,
+		releases,
+		ai
+	} as Dictionary;
+}
+
+async function loadKo(): Promise<Dictionary> {
+	const [
+		common,
+		auth,
+		mailbox,
+		platform,
+		contacts,
+		calendar,
+		drive,
+		dashboard,
+		validation,
+		actions,
+		vault,
+		releases,
+		ai
+	] = await Promise.all([
+		import("@/lib/dictionaries/ko/common.json").then((m) => m.default),
+		import("@/lib/dictionaries/ko/auth.json").then((m) => m.default),
+		import("@/lib/dictionaries/ko/mailbox.json").then((m) => m.default),
+		import("@/lib/dictionaries/ko/platform.json").then((m) => m.default),
+		import("@/lib/dictionaries/ko/contacts.json").then((m) => m.default),
+		import("@/lib/dictionaries/ko/calendar.json").then((m) => m.default),
+		import("@/lib/dictionaries/ko/drive.json").then((m) => m.default),
+		import("@/lib/dictionaries/ko/dashboard.json").then((m) => m.default),
+		import("@/lib/dictionaries/ko/validation.json").then((m) => m.default),
+		import("@/lib/dictionaries/ko/actions.json").then((m) => m.default),
+		import("@/lib/dictionaries/ko/vault.json").then((m) => m.default),
+		import("@/lib/dictionaries/ko/releases.json").then((m) => m.default),
+		import("@/lib/dictionaries/ko/ai.json").then((m) => m.default),
+	]);
+
+	return {
+		locale: "ko",
+		common,
+		auth,
+		mailbox,
+		platform,
+		contacts,
+		calendar,
+		drive,
+		dashboard,
+		validation,
+		actions,
+		vault,
+		releases,
+		ai
+	} as Dictionary;
+}
+
+async function loadRu(): Promise<Dictionary> {
+	const [
+		common,
+		auth,
+		mailbox,
+		platform,
+		contacts,
+		calendar,
+		drive,
+		dashboard,
+		validation,
+		actions,
+		vault,
+		releases,
+		ai
+	] = await Promise.all([
+		import("@/lib/dictionaries/ru/common.json").then((m) => m.default),
+		import("@/lib/dictionaries/ru/auth.json").then((m) => m.default),
+		import("@/lib/dictionaries/ru/mailbox.json").then((m) => m.default),
+		import("@/lib/dictionaries/ru/platform.json").then((m) => m.default),
+		import("@/lib/dictionaries/ru/contacts.json").then((m) => m.default),
+		import("@/lib/dictionaries/ru/calendar.json").then((m) => m.default),
+		import("@/lib/dictionaries/ru/drive.json").then((m) => m.default),
+		import("@/lib/dictionaries/ru/dashboard.json").then((m) => m.default),
+		import("@/lib/dictionaries/ru/validation.json").then((m) => m.default),
+		import("@/lib/dictionaries/ru/actions.json").then((m) => m.default),
+		import("@/lib/dictionaries/ru/vault.json").then((m) => m.default),
+		import("@/lib/dictionaries/ru/releases.json").then((m) => m.default),
+		import("@/lib/dictionaries/ru/ai.json").then((m) => m.default),
+	]);
+
+	return {
+		locale: "ru",
+		common,
+		auth,
+		mailbox,
+		platform,
+		contacts,
+		calendar,
+		drive,
+		dashboard,
+		validation,
+		actions,
+		vault,
+		releases,
+		ai
+	} as Dictionary;
+}
+
+async function loadPl(): Promise<Dictionary> {
+	const [
+		common,
+		auth,
+		mailbox,
+		platform,
+		contacts,
+		calendar,
+		drive,
+		dashboard,
+		validation,
+		actions,
+		vault,
+		releases,
+		ai
+	] = await Promise.all([
+		import("@/lib/dictionaries/pl/common.json").then((m) => m.default),
+		import("@/lib/dictionaries/pl/auth.json").then((m) => m.default),
+		import("@/lib/dictionaries/pl/mailbox.json").then((m) => m.default),
+		import("@/lib/dictionaries/pl/platform.json").then((m) => m.default),
+		import("@/lib/dictionaries/pl/contacts.json").then((m) => m.default),
+		import("@/lib/dictionaries/pl/calendar.json").then((m) => m.default),
+		import("@/lib/dictionaries/pl/drive.json").then((m) => m.default),
+		import("@/lib/dictionaries/pl/dashboard.json").then((m) => m.default),
+		import("@/lib/dictionaries/pl/validation.json").then((m) => m.default),
+		import("@/lib/dictionaries/pl/actions.json").then((m) => m.default),
+		import("@/lib/dictionaries/pl/vault.json").then((m) => m.default),
+		import("@/lib/dictionaries/pl/releases.json").then((m) => m.default),
+		import("@/lib/dictionaries/pl/ai.json").then((m) => m.default),
+	]);
+
+	return {
+		locale: "pl",
+		common,
+		auth,
+		mailbox,
+		platform,
+		contacts,
+		calendar,
+		drive,
+		dashboard,
+		validation,
+		actions,
+		vault,
+		releases,
+		ai
+	} as Dictionary;
+}
+
+const dictionaries: Record<Locale, () => Promise<Dictionary>> = {
+	en: loadEn,
+	"pt-BR": loadPtBr,
+	ko: loadKo,
+	pl: loadPl,
+	ru: loadRu,
+};
+
+export type { Locale };
+export { hasLocale };
+
+export async function getDictionary(locale: string): Promise<Dictionary> {
+	const key: Locale = hasLocale(locale) ? locale : "en";
+	return dictionaries[key]();
+}
+
+/** Loads a server-safe dictionary and the same locale formatter used by clients. */
+export async function getI18n(locale: string) {
+	const dict = await getDictionary(locale);
+	return { dict, format: createLocaleFormatter(dict.locale) };
+}

@@ -1,72 +1,81 @@
 "use server";
 
-import { lookup } from "node:dns/promises";
-import { isIP } from "node:net";
-import { PAGE_SIZE } from "@common/mail-client";
+import { cache } from "react";
+import {getWorkspacePublicId, rlsClient} from "@/lib/actions/clients";
+import { deleteDraft } from "@/lib/actions/drafts";
 import {
 	DraftMessageInsertSchema,
-	db,
-	draftMessages,
+	draftMessages, emailSignatures,
 	identities,
 	mailboxes,
-	mailboxSync,
-	mailboxThreads,
-	mailSubscriptions,
+	mailboxSync, MailboxThreadEntity, type MailSubscriptionEntity,
+	mailboxThreads, mailSubscriptions,
 	messageAttachments,
 	messages,
 	threads,
-	userAiSettings,
+	workspaces,
 } from "@db";
-import {
-	type FormState,
-	getServerEnv,
-	handleAction,
-	type SearchThreadsResponse,
-} from "@schema";
-import slugify from "@sindresorhus/slugify";
-import dayjs from "dayjs";
-import { decode } from "decode-formdata";
 import {
 	and,
 	asc,
 	count,
 	desc,
 	eq,
-	getTableColumns,
-	gt,
 	inArray,
 	isNotNull,
 	isNull,
 	lte,
 	or,
 	sql,
+	gt,
 } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
-import { redirect } from "next/navigation";
-import { cache } from "react";
-import Typesense, { type Client } from "typesense";
+import {
+	FormState,
+	getServerEnv,
+	handleAction,
+	SearchThreadsResponse,
+} from "@schema";
+import { decode } from "decode-formdata";
+import { toArray } from "@/lib/utils";
+
+import Typesense, { Client } from "typesense";
 import { isSignedIn } from "@/lib/actions/auth";
-import { rlsClient } from "@/lib/actions/clients";
+import slugify from "@sindresorhus/slugify";
+import { redirect } from "next/navigation";
+import { PAGE_SIZE } from "@common/mail-client";
 import {
 	addJobAndWait,
+	DEFAULT_JOB_OPTS,
+	enqueueSearchRefresh,
 	getQueue,
-	getSmtpQueue,
+	getReadyQueue,
 	RETRY_JOB_OPTS,
 } from "@/lib/actions/get-redis";
 import {
-	aiProviderLabel,
-	getAiDefaults,
-	normalizeAiBaseUrl,
-	runAiPrompt,
-	toAiProvider,
-} from "@/lib/ai-endpoint";
-import {
-	enqueueSearchRefresh,
+	type DeltaFetchResult,
+	deltaFetchQueueName,
+	deltaFetchQueueOfJob,
 	enqueueThreadSmtpJobs,
+	isGmailMetaData,
+	queueDeltaFetch,
+	queueDeltaFetchMany,
+	queueGmailBackfill,
+	queueImapBackfill,
+	queueStopIdle,
 	toIdList,
 } from "@/lib/mail-jobs";
+import { safeFormPost } from "@/lib/safe-url";
+import { isOwnUploadKey } from "@/lib/upload-keys";
+import dayjs from "dayjs";
+
+import {GetObjectCommand} from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { s3 } from "@/lib/create-s3-client";
 import { invalidateServerCache, withServerCache } from "@/lib/server-cache";
-import { toArray } from "@/lib/utils";
+import {access} from "@/lib/actions/shared";
+import {identityVisibleSql, mailboxVisibleSql, messageVisibleSql} from "@/lib/actions/authz";
+import {EmailDocument, renderEmailFragment, renderEmailText} from "@email-editor";
 
 let typeSenseClient: Client | null = null;
 function getTypeSenseClient(): Client {
@@ -93,56 +102,206 @@ function getTypeSenseClient(): Client {
 	return typeSenseClient;
 }
 
+
+// Mail actions are server actions and can be called with arbitrary ids, and
+// the worker processes their jobs with the service role. RLS only returns
+// rows of the caller's workspace, so every id is checked through it before
+// anything is queued.
+
+type OwnedMailbox = {
+	id: string;
+	identityId: string;
+	identityPublicId: string;
+	workspaceId: string;
+	kind: string;
+	isDefault: boolean;
+	isGmail: boolean;
+};
+
+async function findOwnedMailboxes(
+	mailboxIds: string[],
+): Promise<OwnedMailbox[]> {
+	const ids = toIdList(mailboxIds);
+	if (!ids.length) return [];
+	const rls = await rlsClient();
+	const rows = await rls((tx) =>
+		tx
+			.select({
+				id: mailboxes.id,
+				identityId: mailboxes.identityId,
+				identityPublicId: identities.publicId,
+				workspaceId: mailboxes.workspaceId,
+				kind: mailboxes.kind,
+				isDefault: mailboxes.isDefault,
+				identityMeta: identities.metaData,
+			})
+			.from(mailboxes)
+			.innerJoin(identities, eq(identities.id, mailboxes.identityId))
+			.where(inArray(mailboxes.id, ids)),
+	);
+	return rows.map(({ identityMeta, ...row }) => ({
+		...row,
+		kind: String(row.kind),
+		isGmail: isGmailMetaData(identityMeta),
+	}));
+}
+
+/** Throws unless every mailbox is visible through RLS. */
+async function requireOwnedMailboxes(
+	...mailboxIds: string[]
+): Promise<OwnedMailbox[]> {
+	const ids = toIdList(mailboxIds);
+	if (!ids.length) throw new Error("Mailbox not found");
+	const rows = await findOwnedMailboxes(ids);
+	if (rows.length !== ids.length) throw new Error("Mailbox not found");
+	return ids.map((id) => rows.find((row) => row.id === id)!);
+}
+
+/** The identity if it is visible through RLS, else throws. */
+async function requireOwnedIdentity(identityId: string) {
+	if (!identityId) throw new Error("Identity not found");
+	const rls = await rlsClient();
+	const [identity] = await rls((tx) =>
+		tx
+			.select({
+				id: identities.id,
+				publicId: identities.publicId,
+				workspaceId: identities.workspaceId,
+				smtpAccountId: identities.smtpAccountId,
+				metaData: identities.metaData,
+				kind: identities.kind,
+			})
+			.from(identities)
+			.where(eq(identities.id, String(identityId)))
+			.limit(1),
+	);
+	if (!identity) throw new Error("Identity not found");
+	return identity;
+}
+
+/** Thread ids (of `threadIds`) that have rows in this mailbox, via RLS. */
+async function ownedThreadIdsInMailbox(mailboxId: string, threadIds: string[]) {
+	const ids = toIdList(threadIds);
+	if (!ids.length) return [];
+	const rls = await rlsClient();
+	return rls(async (tx) => {
+		const [inThreads, inMessages] = await Promise.all([
+			tx
+				.select({ threadId: mailboxThreads.threadId })
+				.from(mailboxThreads)
+				.where(
+					and(
+						eq(mailboxThreads.mailboxId, mailboxId),
+						inArray(mailboxThreads.threadId, ids),
+					),
+				),
+			tx
+				.selectDistinct({ threadId: messages.threadId })
+				.from(messages)
+				.where(
+					and(
+						eq(messages.mailboxId, mailboxId),
+						inArray(messages.threadId, ids),
+					),
+				),
+		]);
+		const found = new Set(
+			[...inThreads, ...inMessages].map((row) => String(row.threadId)),
+		);
+		return ids.filter((id) => found.has(id));
+	});
+}
+
+/** A single message id must belong to the mailbox (and thread, if given). */
+async function requireOwnedMessage(
+	messageId: string,
+	mailboxId: string,
+	threadIds?: string[],
+) {
+	const rls = await rlsClient();
+	const [row] = await rls((tx) =>
+		tx
+			.select({ id: messages.id, threadId: messages.threadId })
+			.from(messages)
+			.where(and(eq(messages.id, messageId), eq(messages.mailboxId, mailboxId)))
+			.limit(1),
+	);
+	if (!row || (threadIds?.length && !threadIds.includes(String(row.threadId)))) {
+		throw new Error("Message not found");
+	}
+}
+
 export const fetchMailbox = cache(
 	async (identityPublicId: string, mailboxSlug = "inbox") => {
 		const rls = await rlsClient();
-		// One transaction instead of five: every rls() call is its own
-		// BEGIN/set_config/COMMIT round trip.
+
+		// One transaction instead of five.
 		return rls(async (tx) => {
 			const [identity] = await tx
 				.select()
 				.from(identities)
+				.where(eq(identities.publicId, identityPublicId))
+				.limit(1);
 
-				.where(eq(identities.publicId, identityPublicId));
+			if (!identity) throw new Error("Identity not found");
 
-			const mailboxList = identity
-				? await tx
-						.select()
-						.from(mailboxes)
-						.where(eq(mailboxes.identityId, identity.id))
-				: [];
-			const activeMailbox = mailboxList.find((m) => m.slug === mailboxSlug);
+			const mailboxList = await tx
+				.select()
+				.from(mailboxes)
+				.where(eq(mailboxes.identityId, identity.id));
 
-			const [messagesCount] = activeMailbox?.id
-				? await tx
-						.select({ count: count() })
-						.from(mailboxThreads)
-						.where(eq(mailboxThreads.mailboxId, activeMailbox.id))
-				: [{ count: 0 }];
+			const activeMailbox = mailboxList.find(
+				(mailbox) => mailbox.slug === mailboxSlug,
+			);
 
-			const [sync] = activeMailbox
-				? await tx
-						.select()
-						.from(mailboxSync)
-						.where(eq(mailboxSync.mailboxId, activeMailbox.id))
-				: [null];
+			if (!activeMailbox) throw new Error("Mailbox not found");
+
+			// Same rows as fetchMailboxThreads paginates: threads, without the
+			// currently snoozed ones.
+			const now = new Date();
+			const [[messagesCountRow], [sync]] = await Promise.all([
+				tx
+					.select({ count: count() })
+					.from(mailboxThreads)
+					.where(
+						and(
+							eq(mailboxThreads.identityPublicId, identity.publicId),
+							eq(mailboxThreads.mailboxSlug, mailboxSlug),
+							or(
+								isNull(mailboxThreads.snoozedUntil),
+								lte(mailboxThreads.snoozedUntil, now),
+							),
+						),
+					),
+				tx
+					.select()
+					.from(mailboxSync)
+					.where(eq(mailboxSync.mailboxId, activeMailbox.id))
+					.limit(1),
+			]);
 
 			return {
 				activeMailbox,
 				mailboxList,
 				identity,
-				count: Number(messagesCount?.count ?? 0),
-				mailboxSync: sync,
+				count: Number(messagesCountRow?.count ?? 0),
+				mailboxSync: sync ?? null,
 			};
 		});
-	},
+	}
 );
 
-const fetchIdentityMailboxListUncached = async () => {
+export type FetchMailboxResult = Awaited<
+	ReturnType<typeof fetchMailbox>
+>;
+
+
+
+async function loadIdentityMailboxList() {
 	const rls = await rlsClient();
-	// One transaction for the list and the unread counts.
-	const { rows, unreadAgg } = await rls(async (tx) => {
-		const rows = await tx
+
+	const rows = await rls((tx) =>
+		tx
 			.select({ identity: identities, mailbox: mailboxes })
 			.from(identities)
 			.leftJoin(
@@ -156,48 +315,33 @@ const fetchIdentityMailboxListUncached = async () => {
 			.orderBy(
 				asc(identities.id),
 				sql`
-                    CASE ${mailboxes.kind}
-                    WHEN 'inbox'   THEN 0
-                    WHEN 'drafts'  THEN 1
-                    WHEN 'sent'    THEN 2
-                    WHEN 'archive' THEN 3
-                    WHEN 'spam'    THEN 4
-                    WHEN 'trash'   THEN 5
-                    WHEN 'outbox'  THEN 6
-                    ELSE 7
-                    END
-                `,
+					CASE ${mailboxes.kind}
+					WHEN 'inbox'   THEN 0
+					WHEN 'drafts'  THEN 1
+					WHEN 'sent'    THEN 2
+					WHEN 'archive' THEN 3
+					WHEN 'spam'    THEN 4
+					WHEN 'trash'   THEN 5
+					WHEN 'outbox'  THEN 6
+					ELSE 7
+					END
+				`,
 				asc(mailboxes.parentId),
 				sql`lower(coalesce(${mailboxes.name}, ''))`,
-			);
-
-		const mailboxIds = rows.flatMap((r) => (r.mailbox ? [r.mailbox.id] : []));
-		const unreadAgg = mailboxIds.length
-			? await tx
-					.select({
-						mailboxId: mailboxThreads.mailboxId,
-						unreadThreads: sql<number>`
-        count(*) FILTER (WHERE ${mailboxThreads.unreadCount} > 0)
-      `.as("unread_threads"),
-						unreadTotal: sql<number>`
-        coalesce(sum(${mailboxThreads.unreadCount}), 0)
-      `.as("unread_total"),
-					})
-					.from(mailboxThreads)
-					.where(inArray(mailboxThreads.mailboxId, mailboxIds))
-					.groupBy(mailboxThreads.mailboxId)
-			: [];
-		return { rows, unreadAgg };
-	});
+			),
+	);
 
 	const byIdentity = rows.reduce(
 		(acc, r) => {
 			const id = r.identity.id;
-			if (!acc[id])
+
+			if (!acc[id]) {
 				acc[id] = {
 					identity: r.identity,
-					mailboxes: [] as (typeof mailboxes.$inferSelect)[],
+					mailboxes: [],
 				};
+			}
+
 			if (r.mailbox) acc[id].mailboxes.push(r.mailbox);
 			return acc;
 		},
@@ -209,151 +353,170 @@ const fetchIdentityMailboxListUncached = async () => {
 			}
 		>,
 	);
-	const aggByMailbox = new Map<
-		string,
-		{ unreadThreads: number; unreadTotal: number }
-	>(
-		unreadAgg.map((a) => [
-			a.mailboxId,
-			{
-				unreadThreads: Number(a.unreadThreads ?? 0),
-				unreadTotal: Number(a.unreadTotal ?? 0),
-			},
-		]),
-	);
 
-	return Object.values(byIdentity).map((entry) => ({
-		...entry,
-		mailboxes: entry.mailboxes.map((mailbox) => ({
-			...mailbox,
-			unreadCount: aggByMailbox.get(mailbox.id)?.unreadTotal ?? 0,
-			unreadThreads: aggByMailbox.get(mailbox.id)?.unreadThreads ?? 0,
-		})),
-	}));
-};
+	return Object.values(byIdentity);
+}
 
-export const fetchIdentityMailboxList = cache(async () => {
-	const user = await isSignedIn();
-	if (!user?.id) return fetchIdentityMailboxListUncached();
+/** Cached per workspace + user (ENABLE_SERVER_CACHE), 15 s. */
+export const fetchIdentityMailboxList = cache(() =>
+	withServerCache("mailbox-list", 15, loadIdentityMailboxList),
+);
 
-	return withServerCache(
-		user.id,
-		`mailbox-list:${user.id}`,
-		15,
-		fetchIdentityMailboxListUncached,
-	);
-});
 
 export type FetchIdentityMailboxListResult = Awaited<
 	ReturnType<typeof fetchIdentityMailboxList>
 >;
 
-const fetchMailboxOverviewUncached = async () => {
+const loadMailboxUnreadCounts = (
+	async () => {
+		const rls = await rlsClient();
+		const now = new Date();
+
+		const unreadAgg = await rls((tx) =>
+			tx
+				.select({
+					mailboxId: mailboxThreads.mailboxId,
+					unreadThreads: sql<number>`
+						count(*) FILTER (WHERE ${mailboxThreads.unreadCount} > 0)
+					`,
+					unreadTotal: sql<number>`
+						coalesce(sum(${mailboxThreads.unreadCount}), 0)
+					`,
+				})
+				.from(mailboxThreads)
+				.where(
+					or(
+						isNull(mailboxThreads.snoozedUntil),
+						lte(mailboxThreads.snoozedUntil, now)
+					)
+				)
+				.groupBy(mailboxThreads.mailboxId)
+		);
+
+		return new Map<
+			string,
+			{ unreadThreads: number; unreadTotal: number }
+		>(
+			unreadAgg.map((a) => [
+				a.mailboxId,
+				{
+					unreadThreads: Number(a.unreadThreads ?? 0),
+					unreadTotal: Number(a.unreadTotal ?? 0),
+				},
+			])
+		);
+	}
+);
+
+/** Cached per workspace + user (ENABLE_SERVER_CACHE), 10 s. */
+export const fetchMailboxUnreadCounts = cache(() =>
+	withServerCache("mailbox-unread-counts", 10, loadMailboxUnreadCounts),
+);
+
+export type FetchMailboxUnreadCountsResult = Awaited<
+	ReturnType<typeof fetchMailboxUnreadCounts>
+>;
+
+export type MailboxOverviewThread = Pick<
+	MailboxThreadEntity,
+	| "threadId"
+	| "mailboxId"
+	| "subject"
+	| "participants"
+	| "lastActivityAt"
+	| "hasAttachments"
+	| "unreadCount"
+>;
+
+/**
+ * Mail overview for the current workspace (scoped through RLS): every email
+ * identity with its inbox, the number of unread inbox threads and the top 3
+ * unread threads per inbox. Badge and list use the same filter (snoozed
+ * threads excluded), and the window function keeps one busy inbox from
+ * starving the others.
+ */
+export const fetchMailboxOverview = cache(async () => {
 	const identityMailboxList = await fetchIdentityMailboxList();
-	const inboxMailboxIds = identityMailboxList.flatMap((entry) =>
+	const inboxIds = identityMailboxList.flatMap((entry) =>
 		entry.mailboxes
 			.filter((mailbox) => mailbox.kind === "inbox")
 			.map((mailbox) => mailbox.id),
 	);
 
-	if (inboxMailboxIds.length === 0) {
-		return identityMailboxList.map((entry) => ({
-			...entry,
-			mailboxes: [],
-		}));
+	const rankedRows = inboxIds.length
+		? await (await rlsClient())((tx) => {
+				const now = new Date();
+				const ranked = tx.$with("ranked").as(
+					tx
+						.select({
+							threadId: mailboxThreads.threadId,
+							mailboxId: mailboxThreads.mailboxId,
+							subject: mailboxThreads.subject,
+							participants: mailboxThreads.participants,
+							lastActivityAt: mailboxThreads.lastActivityAt,
+							hasAttachments: mailboxThreads.hasAttachments,
+							unreadCount: mailboxThreads.unreadCount,
+							rank: sql<number>`row_number() over (partition by ${mailboxThreads.mailboxId} order by ${mailboxThreads.lastActivityAt} desc)`.as(
+								"rank",
+							),
+							unreadThreads:
+								sql<number>`count(*) over (partition by ${mailboxThreads.mailboxId})`.as(
+									"unread_threads",
+								),
+						})
+						.from(mailboxThreads)
+						.where(
+							and(
+								inArray(mailboxThreads.mailboxId, inboxIds),
+								gt(mailboxThreads.unreadCount, 0),
+								or(
+									isNull(mailboxThreads.snoozedUntil),
+									lte(mailboxThreads.snoozedUntil, now),
+								),
+							),
+						),
+				);
+				return tx
+					.with(ranked)
+					.select()
+					.from(ranked)
+					.where(lte(ranked.rank, 3))
+					.orderBy(desc(ranked.lastActivityAt));
+			})
+		: [];
+
+	const byMailbox = new Map<
+		string,
+		{ unreadThreads: number; recentThreads: MailboxOverviewThread[] }
+	>();
+	for (const { rank: _rank, unreadThreads, ...thread } of rankedRows) {
+		const entry = byMailbox.get(thread.mailboxId) ?? {
+			unreadThreads: Number(unreadThreads),
+			recentThreads: [],
+		};
+		entry.recentThreads.push(thread);
+		byMailbox.set(thread.mailboxId, entry);
 	}
 
-	const rls = await rlsClient();
-	const now = new Date();
-	// Top 3 unread threads per inbox plus the unread thread count, both with
-	// the same filter (snoozed threads excluded), so the badge and the list
-	// agree and one busy inbox can't starve the others.
-	const rankedRows = await rls((tx) => {
-		const ranked = tx.$with("ranked").as(
-			tx
-				.select({
-					...getTableColumns(mailboxThreads),
-					rank: sql<number>`row_number() over (partition by ${mailboxThreads.mailboxId} order by ${mailboxThreads.lastActivityAt} desc)`.as(
-						"rank",
-					),
-					unreadThreadsInMailbox:
-						sql<number>`count(*) over (partition by ${mailboxThreads.mailboxId})`.as(
-							"unread_threads_in_mailbox",
-						),
-					unreadMessagesInMailbox:
-						sql<number>`sum(${mailboxThreads.unreadCount}) over (partition by ${mailboxThreads.mailboxId})`.as(
-							"unread_messages_in_mailbox",
-						),
-				})
-				.from(mailboxThreads)
-				.where(
-					and(
-						inArray(mailboxThreads.mailboxId, inboxMailboxIds),
-						gt(mailboxThreads.unreadCount, 0),
-						or(
-							isNull(mailboxThreads.snoozedUntil),
-							lte(mailboxThreads.snoozedUntil, now),
-						),
-					),
-				),
-		);
-		return tx
-			.with(ranked)
-			.select()
-			.from(ranked)
-			.where(lte(ranked.rank, 3))
-			.orderBy(desc(ranked.lastActivityAt));
+	return identityMailboxList.map(({ identity, mailboxes: boxes }) => {
+		const inbox = boxes.find((mailbox) => mailbox.kind === "inbox");
+		const stats = inbox ? byMailbox.get(inbox.id) : undefined;
+		return {
+			identity: {
+				id: identity.id,
+				publicId: identity.publicId,
+				value: identity.value,
+			},
+			inbox: inbox
+				? {
+						id: inbox.id,
+						slug: inbox.slug ?? "inbox",
+						unreadThreads: stats?.unreadThreads ?? 0,
+						recentThreads: stats?.recentThreads ?? [],
+					}
+				: null,
+		};
 	});
-
-	const recentByMailbox = new Map<
-		string,
-		(typeof mailboxThreads.$inferSelect)[]
-	>();
-	const unreadByMailbox = new Map<
-		string,
-		{ unreadThreads: number; unreadCount: number }
-	>();
-	for (const {
-		rank: _rank,
-		unreadThreadsInMailbox,
-		unreadMessagesInMailbox,
-		...thread
-	} of rankedRows) {
-		const list = recentByMailbox.get(thread.mailboxId) ?? [];
-		list.push(thread);
-		recentByMailbox.set(thread.mailboxId, list);
-		unreadByMailbox.set(thread.mailboxId, {
-			unreadThreads: Number(unreadThreadsInMailbox),
-			unreadCount: Number(unreadMessagesInMailbox),
-		});
-	}
-
-	return identityMailboxList.map((entry) => ({
-		...entry,
-		mailboxes: entry.mailboxes.map((mailbox) => ({
-			...mailbox,
-			totalThreads: 0,
-			...(mailbox.kind === "inbox"
-				? (unreadByMailbox.get(mailbox.id) ?? {
-						unreadThreads: 0,
-						unreadCount: 0,
-					})
-				: {}),
-			recentThreads: recentByMailbox.get(mailbox.id) ?? [],
-		})),
-	}));
-};
-
-export const fetchMailboxOverview = cache(async () => {
-	const user = await isSignedIn();
-	if (!user?.id) return fetchMailboxOverviewUncached();
-
-	return withServerCache(
-		user.id,
-		`mailbox-overview:${user.id}`,
-		10,
-		fetchMailboxOverviewUncached,
-	);
 });
 
 export type FetchMailboxOverviewResult = Awaited<
@@ -366,443 +529,625 @@ export const fetchMessageAttachments = cache(async (messageId: string) => {
 		tx
 			.select()
 			.from(messageAttachments)
-			.where(eq(messageAttachments.messageId, messageId))
+			.where(
+				and(
+					eq(messageAttachments.messageId, messageId),
+					// RLS on attachments is workspace-wide; also require an
+					// identity the caller may see.
+					messageVisibleSql(messageAttachments.messageId),
+				),
+			)
 			.orderBy(desc(messageAttachments.createdAt)),
 	);
 	return { attachments: attachmentsList };
 });
 
+export async function getSignedUrlsForMessage(messageId: string) {
+	const { S3_BUCKET } = getServerEnv();
+	const rls = await rlsClient();
+	const attachments = await rls((tx) =>
+		tx
+			.select()
+			.from(messageAttachments)
+			.where(
+				and(
+					eq(messageAttachments.messageId, messageId),
+					messageVisibleSql(messageAttachments.messageId),
+				),
+			),
+	);
+	const results = await Promise.all(
+		attachments.map(async (attachment) => {
+			const command = new GetObjectCommand({
+				Bucket: S3_BUCKET!,
+				Key: attachment.path!,
+			});
+
+			// Inline images and attachment links stay usable while the thread
+			// is open; 5 minutes broke them for anyone reading slowly.
+			const url = await getSignedUrl(s3, command, { expiresIn: 60 * 60 });
+
+			return {
+				...attachment,
+				signedUrl: url,
+			};
+		}),
+	);
+	return results;
+}
+
 export const revalidateMailbox = async (path: string) => {
+	const user = await isSignedIn();
+	if (!user?.id) throw new Error("Unauthorized");
+	await afterMailMutation();
 	revalidatePath(path);
 };
 
-// Mail actions are server actions and can be called with arbitrary ids, and
-// the worker processes their jobs with the service role. RLS only returns the
-// caller's own rows, so use it to check ownership before queueing anything.
-async function requireOwnedMailboxes(...mailboxIds: string[]) {
-	const ids = Array.from(new Set(mailboxIds.filter(Boolean).map(String)));
-	if (!ids.length) throw new Error("Mailbox not found");
-	const rls = await rlsClient();
-	const rows = await rls((tx) =>
-		tx
-			.select({ id: mailboxes.id })
-			.from(mailboxes)
-			.where(inArray(mailboxes.id, ids)),
+/**
+ * Every mail mutation calls this: cached sidebar data (mailbox list, unread
+ * and sidebar counts) must not outlive a change. No-op unless
+ * ENABLE_SERVER_CACHE is on. Changes the worker applies later (moves, new
+ * mail) are only covered by the short TTLs.
+ */
+async function afterMailMutation() {
+	await invalidateServerCache();
+}
+
+const isSignaturePublicId = (
+	value: string,
+) =>
+	/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+		value,
 	);
-	if (rows.length !== ids.length) throw new Error("Mailbox not found");
-}
 
-async function requireOwnedIdentity(identityId: string) {
-	const rls = await rlsClient();
-	const [identity] = await rls((tx) =>
-		tx
-			.select({ id: identities.id })
-			.from(identities)
-			.where(eq(identities.id, String(identityId)))
-			.limit(1),
+
+
+
+const SENT_MAILBOX_NAMES = [
+	"sent",
+	"sent items",
+	"sent mail",
+	"sent messages",
+	"gesendet",
+	"gesendete objekte",
+	"gesendete elemente",
+	"gesendete nachrichten",
+];
+
+type MailboxRow = typeof mailboxes.$inferSelect;
+
+/**
+ * The identity's Sent folder: kind "sent" first, then the usual slugs and
+ * names. IMAP servers without SPECIAL-USE flags (e.g. many German hosts with
+ * a "Gesendet" folder) otherwise end up without a sent mailbox and every
+ * send fails.
+ */
+function resolveSentMailbox(boxes: MailboxRow[]) {
+	const normalized = (value?: string | null) =>
+		String(value ?? "")
+			.trim()
+			.toLowerCase();
+	return (
+		boxes.find((box) => box.kind === "sent") ??
+		boxes.find((box) => SENT_MAILBOX_NAMES.includes(normalized(box.slug))) ??
+		boxes.find((box) => SENT_MAILBOX_NAMES.includes(normalized(box.name))) ??
+		boxes.find((box) => {
+			const name = normalized(box.name);
+			return name.includes("sent") || name.includes("gesendet");
+		})
 	);
-	if (!identity) throw new Error("Identity not found");
 }
 
-// Cached sidebar/overview data must not outlive a change.
-async function afterMailMutation(refresh = true) {
-	const user = await isSignedIn();
-	await invalidateServerCache(user?.id);
-	if (refresh) revalidatePath("/dashboard/mail");
-}
-
-type AiReplySuggestionInput = {
-	mode: "reply" | "forward" | "compose" | string;
-	userInstruction?: string;
-	currentHtml?: string;
-	originalSubject?: string | null;
-	originalText?: string | null;
-	originalHtml?: string | null;
-	originalFrom?: unknown;
-	originalMessageId?: string | null;
-};
-
-const stripHtmlForPrompt = (value?: string | null) =>
-	(value || "")
-		.replace(/<style[\s\S]*?<\/style>/gi, " ")
-		.replace(/<script[\s\S]*?<\/script>/gi, " ")
-		.replace(/<br\s*\/?>/gi, "\n")
-		.replace(/<\/p>/gi, "\n")
-		.replace(/<[^>]+>/g, " ")
-		.replace(/&nbsp;/gi, " ")
-		.replace(/&amp;/gi, "&")
-		.replace(/&lt;/gi, "<")
-		.replace(/&gt;/gi, ">")
-		.replace(/&quot;/gi, '"')
-		.replace(/&#39;/gi, "'")
-		.replace(/[ \t]+/g, " ")
-		.replace(/\n{3,}/g, "\n\n")
-		.trim()
-		.slice(0, 6000);
-
-export async function generateAiReplySuggestion(
-	input: AiReplySuggestionInput,
-): Promise<FormState> {
-	const user = await isSignedIn();
-	if (!user) return { success: false, error: "Please sign in first." };
-
-	const rls = await rlsClient();
-	// Settings and the original message (the reply editor only has its
-	// trimmed header data) in one transaction, through RLS.
-	const { settings, original } = await rls(async (tx) => {
-		const [settings] = await tx
-			.select()
-			.from(userAiSettings)
-			.orderBy(desc(userAiSettings.updatedAt))
-			.limit(1);
-		if (!settings?.enabled || !input.originalMessageId) {
-			return { settings, original: undefined };
-		}
-		const [original] = await tx
-			.select({
-				text: messages.text,
-				html: messages.html,
-				subject: messages.subject,
-			})
-			.from(messages)
-			.where(eq(messages.id, String(input.originalMessageId)))
-			.limit(1);
-		return { settings, original };
-	});
-
-	if (!settings?.enabled) {
-		return {
-			success: false,
-			error: "AI drafts are disabled in Platform settings.",
-		};
+/**
+ * Attachments may only come from the caller's own upload folder, or (when
+ * forwarding) be attachments of the forwarded original.
+ */
+function assertOwnUploadPaths(
+	attachments: unknown,
+	userId: string,
+	forwardedPaths: ReadonlySet<string> = new Set(),
+) {
+	if (attachments === undefined || attachments === null || attachments === "") {
+		return;
 	}
-
-	const provider = toAiProvider(settings.provider);
-	const defaults = getAiDefaults(provider);
-	let baseUrl: string;
+	let list: unknown;
 	try {
-		baseUrl = await normalizeAiBaseUrl(settings.baseUrl || defaults.baseUrl);
-	} catch (error) {
-		return { success: false, error: (error as Error).message };
+		list =
+			typeof attachments === "string" ? JSON.parse(attachments) : attachments;
+	} catch {
+		throw new Error("Invalid attachments payload");
 	}
-	const model = settings.model || defaults.model;
-	if (!model) return { success: false, error: "No AI model is configured." };
-	const systemPrompt = (settings.systemPrompt || "").trim();
-	const temperature = Number(settings.temperature ?? 0.4);
-	const maxTokens = Number(settings.maxTokens ?? 700);
-
-	let originalSource = input.originalText || input.originalHtml || "";
-	let originalSubject = input.originalSubject;
-	if (original) {
-		originalSource = original.text || original.html || originalSource;
-		originalSubject = originalSubject || original.subject;
-	}
-	const originalText = stripHtmlForPrompt(originalSource);
-	const currentDraft = stripHtmlForPrompt(input.currentHtml || "");
-	const instruction = (input.userInstruction || "").trim().slice(0, 1200);
-
-	const prompt = `You are drafting an email inside Kurrier. Return only the proposed email body, no explanations, no subject line.
-
-Mode: ${input.mode || "reply"}
-Subject: ${originalSubject || "(none)"}
-From: ${JSON.stringify(input.originalFrom || null)}
-
-Default instruction:
-${systemPrompt || "Write a concise, helpful, professional reply."}
-
-User instruction / desired tone for this draft:
-${instruction || "No extra instruction."}
-
-Current draft, if any:
-${currentDraft || "(empty)"}
-
-Original email context:
-${originalText || "(no original message context)"}
-
-Rules:
-- Match the user's instruction and language.
-- Be concise unless the instruction asks for detail.
-- Do not invent facts, dates, promises, prices, or attachments.
-- Do not include greetings/signature if the current draft already contains them unless needed.
-- Output plain text paragraphs only.`;
-
-	const label = aiProviderLabel(provider);
-	try {
-		const suggestion = await runAiPrompt({
-			provider,
-			baseUrl,
-			apiKey: settings.apiKey,
-			model,
-			prompt,
-			temperature,
-			maxTokens,
-		});
-		if (!suggestion) {
-			return {
-				success: false,
-				error: `${label} returned an empty suggestion.`,
-			};
+	if (!Array.isArray(list)) throw new Error("Invalid attachments payload");
+	for (const item of list as Array<{ path?: unknown }>) {
+		if (!item?.path) continue;
+		if (
+			!isOwnUploadKey(String(item.path), userId) &&
+			!forwardedPaths.has(String(item.path))
+		) {
+			throw new Error("Invalid attachment");
 		}
-		return { success: true, data: { suggestion } };
-	} catch (error) {
-		const message = (error as Error)?.message || "";
-		return {
-			success: false,
-			error: message.startsWith(label) ? message : `${label} is not reachable.`,
-		};
 	}
-}
-
-async function resolveSentMailboxIdFromMessageMailbox(
-	messageMailboxId: string,
-): Promise<string | null> {
-	if (!messageMailboxId || messageMailboxId === "undefined") return null;
-
-	const rls = await rlsClient();
-	return await rls(async (tx) => {
-		const [sourceMailbox] = await tx
-			.select({ identityId: mailboxes.identityId })
-			.from(mailboxes)
-			.where(eq(mailboxes.id, messageMailboxId));
-
-		if (!sourceMailbox?.identityId) return null;
-
-		const candidateMailboxes = await tx
-			.select({
-				id: mailboxes.id,
-				kind: mailboxes.kind,
-				slug: mailboxes.slug,
-				name: mailboxes.name,
-			})
-			.from(mailboxes)
-			.where(eq(mailboxes.identityId, sourceMailbox.identityId));
-
-		const sentMailbox =
-			candidateMailboxes.find((mailbox) => mailbox.kind === "sent") ??
-			candidateMailboxes.find((mailbox) => mailbox.slug === "sent") ??
-			candidateMailboxes.find((mailbox) => mailbox.slug === "gesendet") ??
-			candidateMailboxes.find((mailbox) =>
-				mailbox.name?.toLowerCase().includes("sent"),
-			) ??
-			candidateMailboxes.find((mailbox) =>
-				mailbox.name?.toLowerCase().includes("gesendet"),
-			);
-
-		return sentMailbox?.id ? String(sentMailbox.id) : null;
-	});
 }
 
 export async function sendMail(
 	_prev: FormState,
 	formData: FormData,
 ): Promise<FormState> {
-	const decodedForm = decode(formData) as any;
-	let sentMailboxId = String(decodedForm.sentMailboxId ?? "").trim();
+	const decodedForm =
+		decode(formData) as any;
 
-	// A mailbox resolved below went through RLS; one sent by the client
-	// still has to be checked.
-	let sentMailboxOwned = false;
-	if (!sentMailboxId || sentMailboxId === "undefined") {
-		sentMailboxOwned = true;
-		const messageMailboxId = String(
-			decodedForm.messageMailboxId ?? decodedForm.mailboxId ?? "",
-		).trim();
-		sentMailboxId =
-			(await resolveSentMailboxIdFromMessageMailbox(messageMailboxId)) ?? "";
-	}
+	// Autosaved draft of this mail (lib/actions/drafts.ts); not part of the
+	// queued/scheduled payload.
+	const draftId = String(decodedForm.draftId ?? "").trim();
+	delete decodedForm.draftId;
+	// Only the worker's own API routes may fix the stored message id.
+	delete decodedForm.apiMessageId;
 
-	if (!sentMailboxId || sentMailboxId === "undefined") {
-		return {
-			success: false,
-			error:
-				"Sender mailbox is not ready yet. Kurrier could not resolve the Sent mailbox for this message.",
-		};
-	}
-
-	// The worker sends as the identity of this mailbox with the service role.
-	if (!sentMailboxOwned) {
-		try {
-			await requireOwnedMailboxes(sentMailboxId);
-		} catch {
-			return { success: false, error: "Sender mailbox not found." };
-		}
-	}
-	decodedForm.sentMailboxId = sentMailboxId;
-
-	if (toArray(decodedForm.to as any).length === 0) {
-		return {
-			success: false,
-			error: "Please provide at least one recipient in the To field.",
-		};
+	const user = await isSignedIn();
+	if (!user?.id) {
+		return { success: false, error: "Unauthorized" };
 	}
 
 	const rls = await rlsClient();
-	const draftId = decodedForm.draftId ? String(decodedForm.draftId) : "";
-	delete decodedForm.draftId;
-	const scheduledAtRaw = decodedForm.scheduledAt
-		? String(decodedForm.scheduledAt)
-		: "";
-	if (scheduledAtRaw) {
-		const d = dayjs(scheduledAtRaw);
-		if (!d.isValid()) {
-			return { success: false, error: "Invalid scheduled time." };
-		}
 
-		// Lookup and insert in one transaction.
-		const row = await rls(async (tx) => {
+	const identity = await rls(
+		async (tx) => {
 			const [identity] = await tx
-				.select({
-					identityId: mailboxes.identityId,
-				})
-				.from(mailboxes)
-				.where(eq(mailboxes.id, decodedForm.mailboxId));
+				.select()
+				.from(identities)
+				.where(
+					eq(
+						identities.publicId,
+						String(decodedForm.identityPublicId ?? ""),
+					),
+				)
+				.limit(1);
 
-			const parsed = DraftMessageInsertSchema.safeParse({
-				identityId: identity?.identityId,
-				mailboxId: decodedForm.mailboxId,
-				payload: decodedForm,
-				status: "scheduled",
-				scheduledAt: d.toDate(),
-			});
-			if (!parsed.success) return "invalid" as const;
+			return identity;
+		},
+	);
 
-			const [created] = await tx
-				.insert(draftMessages)
-				.values(parsed.data)
-				.returning({
-					id: draftMessages.id,
-					scheduledAt: draftMessages.scheduledAt,
-				});
-			return created ?? null;
-		});
-
-		if (row === "invalid") {
-			return {
-				success: false,
-				error: "There was an error trying to schedule your mail.",
-			};
-		}
-
-		if (!row?.id || !row.scheduledAt) {
-			return { success: false, error: "Failed to schedule your mail." };
-		}
-		if (draftId) await deleteDraft(draftId);
-
-		const sendMailQueue = getQueue("send-mail");
-		const delay = Math.max(
-			0,
-			Number(new Date(row.scheduledAt)) - Number(new Date()),
-		);
-
-		await sendMailQueue.add(
-			"send-scheduled-draft",
-			{ draftMessageId: row.id },
-			{ jobId: row.id, delay },
-		);
-		await afterMailMutation();
+	if (!identity) {
 		return {
-			success: true,
-			message: "Message scheduled",
-			data: { draftMessageId: row.id },
+			success: false,
+			error: "Identity not found.",
 		};
 	}
 
-	let result: FormState;
+	const boxes = await rls(
+		async (tx) =>
+			tx
+				.select()
+				.from(mailboxes)
+				.where(
+					eq(
+						mailboxes.identityId,
+						identity.id,
+					),
+				),
+	);
+
+	const sentMailbox = resolveSentMailbox(boxes);
+
+	const inboxMailbox = boxes.find(
+		(box) => box.kind === "inbox",
+	);
+
+	if (
+		!sentMailbox ||
+		!inboxMailbox
+	) {
+		return {
+			success: false,
+			error:
+				"Required mailboxes (inbox and sent) not found for the identity.",
+		};
+	}
+
+	// Server-resolved ids always win over anything the form sent.
+	decodedForm.sentMailboxId =
+		sentMailbox.id;
+	decodedForm.mailboxId =
+		inboxMailbox.id;
+	decodedForm.identityId =
+		identity.id;
+
+	// The worker loads the original message with the service role, quotes
+	// it and files the reply into its thread: it must be the caller's.
+	const originalMessageId = String(decodedForm.originalMessageId ?? "").trim();
+	if (originalMessageId && originalMessageId !== "undefined" && originalMessageId !== "null") {
+		const [original] = await rls((tx) =>
+			tx
+				.select({ id: messages.id })
+				.from(messages)
+				.where(
+					and(
+						eq(messages.id, originalMessageId),
+						mailboxVisibleSql(messages.mailboxId),
+					),
+				)
+				.limit(1),
+		).catch(() => [] as { id: string }[]);
+		if (!original) {
+			return {
+				success: false,
+				error: "Original message not found.",
+			};
+		}
+		decodedForm.originalMessageId = original.id;
+	} else {
+		delete decodedForm.originalMessageId;
+	}
+
+	// Forwarding may include the original's attachments (the worker checks
+	// them against the original message again).
+	let forwardedPaths = new Set<string>();
+	if (decodedForm.mode === "forward" && decodedForm.originalMessageId) {
+		const rows = await rls((tx) =>
+			tx
+				.select({ path: messageAttachments.path })
+				.from(messageAttachments)
+				.where(
+					eq(
+						messageAttachments.messageId,
+						String(decodedForm.originalMessageId),
+					),
+				),
+		).catch(() => [] as { path: string }[]);
+		forwardedPaths = new Set(rows.map((row) => row.path));
+	}
+
 	try {
-		result = await addJobAndWait<FormState>(
-			"send-mail",
-			"send-and-reconcile",
-			decodedForm,
-		);
+		assertOwnUploadPaths(decodedForm.attachments, user.id, forwardedPaths);
 	} catch (error) {
 		return {
 			success: false,
-			error: error instanceof Error ? error.message : "Failed to send email.",
+			error: error instanceof Error ? error.message : "Invalid attachment",
 		};
 	}
-	if (result?.success && draftId) await deleteDraft(draftId);
-	// Show the sent reply in the open thread and the Sent folder.
-	await afterMailMutation();
-	return result;
-}
 
-export const deltaFetch = async ({ identityId }: { identityId: string }) => {
-	await requireOwnedIdentity(identityId);
-	try {
-		const { smtpQueue } = await getSmtpQueue();
-		const job = await smtpQueue.add(
-			"delta-fetch",
-			{ identityId },
-			{
-				jobId: `delta-fetch-${identityId}-${Date.now()}`,
-				removeOnComplete: { age: 300 },
-				removeOnFail: { age: 900 },
+	if (
+		toArray(
+			decodedForm.to as any,
+		).length === 0
+	) {
+		return {
+			success: false,
+			error:
+				"Please provide at least one recipient in the To field.",
+		};
+	}
+
+	const signaturePublicId =
+		typeof decodedForm.signaturePublicId ===
+		"string"
+			? decodedForm.signaturePublicId.trim()
+			: "";
+
+	if (signaturePublicId) {
+		if (
+			!isSignaturePublicId(
+				signaturePublicId,
+			)
+		) {
+			return {
+				success: false,
+				error:
+					"Invalid email signature.",
+			};
+		}
+
+		const signature = await rls(
+			async (tx) => {
+				const [result] = await tx
+					.select({
+						document:
+						emailSignatures.document,
+					})
+					.from(emailSignatures)
+					.where(
+						and(
+							eq(
+								emailSignatures.publicId,
+								signaturePublicId,
+							),
+							eq(
+								emailSignatures.identityId,
+								identity.id,
+							),
+						),
+					)
+					.limit(1);
+
+				return result;
 			},
 		);
-		const state = await job.getState();
+
+		if (!signature) {
+			return {
+				success: false,
+				error:
+					"Email signature not found for this identity.",
+			};
+		}
+
+		const signatureDocument =
+			signature.document as unknown as EmailDocument;
+
+		const signatureHtml =
+			renderEmailFragment(
+				signatureDocument,
+			).trim();
+
+		const signatureText =
+			renderEmailText(
+				signatureDocument,
+			).trim();
+
+		const messageHtml =
+			typeof decodedForm.html ===
+			"string"
+				? decodedForm.html
+				: "";
+
+		const messageText =
+			typeof decodedForm.text ===
+			"string"
+				? decodedForm.text
+				: "";
+
+		if (signatureHtml) {
+			decodedForm.html = [
+				messageHtml,
+				messageHtml.trim()
+					? "<br>"
+					: "",
+				`<div data-kurrier-signature="true">${signatureHtml}</div>`,
+			].join("");
+		}
+
+		if (signatureText) {
+			decodedForm.text = [
+				messageText.trimEnd(),
+				signatureText,
+			]
+				.filter(Boolean)
+				.join("\n\n");
+		}
+	}
+
+	/*
+     * The payload now contains the rendered
+     * signature. Scheduled mail therefore
+     * preserves the signature as it appeared
+     * when the message was scheduled.
+     */
+	const scheduledAtRaw =
+		decodedForm.scheduledAt
+			? String(
+				decodedForm.scheduledAt,
+			)
+			: "";
+
+	if (scheduledAtRaw) {
+		const scheduledAt = dayjs(
+			scheduledAtRaw,
+		);
+
+		if (!scheduledAt.isValid()) {
+			return {
+				success: false,
+				error:
+					"Invalid scheduled time.",
+			};
+		}
+
+		const parsed =
+			DraftMessageInsertSchema.safeParse(
+				{
+					identityId:
+					identity.id,
+					mailboxId:
+					decodedForm.mailboxId,
+					payload:
+					decodedForm,
+					status: "scheduled",
+					scheduledAt:
+						scheduledAt.toDate(),
+				},
+			);
+
+		if (!parsed.success) {
+			return {
+				success: false,
+				error:
+					"There was an error trying to schedule your mail.",
+			};
+		}
+
+		const row = await rls(
+			async (tx) => {
+				const [created] =
+					await tx
+						.insert(
+							draftMessages,
+						)
+						.values(
+							parsed.data,
+						)
+						.returning({
+							id: draftMessages.id,
+							scheduledAt:
+							draftMessages.scheduledAt,
+						});
+
+				return created ?? null;
+			},
+		);
+
+		if (
+			!row?.id ||
+			!row.scheduledAt
+		) {
+			return {
+				success: false,
+				error:
+					"Failed to schedule your mail.",
+			};
+		}
+
+		const delay = Math.max(
+			0,
+			Number(
+				new Date(
+					row.scheduledAt,
+				),
+			) -
+			Number(new Date()),
+		);
+
+		try {
+			await getQueue("send-mail").add(
+				"send-scheduled-draft",
+				{
+					draftMessageId: row.id,
+				},
+				{
+					jobId: row.id,
+					delay,
+					removeOnComplete: true,
+					removeOnFail: { age: 7 * 24 * 3600 },
+				},
+			);
+		} catch (error) {
+			console.error("Failed to queue scheduled mail", error);
+			// Do not leave a scheduled draft behind that will never be sent.
+			await rls((tx) =>
+				tx.delete(draftMessages).where(eq(draftMessages.id, row.id)),
+			).catch(() => {});
+			return {
+				success: false,
+				error: "Mail queue is unavailable. Please retry in a moment.",
+			};
+		}
+
+		// The autosaved draft became the scheduled mail.
+		if (draftId) await deleteDraft(draftId).catch(() => {});
+
+		await afterMailMutation();
+		revalidatePath(
+			"/dashboard/mail",
+		);
+
 		return {
 			success: true,
-			jobId: String(job.id),
-			state,
-			error: null,
+			data: {
+				draftMessageId: row.id,
+			},
 		};
+	}
+
+	try {
+		const result = await addJobAndWait<FormState>(
+			"send-mail",
+			"send-and-reconcile",
+			decodedForm,
+			{
+				removeOnComplete: true,
+				removeOnFail: { age: 24 * 3600 },
+			},
+		);
+		// Sent: drop the autosaved draft of this mail.
+		if (result?.success && draftId) {
+			await deleteDraft(draftId).catch(() => {});
+		}
+		// Sent / drafts counts changed (the worker has finished here).
+		await afterMailMutation();
+		return result;
+	} catch (error) {
+		return {
+			success: false,
+			error:
+				error instanceof Error ? error.message : "Failed to send email.",
+		};
+	}
+}
+
+const SYNC_QUEUE_UNAVAILABLE =
+	"Sync queue is unavailable. Please retry in a moment.";
+
+/**
+ * Start a delta sync for one identity without waiting for it. The returned
+ * jobId can be polled with getDeltaFetchStatus.
+ */
+export const deltaFetch = async ({
+	identityId,
+}: {
+	identityId: string;
+}): Promise<DeltaFetchResult> => {
+	const identity = await requireOwnedIdentity(identityId);
+
+	if (!(await canSyncWorkspace())) {
+		console.info(
+			`[delta-fetch:${identityId}] mail sync disabled for workspace ${identity.workspaceId}`,
+		);
+		return {
+			success: false,
+			jobId: null,
+			queue: null,
+			state: "disabled",
+			error: "Mail sync is disabled for this workspace.",
+		};
+	}
+
+	try {
+		return await queueDeltaFetch(identity);
 	} catch (error) {
 		console.error("Failed to enqueue delta-fetch job", error);
 		return {
 			success: false,
 			jobId: null,
+			queue: null,
 			state: "failed",
-			error: "Sync queue is unavailable. Please retry in a moment.",
+			error: SYNC_QUEUE_UNAVAILABLE,
 		};
 	}
 };
 
-export const deltaFetchAllMailboxes = async () => {
-	try {
-		const rls = await rlsClient();
-		const rows = await rls((tx) =>
-			tx
-				.select({ identityId: identities.id })
-				.from(identities)
-				.innerJoin(mailboxes, eq(mailboxes.identityId, identities.id))
-				.innerJoin(mailboxSync, eq(mailboxSync.mailboxId, mailboxes.id))
-				.where(eq(identities.kind, "email")),
-		);
-		const identityIds = Array.from(
-			new Set(rows.map((row) => row.identityId).filter(Boolean)),
-		);
+export type DeltaFetchAllResult = {
+	success: boolean;
+	queued: number;
+	failed: number;
+	jobIds: string[];
+	error: string | null;
+};
 
-		if (identityIds.length === 0) {
+/** Start a delta sync for every synced mail identity of the workspace. */
+export const deltaFetchAllMailboxes = async (): Promise<DeltaFetchAllResult> => {
+	const empty = { queued: 0, failed: 0, jobIds: [] as string[] };
+	try {
+		if (!(await canSyncWorkspace())) {
 			return {
-				success: true,
-				queued: 0,
-				failed: 0,
-				jobIds: [] as string[],
-				error: null,
+				success: false,
+				...empty,
+				error: "Mail sync is disabled for this workspace.",
 			};
 		}
 
-		const { smtpQueue } = await getSmtpQueue();
-		const startedAt = Date.now();
-		const settled = await Promise.allSettled(
-			identityIds.map((identityId, index) =>
-				smtpQueue.add(
-					"delta-fetch",
-					{ identityId },
-					{
-						jobId: `delta-fetch-${identityId}-${startedAt}-${index}`,
-						removeOnComplete: { age: 300 },
-						removeOnFail: { age: 900 },
-					},
-				),
-			),
+		const rls = await rlsClient();
+		const rows = await rls((tx) =>
+			tx
+				.select({
+					id: identities.id,
+					workspaceId: identities.workspaceId,
+					smtpAccountId: identities.smtpAccountId,
+					metaData: identities.metaData,
+				})
+				.from(identities)
+				.where(eq(identities.kind, "email")),
 		);
-		const jobIds = settled.flatMap((result) =>
-			result.status === "fulfilled" ? [String(result.value.id)] : [],
-		);
-		const failed = settled.length - jobIds.length;
 
-		revalidatePath("/dashboard/mail");
+		const { jobIds, failed } = await queueDeltaFetchMany(rows);
 
 		return {
 			success: failed === 0,
@@ -816,81 +1161,139 @@ export const deltaFetchAllMailboxes = async () => {
 		};
 	} catch (error) {
 		console.error("Failed to enqueue all mailbox sync jobs", error);
-		return {
-			success: false,
-			queued: 0,
-			failed: 0,
-			jobIds: [] as string[],
-			error: "Sync queue is unavailable. Please retry in a moment.",
-		};
+		return { success: false, ...empty, error: SYNC_QUEUE_UNAVAILABLE };
 	}
 };
 
-export const getDeltaFetchStatus = async ({ jobId }: { jobId: string }) => {
+export type DeltaFetchStatus = {
+	success: boolean;
+	jobId: string;
+	/** BullMQ job state, or "missing" once the job was cleaned up. */
+	state: string;
+	error: string | null;
+};
+
+/** Poll a job started by deltaFetch / deltaFetchAllMailboxes. */
+export const getDeltaFetchStatus = async ({
+	jobId,
+}: {
+	jobId: string;
+}): Promise<DeltaFetchStatus> => {
+	const id = String(jobId ?? "");
+	const queue = deltaFetchQueueOfJob(id);
+	if (!queue) {
+		return { success: false, jobId: id, state: "missing", error: "Unknown sync job." };
+	}
+
 	try {
-		const { smtpQueue } = await getSmtpQueue();
-		const job = await smtpQueue.getJob(jobId);
+		const job = await (
+			await getReadyQueue(deltaFetchQueueName(queue))
+		).getJob(id);
 
 		if (!job) {
 			return {
 				success: false,
+				jobId: id,
 				state: "missing",
 				error: "Sync job was not found. It may already have been cleaned up.",
 			};
 		}
 
-		const state = await job.getState();
-		const failedReason = job.failedReason;
+		// Only report jobs of identities the caller can see.
+		const owned = await findOwnedIdentityId(String(job.data?.identityId ?? ""));
+		if (!owned) {
+			return { success: false, jobId: id, state: "missing", error: "Unknown sync job." };
+		}
 
+		const state = await job.getState();
 		return {
 			success: state !== "failed",
-			jobId: String(job.id),
+			jobId: id,
 			state,
-			error: failedReason || null,
+			error: state === "failed" ? job.failedReason || "Sync failed." : null,
 		};
 	} catch (error) {
 		console.error("Failed to read delta-fetch job status", error);
 		return {
 			success: false,
+			jobId: id,
 			state: "failed",
-			error: "Sync queue is unavailable. Please retry in a moment.",
+			error: SYNC_QUEUE_UNAVAILABLE,
 		};
 	}
 };
 
+async function findOwnedIdentityId(identityId: string) {
+	if (!identityId) return null;
+	try {
+		return (await requireOwnedIdentity(identityId)).id;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Full-text search. The workspace and identity are resolved server-side
+ * through RLS; the `workspacePublicId` argument is ignored (kept for call
+ * compatibility) because the search index is queried with the admin key.
+ */
 export const initSearch = async (
 	query: string,
-	ownerId: string,
+	_workspacePublicId: string,
+	identityPublicId: string,
+	mailboxSlug: string,
 	hasAttachment: boolean,
 	onlyUnread: boolean,
 	starred: boolean,
 	page: number,
 ): Promise<SearchThreadsResponse> => {
-	// Never trust the owner id sent by the client.
-	const user = await isSignedIn();
-	if (!user?.id || (ownerId && ownerId !== user.id)) {
-		return { items: [], totalThreads: 0, totalMessages: 0 };
+	const empty = { items: [], totalThreads: 0, totalMessages: 0 };
+	const q = String(query ?? "").trim();
+	if (!q) {
+		return empty;
 	}
+
+	const rls = await rlsClient();
+	const [scope] = await rls((tx) =>
+		tx
+			.select({
+				identityPublicId: identities.publicId,
+				workspacePublicId: workspaces.publicId,
+			})
+			.from(identities)
+			.innerJoin(workspaces, eq(workspaces.id, identities.workspaceId))
+			.where(eq(identities.publicId, String(identityPublicId ?? "")))
+			.limit(1),
+	);
+	if (!scope) return empty;
+
+	// The slug goes into a Typesense filter expression: only plain slug
+	// characters, no filter syntax (quotes, backticks, &&, ||, ...).
+	const slug = String(mailboxSlug ?? "");
+	if (!/^[\p{L}\p{N}_.\-/ ]{0,200}$/u.test(slug)) return empty;
+
 	const client = getTypeSenseClient();
 
-	const filters = [`ownerId:=${JSON.stringify(user.id)}`];
+	const filters = [
+		`workspacePublicId:=${JSON.stringify(scope.workspacePublicId)}`,
+		`identityPublicId:=${JSON.stringify(scope.identityPublicId)}`,
+		`mailboxSlug:=${JSON.stringify(slug)}`,
+	];
+
 	if (hasAttachment) filters.push("hasAttachment:=1");
 	if (onlyUnread) filters.push("unread:=1");
-	if (starred) filters.push("starred:=1"); // NEW
+	if (starred) filters.push("starred:=1");
 
-	const result = (await client
-		.collections("messages")
-		.documents()
-		.search({
-			q: query,
-			query_by: "subject,html,text,fromName,fromEmail,participants",
-			filter_by: filters.join(" && "),
-			sort_by: "createdAt:desc",
-			group_by: "threadId",
-			group_limit: 1,
-			per_page: PAGE_SIZE,
-			page,
-		})) as any;
+	const result = (await client.collections("messages").documents().search({
+		q,
+		query_by: "subject,html,text,snippet,fromName,fromEmail,participants",
+		filter_by: filters.join(" && "),
+		sort_by: "createdAt:desc",
+		group_by: "threadId",
+		group_limit: 1,
+		per_page: PAGE_SIZE,
+		page: Math.max(1, Math.floor(Number(page) || 1)),
+	})) as any;
 
 	const groups = result?.grouped_hits as
 		| Array<{ group_key: string[]; hits: Array<{ document: any }> }>
@@ -912,7 +1315,7 @@ export const initSearch = async (
 			labels: Array.isArray(d.labels) ? d.labels : [],
 			hasAttachment: Number(d.hasAttachment) === 1,
 			unread: Number(d.unread) === 1,
-			starred: Number(d.starred) === 1, // NEW (if you want to use it in UI)
+			starred: Number(d.starred) === 1,
 			createdAt: d.createdAt ?? 0,
 			lastInThreadAt: d.lastInThreadAt ?? d.createdAt ?? 0,
 		})),
@@ -921,47 +1324,43 @@ export const initSearch = async (
 	};
 };
 
-export const backfillMailboxes = async (identityId: string) => {
-	await requireOwnedIdentity(identityId);
-	await addJobAndWait(
-		"smtp-worker",
-		"imap:backfill-discover",
-		{ identityId },
-		{
-			jobId: `imap-backfill-discover-${identityId}`,
-			attempts: 3,
-			backoff: {
-				type: "exponential",
-				delay: 1000,
-			},
-		},
-	);
-	await queueBackfill(identityId);
+
+async function canSyncWorkspace(): Promise<boolean> {
+	const { canSyncMail } = await access("canSyncMail");
+	return canSyncMail;
+}
+
+/**
+ * IMAP backfill for an identity of the caller's workspace. The workspace id
+ * argument is ignored in favour of the identity's own (kept for call
+ * compatibility).
+ */
+export const backfillMailboxes = async (identityId: string, _workspaceId?: string) => {
+	const identity = await requireOwnedIdentity(identityId);
+	if (!(await canSyncWorkspace())) {
+		console.info(
+			`[backfill:${identityId}] mail sync disabled for workspace ${identity.workspaceId}`,
+		);
+		return;
+	}
+
+	await queueImapBackfill(identity.id, identity.workspaceId);
 };
 
-// Ownership is checked by the caller.
-async function queueBackfill(identityId: string) {
-	const smtpQueue = getQueue("smtp-worker");
-	await smtpQueue.add(
-		"imap:backfill-tick",
-		{},
-		{
-			removeOnComplete: true,
-			removeOnFail: true,
-			jobId: "imap-backfill-tick-on-demand",
-		},
-	);
-	await smtpQueue.add(
-		"imap:start-idle",
-		{ identityId },
-		{
-			removeOnComplete: true,
-			removeOnFail: false,
-			attempts: 3,
-			backoff: { type: "exponential", delay: 1500 },
-		},
-	);
-}
+export const backfillGoogleMailboxes = async (
+	identityId: string,
+	_workspaceId?: string,
+) => {
+	const identity = await requireOwnedIdentity(identityId);
+	if (!(await canSyncWorkspace())) {
+		console.info(
+			`[backfill:${identityId}] mail sync disabled for workspace ${identity.workspaceId}`,
+		);
+		return;
+	}
+
+	await queueGmailBackfill(identity.id, identity.workspaceId);
+};
 
 export const fetchWebMailThreadDetail = cache(async (threadId: string) => {
 	const rls = await rlsClient();
@@ -973,7 +1372,14 @@ export const fetchWebMailThreadDetail = cache(async (threadId: string) => {
 			})
 			.from(threads)
 			.innerJoin(messages, eq(messages.threadId, threads.id))
-			.where(eq(threads.id, threadId))
+			.where(
+				and(
+					eq(threads.id, threadId),
+					// threads/messages RLS is workspace-wide: only messages
+					// of identities the caller may see.
+					mailboxVisibleSql(messages.mailboxId),
+				),
+			)
 			.orderBy(asc(sql`coalesce(${messages.date}, ${messages.createdAt})`));
 
 		if (rows.length === 0) {
@@ -990,11 +1396,25 @@ export const fetchWebMailThreadDetail = cache(async (threadId: string) => {
 	return result;
 });
 
+/**
+ * Previous/next thread of `threadId` in the mailbox list order (see
+ * fetchMailboxThreads: newest effective activity first, snoozed threads
+ * hidden). Used by the thread toolbar when the list order is not available on
+ * the client (thread opened by URL, or at the edge of the loaded page).
+ */
 export const fetchAdjacentMailboxThreads = cache(
-	async (identityPublicId: string, mailboxSlug: string, threadId: string) => {
+	async (
+		identityPublicId: string,
+		mailboxSlug: string,
+		threadId: string,
+	): Promise<{ previousThreadId: string | null; nextThreadId: string | null }> => {
+		const empty = { previousThreadId: null, nextThreadId: null };
+		if (!identityPublicId || !mailboxSlug || !threadId) return empty;
+
 		const rls = await rlsClient();
 		const now = new Date();
 		const effectiveActivityAt = sql`COALESCE(${mailboxThreads.unsnoozedAt}, ${mailboxThreads.lastActivityAt})`;
+		const sortKey = sql`(${effectiveActivityAt}, ${mailboxThreads.lastActivityAt}, ${mailboxThreads.threadId})`;
 		const visibleInMailbox = and(
 			eq(mailboxThreads.identityPublicId, identityPublicId),
 			eq(mailboxThreads.mailboxSlug, mailboxSlug),
@@ -1004,93 +1424,81 @@ export const fetchAdjacentMailboxThreads = cache(
 			),
 		);
 
+		// One transaction for the cursor and both neighbours.
 		return rls(async (tx) => {
 			const [current] = await tx
 				.select({
+					effectiveActivityAt: sql<string>`${effectiveActivityAt}::text`,
+					lastActivityAt: sql<string>`${mailboxThreads.lastActivityAt}::text`,
 					threadId: mailboxThreads.threadId,
-					effectiveActivityAt,
-					lastActivityAt: mailboxThreads.lastActivityAt,
 				})
 				.from(mailboxThreads)
 				.where(and(visibleInMailbox, eq(mailboxThreads.threadId, threadId)))
 				.limit(1);
 
-			if (!current) {
-				return { previousThreadId: null, nextThreadId: null };
-			}
+			if (!current) return empty;
 
-			const cursorEffectiveActivityAt =
-				current.effectiveActivityAt instanceof Date
-					? current.effectiveActivityAt.toISOString()
-					: String(current.effectiveActivityAt);
-			const cursorLastActivityAt =
-				current.lastActivityAt instanceof Date
-					? current.lastActivityAt.toISOString()
-					: String(current.lastActivityAt);
-			const cursorThreadId = String(current.threadId);
-			const cursor = sql`(${cursorEffectiveActivityAt}::timestamptz, ${cursorLastActivityAt}::timestamptz, ${cursorThreadId}::uuid)`;
+			const cursor = sql`(${current.effectiveActivityAt}::timestamptz, ${current.lastActivityAt}::timestamptz, ${String(current.threadId)}::uuid)`;
 
-			const [previous] = await tx
-				.select({ threadId: mailboxThreads.threadId })
-				.from(mailboxThreads)
-				.where(
-					and(
-						visibleInMailbox,
-						sql`(
-							COALESCE(${mailboxThreads.unsnoozedAt}, ${mailboxThreads.lastActivityAt}),
-							${mailboxThreads.lastActivityAt},
-							${mailboxThreads.threadId}
-						) > ${cursor}`,
-					),
-				)
-
-				.orderBy(
-					asc(effectiveActivityAt),
-					asc(mailboxThreads.lastActivityAt),
-					asc(mailboxThreads.threadId),
-				)
-				.limit(1);
-
-			const [next] = await tx
-				.select({ threadId: mailboxThreads.threadId })
-				.from(mailboxThreads)
-				.where(
-					and(
-						visibleInMailbox,
-						sql`(
-							COALESCE(${mailboxThreads.unsnoozedAt}, ${mailboxThreads.lastActivityAt}),
-							${mailboxThreads.lastActivityAt},
-							${mailboxThreads.threadId}
-						) < ${cursor}`,
-					),
-				)
-
-				.orderBy(
-					desc(effectiveActivityAt),
-					desc(mailboxThreads.lastActivityAt),
-					desc(mailboxThreads.threadId),
-				)
-				.limit(1);
+			const [[previous], [next]] = await Promise.all([
+				// The list is sorted descending: "previous" is the closest
+				// thread sorting above the current one.
+				tx
+					.select({ threadId: mailboxThreads.threadId })
+					.from(mailboxThreads)
+					.where(and(visibleInMailbox, sql`${sortKey} > ${cursor}`))
+					.orderBy(
+						asc(effectiveActivityAt),
+						asc(mailboxThreads.lastActivityAt),
+						asc(mailboxThreads.threadId),
+					)
+					.limit(1),
+				tx
+					.select({ threadId: mailboxThreads.threadId })
+					.from(mailboxThreads)
+					.where(and(visibleInMailbox, sql`${sortKey} < ${cursor}`))
+					.orderBy(
+						desc(effectiveActivityAt),
+						desc(mailboxThreads.lastActivityAt),
+						desc(mailboxThreads.threadId),
+					)
+					.limit(1),
+			]);
 
 			return {
-				previousThreadId: previous?.threadId ?? null,
-				nextThreadId: next?.threadId ?? null,
+				previousThreadId: previous?.threadId ? String(previous.threadId) : null,
+				nextThreadId: next?.threadId ? String(next.threadId) : null,
 			};
 		});
 	},
 );
 
-// RLS only updates the caller's own rows, so the returned thread ids are
-// exactly the ones the worker (service role) may touch.
+/** The database is already updated; a missed re-index must not fail the action. */
+async function refreshSearchBestEffort(threadIds: string[]) {
+	try {
+		await enqueueSearchRefresh(threadIds);
+	} catch (error) {
+		console.error("Failed to queue search refresh", error);
+	}
+}
+
+/**
+ * Update seen state through RLS. Only rows of the caller's workspace are
+ * touched, so the returned thread ids (from both the messages and the
+ * mailbox_threads rows) are exactly the ones the worker may act on.
+ */
 async function setThreadsSeen(
 	ids: string[],
 	mailboxId: string,
 	seen: boolean,
-): Promise<string[]> {
+): Promise<{ mailbox: OwnedMailbox | null; threadIds: string[] }> {
+	const [mailbox] = await findOwnedMailboxes([mailboxId]);
+	if (!mailbox) return { mailbox: null, threadIds: [] };
+
 	const now = new Date();
 	const rls = await rlsClient();
 
-	return rls(async (tx) => {
+	const threadIds = await rls(async (tx) => {
 		const updatedMessages = await tx
 			.update(messages)
 			.set({ seen, updatedAt: now })
@@ -1099,19 +1507,19 @@ async function setThreadsSeen(
 			)
 			.returning({ threadId: messages.threadId });
 
-		const updated = await tx
+		// One statement for all threads. Unread falls back to 1 so the thread
+		// shows up as unread even when no message row matched.
+		const updatedThreads = await tx
 			.update(mailboxThreads)
 			.set({
-				// Unread: one statement for all threads; falls back to 1 so a
-				// thread surfaces as unread even if no message row matched.
 				unreadCount: seen
 					? 0
 					: sql`greatest(1, (
-					select count(*) from ${messages}
-					where ${messages.threadId} = ${mailboxThreads.threadId}
-					and ${messages.mailboxId} = ${mailboxThreads.mailboxId}
-					and ${messages.seen} = false
-				))`,
+						select count(*) from ${messages}
+						where ${messages.threadId} = ${mailboxThreads.threadId}
+						and ${messages.mailboxId} = ${mailboxThreads.mailboxId}
+						and ${messages.seen} = false
+					))`,
 				updatedAt: now,
 			})
 			.where(
@@ -1121,14 +1529,17 @@ async function setThreadsSeen(
 				),
 			)
 			.returning({ threadId: mailboxThreads.threadId });
-		// Every thread RLS let us touch, also those without a mailbox_threads
-		// row: the IMAP flags and the search index must follow the messages.
+
 		return Array.from(
 			new Set(
-				[...updatedMessages, ...updated].map((row) => String(row.threadId)),
+				[...updatedMessages, ...updatedThreads].map((row) =>
+					String(row.threadId),
+				),
 			),
 		);
 	});
+
+	return { mailbox, threadIds };
 }
 
 async function markThreadsSeen(
@@ -1141,19 +1552,25 @@ async function markThreadsSeen(
 	const ids = toIdList(threadIds);
 	if (!ids.length || !mailboxId) return;
 
-	const ownedIds = await setThreadsSeen(ids, mailboxId, seen);
+	const { mailbox, threadIds: ownedIds } = await setThreadsSeen(
+		ids,
+		mailboxId,
+		seen,
+	);
+	if (!mailbox || !ownedIds.length) return;
 
-	await afterMailMutation(refresh);
-
-	if (markSmtp && ownedIds.length) {
-		await Promise.all([
-			enqueueThreadSmtpJobs("mail:set-flags", ownedIds, () => ({
-				mailboxId,
-				op: seen ? "read" : "unread",
-			})),
-			enqueueSearchRefresh(ownedIds),
-		]);
+	if (markSmtp || mailbox.isGmail) {
+		// The worker sets the flag on the server and re-indexes the thread.
+		await enqueueThreadSmtpJobs("mail:set-flags", ownedIds, () => ({
+			mailboxId,
+			op: seen ? "read" : "unread",
+		}));
+	} else {
+		await refreshSearchBestEffort(ownedIds);
 	}
+
+	await afterMailMutation();
+	if (refresh) revalidatePath("/");
 }
 
 export const markAsRead = async (
@@ -1179,21 +1596,27 @@ async function moveThreadsToSystemFolder(
 	messageId?: string,
 ) {
 	const ids = toIdList(threadIds);
-
 	if (!ids.length || !mailboxId) return;
+
 	await requireOwnedMailboxes(mailboxId);
+	const ownedIds = await ownedThreadIdsInMailbox(mailboxId, ids);
+	if (!ownedIds.length) return;
+	if (messageId) await requireOwnedMessage(messageId, mailboxId, ownedIds);
 
 	await Promise.all([
-		enqueueThreadSmtpJobs("mail:move", ids, () => ({
+		enqueueThreadSmtpJobs("mail:move", ownedIds, () => ({
 			mailboxId,
 			op,
 			messageId,
 			moveImap,
 		})),
-		enqueueSearchRefresh(ids),
+		enqueueSearchRefresh(ownedIds),
 	]);
 
-	await afterMailMutation(refresh);
+	await afterMailMutation();
+	if (refresh) {
+		revalidatePath("/mail");
+	}
 }
 
 export const moveToTrash = async (
@@ -1228,71 +1651,10 @@ export const moveToSpam = async (
 		messageId,
 	);
 
-export const toggleStar = async (
-	threadId: string,
-	mailboxId: string,
-	starred: boolean,
-	starImap: boolean,
-) => {
-	if (!threadId || !mailboxId) return;
-	await requireOwnedMailboxes(mailboxId);
-	const op = starred ? "unflag" : "flag";
-
-	if (starImap) {
-		await enqueueThreadSmtpJobs(
-			"mail:set-flags",
-			[threadId],
-			() => ({ mailboxId, op }),
-			() => ({ ...RETRY_JOB_OPTS, removeOnComplete: true, removeOnFail: true }),
-		);
-	} else {
-		const rls = await rlsClient();
-		await rls(async (tx) => {
-			const now = new Date();
-			await tx
-				.update(messages)
-				.set({ flagged: op === "flag", updatedAt: now })
-				.where(
-					and(
-						eq(messages.threadId, threadId),
-						eq(messages.mailboxId, mailboxId),
-					),
-				);
-
-			const [agg] = await tx
-				.select({
-					unreadCount: sql<number>`count(*) filter (where ${messages.seen} = false)`,
-					anyFlagged: sql<boolean>`bool_or(${messages.flagged})`,
-				})
-				.from(messages)
-				.where(
-					and(
-						eq(messages.threadId, threadId),
-						eq(messages.mailboxId, mailboxId),
-					),
-				);
-
-			await tx
-				.update(mailboxThreads)
-				.set({
-					unreadCount: agg.unreadCount ?? 0,
-					starred: agg.anyFlagged ?? false,
-					updatedAt: now,
-				})
-				.where(
-					and(
-						eq(mailboxThreads.threadId, threadId),
-						eq(mailboxThreads.mailboxId, mailboxId),
-					),
-				);
-		});
-	}
-
-	await enqueueSearchRefresh([threadId]);
-
-	await afterMailMutation();
-};
-
+/**
+ * Star or unstar threads. The database is updated through RLS right away;
+ * for IMAP/Gmail mailboxes the worker then sets the flag on the server.
+ */
 export const setStarForThreads = async (
 	threadIds: string | string[],
 	mailboxId: string,
@@ -1301,44 +1663,66 @@ export const setStarForThreads = async (
 	refresh = true,
 ) => {
 	const ids = toIdList(threadIds);
-
 	if (!ids.length || !mailboxId) return;
-	await requireOwnedMailboxes(mailboxId);
 
-	if (starImap) {
-		await enqueueThreadSmtpJobs("mail:set-flags", ids, () => ({
-			mailboxId,
-			op: starred ? "flag" : "unflag",
-		}));
+	const [mailbox] = await requireOwnedMailboxes(mailboxId);
+	const now = new Date();
+	const rls = await rlsClient();
+
+	const ownedIds = await rls(async (tx) => {
+		const updatedMessages = await tx
+			.update(messages)
+			.set({ flagged: starred, updatedAt: now })
+			.where(
+				and(inArray(messages.threadId, ids), eq(messages.mailboxId, mailboxId)),
+			)
+			.returning({ threadId: messages.threadId });
+
+		const updatedThreads = await tx
+			.update(mailboxThreads)
+			.set({ starred, updatedAt: now })
+			.where(
+				and(
+					inArray(mailboxThreads.threadId, ids),
+					eq(mailboxThreads.mailboxId, mailboxId),
+				),
+			)
+			.returning({ threadId: mailboxThreads.threadId });
+
+		return Array.from(
+			new Set(
+				[...updatedMessages, ...updatedThreads].map((row) =>
+					String(row.threadId),
+				),
+			),
+		);
+	});
+	if (!ownedIds.length) return;
+
+	if (starImap || mailbox.isGmail) {
+		await enqueueThreadSmtpJobs(
+			"mail:set-flags",
+			ownedIds,
+			() => ({ mailboxId, op: starred ? "flag" : "unflag" }),
+			() => ({ ...DEFAULT_JOB_OPTS, removeOnFail: true }),
+		);
 	} else {
-		const rls = await rlsClient();
-		await rls(async (tx) => {
-			const now = new Date();
-			await tx
-				.update(messages)
-				.set({ flagged: starred, updatedAt: now })
-				.where(
-					and(
-						inArray(messages.threadId, ids),
-						eq(messages.mailboxId, mailboxId),
-					),
-				);
-
-			await tx
-				.update(mailboxThreads)
-				.set({ starred, updatedAt: now })
-				.where(
-					and(
-						inArray(mailboxThreads.threadId, ids),
-						eq(mailboxThreads.mailboxId, mailboxId),
-					),
-				);
-		});
+		await refreshSearchBestEffort(ownedIds);
 	}
 
-	await enqueueSearchRefresh(ids);
+	await afterMailMutation();
+	if (refresh) revalidatePath("/");
+};
 
-	await afterMailMutation(refresh);
+/** Toggle the star of one thread; `starred` is its current state. */
+export const toggleStar = async (
+	threadId: string,
+	mailboxId: string,
+	starred: boolean,
+	starImap: boolean,
+) => {
+	if (!threadId || !mailboxId) return;
+	await setStarForThreads([threadId], mailboxId, !starred, starImap, true);
 };
 
 export const fetchMailboxThreads = async (
@@ -1346,16 +1730,17 @@ export const fetchMailboxThreads = async (
 	mailboxSlug: string,
 	page: number,
 ) => {
-	page = page && page > 0 ? page : 1;
-
 	const rls = await rlsClient();
-
 	const now = new Date();
-	const effectiveActivityAt = sql`COALESCE(${mailboxThreads.unsnoozedAt}, ${mailboxThreads.lastActivityAt})`;
+	const safePage = page && page > 0 ? page : 1;
 
-	const threads = await rls((tx) =>
+	const effectiveActivityAt = sql`
+		COALESCE(${mailboxThreads.unsnoozedAt}, ${mailboxThreads.lastActivityAt})
+	`;
+
+	const rows = await rls((tx) =>
 		tx
-			.select()
+			.select({ thread: mailboxThreads })
 			.from(mailboxThreads)
 			.where(
 				and(
@@ -1372,11 +1757,11 @@ export const fetchMailboxThreads = async (
 				desc(mailboxThreads.lastActivityAt),
 				desc(mailboxThreads.threadId),
 			)
-			.offset((page - 1) * PAGE_SIZE)
-			.limit(PAGE_SIZE),
+			.offset((safePage - 1) * PAGE_SIZE)
+			.limit(PAGE_SIZE)
 	);
 
-	return threads;
+	return rows.map((r) => r.thread);
 };
 
 export type FetchMailboxThreadsResult = Awaited<
@@ -1427,173 +1812,246 @@ export async function deleteForever(
 	refresh = true,
 	opts?: { emptyAll?: boolean },
 ) {
-	const { emptyAll = false } = opts ?? {};
-	if (!mailboxId) return;
-	await requireOwnedMailboxes(mailboxId);
+	const user = await isSignedIn();
 
-	const deleteOpts = {
-		...RETRY_JOB_OPTS,
-		removeOnComplete: true,
-		removeOnFail: true,
-	};
+	if (!user?.id) {
+		throw new Error("Unauthorized");
+	}
+
+	if (!mailboxId) {
+		throw new Error("Mailbox is required");
+	}
+
+	const rls = await rlsClient();
+	const { emptyAll = false } = opts ?? {};
+
+	// Verify that this mailbox is accessible to the current user/workspace.
+	const [allowedMailbox] = await rls((tx) =>
+		tx
+			.select({
+				id: mailboxes.id,
+				identityId: mailboxes.identityId,
+			})
+			.from(mailboxes)
+			.innerJoin(
+				identities,
+				eq(mailboxes.identityId, identities.id),
+			)
+			.where(eq(mailboxes.id, mailboxId))
+			.limit(1),
+	);
+
+	if (!allowedMailbox) {
+		throw new Error("Mailbox not found or access denied");
+	}
 
 	if (emptyAll) {
 		await getQueue("smtp-worker").add(
 			"mail:delete-permanent",
-			{ mailboxId, emptyAll: true, imapDelete },
-			deleteOpts,
+			{
+				mailboxId: allowedMailbox.id,
+				emptyAll: true,
+				imapDelete,
+			},
+			{
+				attempts: 3,
+				backoff: {
+					type: "exponential",
+					delay: 1500,
+				},
+				removeOnComplete: true,
+				removeOnFail: true,
+			},
 		);
-		await afterMailMutation(refresh);
+
+		await afterMailMutation();
+		if (refresh) {
+			revalidatePath("/mail");
+		}
+
 		return;
 	}
 
-	const ids = toIdList(threadIds);
-	if (!ids.length) return;
+	const requestedIds = (
+		Array.isArray(threadIds)
+			? threadIds
+			: [threadIds]
+	)
+		.filter(Boolean)
+		.map(String);
+
+	if (!requestedIds.length) {
+		return;
+	}
+
+	const allowedThreads = await rls((tx) =>
+		tx
+			.select({
+				threadId: mailboxThreads.threadId,
+			})
+			.from(mailboxThreads)
+			.where(
+				and(
+					eq(mailboxThreads.mailboxId, allowedMailbox.id),
+					inArray(mailboxThreads.threadId, requestedIds),
+				),
+			),
+	);
+
+	const allowedIds = allowedThreads.map((row) => row.threadId);
+
+	if (allowedIds.length !== requestedIds.length) {
+		throw new Error("One or more threads were not found or access was denied");
+	}
 
 	await Promise.all([
 		enqueueThreadSmtpJobs(
 			"mail:delete-permanent",
-			ids,
-			() => ({ mailboxId, imapDelete }),
-			() => deleteOpts,
+			allowedIds,
+			() => ({ mailboxId: allowedMailbox.id, imapDelete }),
+			() => ({ ...DEFAULT_JOB_OPTS, removeOnFail: true }),
 		),
-		enqueueSearchRefresh(ids),
+		enqueueSearchRefresh(allowedIds),
 	]);
 
-	await afterMailMutation(refresh);
+	await afterMailMutation();
+	if (refresh) {
+		revalidatePath("/mail");
+	}
 }
 
 export async function addNewMailboxFolder(
 	_prev: FormState,
 	formData: FormData,
 ): Promise<FormState> {
-	const decodedForm = decode(formData);
-	const isImapOp = String(decodedForm.imapOp).trim().length > 0;
-	const user = await isSignedIn();
-	if (!user?.id) return { success: false, error: "Please sign in first." };
-	await requireOwnedIdentity(String(decodedForm.identityId));
-	if (decodedForm.parentId && decodedForm.parentId !== "none") {
-		await requireOwnedMailboxes(String(decodedForm.parentId));
-	}
-	if (isImapOp) {
-		await addJobAndWait(
-			"smtp-worker",
-			"mailbox:add-new",
-			{
-				name: decodedForm.name,
-				parentId: decodedForm.parentId,
-				identityId: decodedForm.identityId,
-				ownerId: user?.id,
-				kind: "custom",
-				slug: slugify(String(decodedForm.name)),
-			},
-			{ ...RETRY_JOB_OPTS, removeOnComplete: true, removeOnFail: true },
-		);
-		await afterMailMutation();
-	} else {
-		const name = String(decodedForm.name ?? "").trim();
-		if (!name)
-			return { success: false, error: "Folder name is required" } as any;
+	return handleAction(async () => {
+		const decodedForm = decode(formData);
+		const user = await isSignedIn();
+		if (!user?.id) return { success: false, error: "Unauthorized" };
 
-		const ownerId = String(user?.id ?? "");
-		const identityId = String(decodedForm.identityId);
+		const name = String(decodedForm.name ?? "").trim();
+		if (!name) return { success: false, error: "mailbox.folderNameRequired" };
+
+		// The identity and parent come from the form: check both through RLS.
+		const identity = await requireOwnedIdentity(String(decodedForm.identityId ?? ""));
 		const parentId =
 			decodedForm.parentId && decodedForm.parentId !== "none"
 				? String(decodedForm.parentId)
 				: null;
 
 		if (parentId) {
-			const [parent] = await db
-				.select({ id: mailboxes.id, identityId: mailboxes.identityId })
-				.from(mailboxes)
-				.where(eq(mailboxes.id, parentId))
-				.limit(1);
-
-			if (!parent || parent.identityId !== identityId) {
-				return { success: false, error: "Invalid parent folder" } as any;
+			const [parent] = await findOwnedMailboxes([parentId]);
+			if (!parent || parent.identityId !== identity.id) {
+				return { success: false, error: "mailbox.invalidParentFolder" };
 			}
 		}
 
-		await db
-			.insert(mailboxes)
-			.values({
-				ownerId,
-				identityId,
-				parentId,
-				kind: "custom",
-				name,
-				slug: slugify(name.toLowerCase()),
-				isDefault: false,
-				metaData: {},
-			})
-			.returning();
+		// IMAP or not is a property of the identity, not of the request.
+		if (identity.smtpAccountId) {
+			await addJobAndWait(
+				"smtp-worker",
+				"mailbox:add-new",
+				{
+					name,
+					parentId,
+					identityId: identity.id,
+					workspaceId: identity.workspaceId,
+					ownerId: user.id,
+					kind: "custom",
+					slug: slugify(name),
+				},
+				{ ...RETRY_JOB_OPTS, removeOnComplete: true, removeOnFail: true },
+			);
+		} else {
+			const rls = await rlsClient();
+			await rls((tx) =>
+				tx.insert(mailboxes).values({
+					ownerId: user.id,
+					workspaceId: identity.workspaceId,
+					identityId: identity.id,
+					parentId,
+					kind: "custom",
+					name,
+					slug: slugify(name.toLowerCase()),
+					isDefault: false,
+					metaData: {},
+				}),
+			);
+		}
 
 		await afterMailMutation();
-	}
-
-	return {
-		success: true,
-	};
+		revalidatePath("/dashboard/mail");
+		return { success: true };
+	});
 }
 
 export async function deleteMailboxFolder({
-	imapOp,
-	identityId,
+	imapOp: _imapOp,
+	identityId: identityPublicId,
 	mailboxId,
 }: {
 	imapOp: boolean;
+	/** Public id of the identity. */
 	identityId: string;
 	mailboxId: string;
 }): Promise<FormState> {
 	const user = await isSignedIn();
-	if (!user?.id) return { success: false, error: "Please sign in first." };
-	await requireOwnedMailboxes(mailboxId);
+	if (!user?.id) return { success: false, error: "Unauthorized" };
 
-	if (!imapOp) {
-		const [mailbox] = await db
-			.select()
+	const rls = await rlsClient();
+	const [mailbox] = await rls((tx) =>
+		tx
+			.select({
+				id: mailboxes.id,
+				isDefault: mailboxes.isDefault,
+				identityId: identities.id,
+				smtpAccountId: identities.smtpAccountId,
+			})
 			.from(mailboxes)
-			.where(eq(mailboxes.id, mailboxId))
-			.limit(1);
+			.innerJoin(identities, eq(identities.id, mailboxes.identityId))
+			.where(
+				and(
+					eq(mailboxes.id, String(mailboxId)),
+					eq(identities.publicId, String(identityPublicId)),
+				),
+			)
+			.limit(1),
+	).catch(() => []);
 
-		if (!mailbox) return { success: false, error: "Folder not found" } as any;
-		if (mailbox.isDefault)
-			return { success: false, error: "Cannot delete a default folder" } as any;
+	if (!mailbox) return { success: false, error: "Folder not found" };
+	if (mailbox.isDefault)
+		return { success: false, error: "Cannot delete a default folder" };
 
-		// Delete any subfolders first
-		await db.delete(mailboxes).where(eq(mailboxes.parentId, mailboxId));
-
-		// Delete this mailbox and any sync info
-		await db.delete(mailboxSync).where(eq(mailboxSync.mailboxId, mailboxId));
-		await db.delete(mailboxes).where(eq(mailboxes.id, mailboxId));
+	if (!mailbox.smtpAccountId) {
+		// Sub-folders and sync rows go with it (ON DELETE CASCADE).
+		await rls((tx) =>
+			tx
+				.delete(mailboxes)
+				.where(and(eq(mailboxes.id, mailbox.id), eq(mailboxes.isDefault, false))),
+		);
 
 		await afterMailMutation();
+		revalidatePath("/dashboard/mail");
 		return { success: true };
 	}
-
-	const [ident] = await db
-		.select({ id: identities.id })
-		.from(identities)
-		.where(
-			and(eq(identities.publicId, identityId), eq(identities.ownerId, user.id)),
-		)
-		.limit(1);
-
-	if (!ident) throw new Error("Identity not found");
 
 	await addJobAndWait(
 		"smtp-worker",
 		"mailbox:delete-folder",
 		{
-			mailboxId,
-			identityId: ident.id,
-			ownerId: user?.id,
+			mailboxId: mailbox.id,
+			identityId: mailbox.identityId,
+			ownerId: user.id,
 		},
 		{ ...RETRY_JOB_OPTS, removeOnComplete: true, removeOnFail: true },
 	);
-	await invalidateServerCache(user.id);
-	redirect(`/dashboard/mail/${identityId}/inbox`);
-	return { success: true };
+
+	const workspacePublicId = await getWorkspacePublicId();
+	redirect(
+		workspacePublicId
+			? `/w/${workspacePublicId}/dashboard/mail/${identityPublicId}/inbox`
+			: "/",
+	);
 }
 
 export const moveToFolder = async (
@@ -1613,12 +2071,16 @@ export const moveToFolder = async (
 		fromMailboxId === toMailboxId
 	)
 		return;
+
 	await requireOwnedMailboxes(fromMailboxId, toMailboxId);
+	const ownedIds = await ownedThreadIdsInMailbox(fromMailboxId, ids);
+	if (!ownedIds.length) return;
+	if (messageId) await requireOwnedMessage(messageId, fromMailboxId, ownedIds);
 
 	await Promise.all([
 		enqueueThreadSmtpJobs(
 			"mail:move",
-			ids,
+			ownedIds,
 			() => ({
 				mailboxId: fromMailboxId,
 				op: "move",
@@ -1627,191 +2089,142 @@ export const moveToFolder = async (
 				moveImap,
 			}),
 			(threadId) => ({
-				...RETRY_JOB_OPTS,
-				jobId: `move:${threadId}:${fromMailboxId}->${toMailboxId}`,
-				removeOnComplete: true,
-				removeOnFail: false,
+				...DEFAULT_JOB_OPTS,
+				// Per-message moves of one thread must not collapse into one job.
+				// (BullMQ allows at most two ":" in a custom id.)
+				jobId: `move:${threadId}${messageId ? `-${messageId}` : ""}:${fromMailboxId}->${toMailboxId}`,
 			}),
 		),
-		enqueueSearchRefresh(ids),
+		enqueueSearchRefresh(ownedIds),
 	]);
 
-	await afterMailMutation(refresh);
+	await afterMailMutation();
+	if (refresh) revalidatePath("/mail");
 };
 
 export const clearImapClients = async (identityId: string) => {
-	await requireOwnedIdentity(identityId);
-	await getQueue("smtp-worker").add(
-		"imap:stop-idle",
-		{ identityId },
-		{ ...RETRY_JOB_OPTS, removeOnComplete: true, removeOnFail: false },
-	);
+	const identity = await requireOwnedIdentity(identityId);
+	await queueStopIdle(identity.id);
 };
 
-const fetchScheduledDraftCountsUncached = async () => {
+export const fetchScheduledDraftCounts = cache(async () => {
 	const rls = await rlsClient();
-	// Only the columns the sidebar counts need; payloads can be large.
+
 	const rows = await rls((tx) =>
-		tx
-			.select({
-				id: draftMessages.id,
-				identityId: draftMessages.identityId,
-				status: draftMessages.status,
-			})
-			.from(draftMessages)
-			.where(inArray(draftMessages.status, ["scheduled", "draft"])),
-	);
-	return rows;
-};
-
-export type DraftPayload = {
-	mode?: "reply" | "forward" | "compose";
-	to?: string;
-	cc?: string;
-	bcc?: string;
-	subject?: string;
-	bodyHtml?: string;
-	text?: string;
-	attachments?: string;
-	originalMessageId?: string;
-	threadUrl?: string;
-};
-
-// Autosaved, not yet sent messages (status "draft").
-export async function saveDraft(input: {
-	draftId?: string | null;
-	sentMailboxId: string;
-	payload: DraftPayload;
-}): Promise<{ draftId: string | null; error?: string }> {
-	if (!input.sentMailboxId) return { draftId: input.draftId ?? null };
-	const rls = await rlsClient();
-	try {
-		return await rls(async (tx) => {
-			const [mailbox] = await tx
-				.select({ identityId: mailboxes.identityId })
-				.from(mailboxes)
-				.where(eq(mailboxes.id, input.sentMailboxId));
-			if (!mailbox) return { draftId: input.draftId ?? null };
-
-			const values = {
-				mailboxId: input.sentMailboxId,
-				identityId: mailbox.identityId,
-				payload: input.payload as Record<string, any>,
-				updatedAt: new Date(),
-			};
-
-			if (input.draftId) {
-				const [updated] = await tx
-					.update(draftMessages)
-					.set(values)
-					.where(
-						and(
-							eq(draftMessages.id, input.draftId),
-							eq(draftMessages.status, "draft"),
-						),
-					)
-					.returning({ id: draftMessages.id });
-				// Gone (sent or discarded meanwhile): do not resurrect it.
-				return { draftId: updated?.id ?? null };
-			}
-
-			const [created] = await tx
-				.insert(draftMessages)
-				.values({ ...values, status: "draft" })
-				.returning({ id: draftMessages.id });
-			return { draftId: created?.id ?? null, created: true };
-		}).then(
-			async ({
-				created,
-				...result
-			}: {
-				draftId: string | null;
-				created?: boolean;
-			}) => {
-				// A new draft changes the sidebar draft count.
-				if (created) await afterMailMutation(false);
-				return result;
-			},
-		);
-	} catch (error) {
-		return {
-			draftId: input.draftId ?? null,
-			error: error instanceof Error ? error.message : "Could not save draft",
-		};
-	}
-}
-
-export async function deleteDraft(draftId: string) {
-	if (!draftId) return;
-	const rls = await rlsClient();
-	await rls((tx) =>
-		tx
-			.delete(draftMessages)
-			.where(
-				and(eq(draftMessages.id, draftId), eq(draftMessages.status, "draft")),
-			),
-	);
-	await afterMailMutation();
-}
-
-export async function fetchDraftForMessage(originalMessageId: string) {
-	const rls = await rlsClient();
-	const [row] = await rls((tx) =>
 		tx
 			.select()
 			.from(draftMessages)
 			.where(
 				and(
-					eq(draftMessages.status, "draft"),
-					sql`${draftMessages.payload}->>'originalMessageId' = ${originalMessageId}`,
+					eq(draftMessages.status, "scheduled"),
+					identityVisibleSql(draftMessages.identityId),
 				),
 			)
-			.orderBy(desc(draftMessages.updatedAt))
-			.limit(1),
 	);
-	return row ?? null;
-}
 
-export const fetchDrafts = async (identityPublicId: string) => {
-	const rls = await rlsClient();
-	return rls((tx) =>
-		tx
-			.select(getTableColumns(draftMessages))
-			.from(draftMessages)
-			.innerJoin(identities, eq(identities.id, draftMessages.identityId))
-			.where(
-				and(
-					eq(draftMessages.status, "draft"),
-					eq(identities.publicId, identityPublicId),
-				),
-			)
-			.orderBy(desc(draftMessages.updatedAt)),
-	);
-};
-
-export const fetchScheduledDraftCounts = cache(async () => {
-	const user = await isSignedIn();
-	if (!user?.id) return fetchScheduledDraftCountsUncached();
-
-	return withServerCache(user.id, `scheduled-draft-counts:${user.id}`, 15, () =>
-		fetchScheduledDraftCountsUncached(),
-	);
+	return rows;
 });
+
+/**
+ * Sidebar counts per identity id, without loading draft payloads or whole
+ * thread rows (use this instead of fetchScheduledDraftCounts /
+ * fetchIdentitySnoozedThreads when only the numbers are needed).
+ */
+const loadMailSidebarCounts = (
+	async (): Promise<{
+		scheduledByIdentityId: Record<string, number>;
+		snoozedByIdentityId: Record<string, number>;
+		draftsByIdentityId: Record<string, number>;
+	}> => {
+		const rls = await rlsClient();
+		const now = new Date();
+
+		const [scheduled, snoozed, drafts] = await rls((tx) =>
+			Promise.all([
+				tx
+					.select({
+						identityId: draftMessages.identityId,
+						count: count(),
+					})
+					.from(draftMessages)
+					.where(eq(draftMessages.status, "scheduled"))
+					.groupBy(draftMessages.identityId),
+				tx
+					.select({
+						identityId: mailboxThreads.identityId,
+						count: count(),
+					})
+					.from(mailboxThreads)
+					.where(
+						and(
+							isNotNull(mailboxThreads.snoozedUntil),
+							gt(mailboxThreads.snoozedUntil, now),
+						),
+					)
+					.groupBy(mailboxThreads.identityId),
+				tx
+					.select({
+						identityId: draftMessages.identityId,
+						count: count(),
+					})
+					.from(draftMessages)
+					.where(
+						and(
+							eq(draftMessages.status, "draft"),
+							// Drafts are private to their author; RLS on this table is
+							// workspace-wide.
+							sql`${draftMessages.ownerId} = nullif(current_setting('request.jwt.claim.sub', true), '')::uuid`,
+						),
+					)
+					.groupBy(draftMessages.identityId),
+			]),
+		);
+
+		const toRecord = (rows: { identityId: string | null; count: number }[]) =>
+			Object.fromEntries(
+				rows
+					.filter((row) => row.identityId)
+					.map((row) => [String(row.identityId), Number(row.count)]),
+			);
+
+		return {
+			scheduledByIdentityId: toRecord(scheduled),
+			snoozedByIdentityId: toRecord(snoozed),
+			draftsByIdentityId: toRecord(drafts),
+		};
+	}
+);
+
+/** Cached per workspace + user (ENABLE_SERVER_CACHE), 10 s. */
+export const fetchMailSidebarCounts = cache(() =>
+	withServerCache("mail-sidebar-counts", 10, loadMailSidebarCounts),
+);
+
+export type FetchMailSidebarCountsResult = Awaited<
+	ReturnType<typeof fetchMailSidebarCounts>
+>;
+
 
 export const fetchScheduledDrafts = async (identityPublicId: string) => {
 	const rls = await rlsClient();
-	return rls((tx) =>
-		tx
-			.select(getTableColumns(draftMessages))
+	// One transaction; an unknown identity yields an empty list.
+	return rls(async (tx) => {
+		const [identity] = await tx
+			.select({ id: identities.id })
+			.from(identities)
+			.where(eq(identities.publicId, identityPublicId))
+			.limit(1);
+		if (!identity) return [];
+		return tx
+			.select()
 			.from(draftMessages)
-			.innerJoin(identities, eq(identities.id, draftMessages.identityId))
 			.where(
 				and(
 					eq(draftMessages.status, "scheduled"),
-					eq(identities.publicId, identityPublicId),
+					eq(draftMessages.identityId, identity.id),
 				),
-			),
-	);
+			);
+	});
 };
 
 export async function deleteScheduledDraft(
@@ -1820,26 +2233,31 @@ export async function deleteScheduledDraft(
 ): Promise<FormState> {
 	return handleAction(async () => {
 		const decodedForm = decode(formData) as Record<string, unknown>;
-		const draftId = String(decodedForm.draftId);
 		const rls = await rlsClient();
 		const deleted = await rls((tx) =>
 			tx
 				.delete(draftMessages)
-				.where(eq(draftMessages.id, draftId))
+				.where(
+					and(
+						eq(draftMessages.id, String(decodedForm.draftId)),
+						// Only scheduled sends; autosaved drafts are private and
+						// RLS on this table is workspace-wide.
+						eq(draftMessages.status, "scheduled"),
+						identityVisibleSql(draftMessages.identityId),
+					),
+				)
 				.returning({ id: draftMessages.id }),
 		);
 
-		// Also drop the delayed send job (jobId = draft id).
-		if (deleted.length) {
-			try {
-				const job = await getQueue("send-mail").getJob(draftId);
-				await job?.remove();
-			} catch (error) {
-				console.warn("Could not remove scheduled send job", error);
-			}
+		// Drop the delayed send job too (its id is the draft id).
+		for (const row of deleted) {
+			await getQueue("send-mail")
+				.remove(String(row.id))
+				.catch(() => 0);
 		}
 
 		await afterMailMutation();
+		revalidatePath("/dashboard/mail");
 		return { success: true };
 	});
 }
@@ -1848,12 +2266,15 @@ export async function snoozeThread(input: {
 	mailboxThreadId: string;
 	activeMailboxId: string;
 	snoozedUntil: string | null;
-}) {
-	return handleAction(async () => {
+}): Promise<FormState> {
+	return handleAction(async (): Promise<FormState> => {
 		const { mailboxThreadId, activeMailboxId, snoozedUntil } = input;
 
+		if (snoozedUntil && Number.isNaN(new Date(snoozedUntil).getTime())) {
+			return { success: false, error: "Invalid snooze time" };
+		}
 		const rls = await rlsClient();
-		await rls(async (tx) => {
+		const updated = await rls(async (tx) => {
 			return tx
 				.update(mailboxThreads)
 				.set({
@@ -1867,31 +2288,31 @@ export async function snoozeThread(input: {
 						eq(mailboxThreads.mailboxId, activeMailboxId),
 					),
 				)
-				.returning();
+				.returning({ threadId: mailboxThreads.threadId });
 		});
+		if (!updated.length) {
+			return { success: false, error: "Thread not found" };
+		}
 
 		await afterMailMutation();
+		revalidatePath("/dashboard/mail");
 		return { success: true };
 	});
 }
 
-const fetchIdentitySnoozedThreadsUncached = async (
-	identityPublicId?: string,
-) => {
-	// Without an identity, return all snoozed threads for account-wide sidebar counts.
-
+export const fetchIdentitySnoozedThreads = async (): Promise<{ threads: MailboxThreadEntity[] }> => {
 	const rls = await rlsClient();
 	const now = new Date();
 
-	const threads = await rls((tx) => {
-		return tx
-			.select()
+	const rows = await rls((tx) =>
+
+		tx
+			.select({
+				thread: mailboxThreads
+			})
 			.from(mailboxThreads)
 			.where(
 				and(
-					identityPublicId
-						? eq(mailboxThreads.identityPublicId, identityPublicId)
-						: undefined,
 					isNotNull(mailboxThreads.snoozedUntil),
 					gt(mailboxThreads.snoozedUntil, now),
 				),
@@ -1899,25 +2320,14 @@ const fetchIdentitySnoozedThreadsUncached = async (
 			.orderBy(
 				desc(mailboxThreads.snoozedUntil),
 				desc(mailboxThreads.lastActivityAt),
-			);
-	});
+			)
+	)
 
-	return { threads };
+	return {
+		threads: rows.map((r) => r.thread),
+	};
 };
 
-export const fetchIdentitySnoozedThreads = cache(
-	async (identityPublicId?: string) => {
-		const user = await isSignedIn();
-		if (!user?.id) return fetchIdentitySnoozedThreadsUncached(identityPublicId);
-
-		return withServerCache(
-			user.id,
-			`snoozed-threads:${user.id}:${identityPublicId ?? "all"}`,
-			15,
-			() => fetchIdentitySnoozedThreadsUncached(identityPublicId),
-		);
-	},
-);
 
 function subscriptionKeyFromHeadersJson(headersJson: any) {
 	const list = headersJson?.list ?? null;
@@ -1958,47 +2368,55 @@ function subscriptionKeyFromHeadersJson(headersJson: any) {
 	return null;
 }
 
-type MailSubscriptionRow = typeof mailSubscriptions.$inferSelect;
-
 export async function fetchThreadMailSubscriptions(opts: {
-	ownerId: string;
+	/** @deprecated Ignored: rows are read through RLS for the session's workspace. */
+	ownerId?: string;
 	messages: Array<{ id: string; headersJson: any }>;
 }) {
 	const keysByMessageId = new Map<string, string>();
-	// Callable as a server action: only ever read the caller's own rows.
-	const user = await isSignedIn();
-	if (!user?.id || user.id !== opts.ownerId) {
-		return {
-			byMessageId: new Map<string, MailSubscriptionRow | null>(),
-			keysByMessageId,
-		};
-	}
+	const empty = () => ({
+		byMessageId: new Map<string, MailSubscriptionEntity | null>(),
+		keysByMessageId,
+	});
 
-	for (const m of opts.messages) {
+	// The messages come from the caller: reload them (and their headers)
+	// and keep only messages of identities visible to the caller, so a
+	// member can't read subscriptions of identities restricted to others.
+	const messageIds = Array.from(
+		new Set((opts.messages ?? []).map((m) => String(m?.id ?? "")).filter(Boolean)),
+	);
+	if (!messageIds.length) return empty();
+
+	const rls = await rlsClient();
+	const visibleMessages = await rls((tx) =>
+		tx
+			.select({ id: messages.id, headersJson: messages.headersJson })
+			.from(messages)
+			.where(
+				and(
+					inArray(messages.id, messageIds),
+					messageVisibleSql(messages.id),
+				),
+			),
+	);
+
+	for (const m of visibleMessages) {
 		const key = subscriptionKeyFromHeadersJson(m.headersJson);
 		if (key) keysByMessageId.set(m.id, key);
 	}
 
 	const uniqueKeys = Array.from(new Set(keysByMessageId.values()));
-	if (!uniqueKeys.length) {
-		return {
-			byMessageId: new Map<string, MailSubscriptionRow | null>(),
-			keysByMessageId,
-		};
-	}
+	if (!uniqueKeys.length) return empty();
 
-	const rows = await db
-		.select()
-		.from(mailSubscriptions)
-		.where(
-			and(
-				eq(mailSubscriptions.ownerId, opts.ownerId),
-				inArray(mailSubscriptions.subscriptionKey, uniqueKeys),
-			),
-		);
+	const rows = await rls((tx) =>
+		tx
+			.select()
+			.from(mailSubscriptions)
+			.where(inArray(mailSubscriptions.subscriptionKey, uniqueKeys)),
+	);
 
 	const byKey = new Map(rows.map((r) => [r.subscriptionKey, r]));
-	const byMessageId = new Map<string, MailSubscriptionRow | null>();
+	const byMessageId = new Map<string, MailSubscriptionEntity | null>();
 
 	for (const [messageId, key] of keysByMessageId.entries()) {
 		byMessageId.set(messageId, byKey.get(key) ?? null);
@@ -2011,51 +2429,6 @@ export type FetchThreadMailSubsResult = Awaited<
 	ReturnType<typeof fetchThreadMailSubscriptions>
 >;
 
-function isPrivateAddress(address: string) {
-	if (address === "localhost") return true;
-	if (isIP(address) === 4) {
-		const [a, b] = address.split(".").map(Number);
-		return (
-			a === 10 ||
-			a === 127 ||
-			(a === 172 && b >= 16 && b <= 31) ||
-			(a === 192 && b === 168) ||
-			(a === 169 && b === 254) ||
-			a === 0
-		);
-	}
-	if (isIP(address) === 6) {
-		const normalized = address.toLowerCase();
-		return (
-			normalized === "::1" ||
-			normalized.startsWith("fc") ||
-			normalized.startsWith("fd") ||
-			normalized.startsWith("fe80:")
-		);
-	}
-	return false;
-}
-
-async function assertSafeUnsubscribeUrl(rawUrl: string) {
-	const url = new URL(rawUrl);
-	if (!["https:", "http:"].includes(url.protocol)) {
-		throw new Error("Unsupported unsubscribe URL protocol");
-	}
-	if (url.username || url.password) {
-		throw new Error("Unsubscribe URL must not contain credentials");
-	}
-	if (isPrivateAddress(url.hostname)) {
-		throw new Error("Unsafe unsubscribe host");
-	}
-	const addresses = await lookup(url.hostname, { all: true, verbatim: true });
-	if (
-		!addresses.length ||
-		addresses.some((addr) => isPrivateAddress(addr.address))
-	) {
-		throw new Error("Unsafe unsubscribe DNS target");
-	}
-	return url;
-}
 
 export async function oneClickUnsubscribe(
 	_prev: FormState,
@@ -2063,31 +2436,62 @@ export async function oneClickUnsubscribe(
 ): Promise<FormState> {
 	return handleAction(async () => {
 		const decodedForm = decode(formData);
-		const id = String(decodedForm.mailSubscriptionId);
+		const id = String(decodedForm.mailSubscriptionId ?? "");
+		if (!id) return { success: false, error: "mailbox.subscriptionNotFound" };
+
+		// RLS: only subscriptions of the caller's workspace.
 		const rls = await rlsClient();
 		const [sub] = await rls((tx) =>
 			tx
 				.select()
 				.from(mailSubscriptions)
-				.where(and(eq(mailSubscriptions.id, id)))
+				.where(eq(mailSubscriptions.id, id))
 				.limit(1),
-		);
-		if (!sub?.unsubscribeHttpUrl)
-			return { success: false, error: "Subscription not found" };
+		).catch(() => []);
+		if (!sub?.unsubscribeHttpUrl) return { success: false, error: "mailbox.subscriptionNotFound" };
 
-		const url = await assertSafeUnsubscribeUrl(sub.unsubscribeHttpUrl);
-		const res = await fetch(url, {
-			method: "POST",
-			headers: { "Content-Type": "application/x-www-form-urlencoded" },
-			body: "List-Unsubscribe=One-Click",
-			redirect: "manual",
-		});
-		if (res.status < 200 || res.status >= 400) {
+		// mail_subscriptions is only workspace scoped: require a message of
+		// an identity visible to the caller that carries this subscription.
+		const messageId = String(decodedForm.messageId ?? "");
+		if (!messageId) return { success: false, error: "mailbox.subscriptionNotFound" };
+		const [message] = await rls((tx) =>
+			tx
+				.select({ headersJson: messages.headersJson })
+				.from(messages)
+				.where(
+					and(
+						eq(messages.id, messageId),
+						messageVisibleSql(messages.id),
+					),
+				)
+				.limit(1),
+		).catch(() => []);
+		if (
+			!message ||
+			subscriptionKeyFromHeadersJson(message.headersJson) !== sub.subscriptionKey
+		) {
+			return { success: false, error: "mailbox.subscriptionNotFound" };
+		}
+
+		// The URL comes from a received mail: no private/internal targets,
+		// no credentials, no redirects (RFC 8058 one-click is a single POST).
+		let status: number;
+		try {
+			status = await safeFormPost(
+				sub.unsubscribeHttpUrl,
+				"List-Unsubscribe=One-Click",
+			);
+		} catch (error) {
+			console.warn("One-click unsubscribe failed", error);
+			return { success: false, error: "Unsubscribe request failed." };
+		}
+		if (status < 200 || status >= 400) {
 			return {
 				success: false,
-				error: `Unsubscribe failed: HTTP ${res.status}`,
+				error: `Unsubscribe failed: HTTP ${status}`,
 			};
 		}
+
 		await rls((tx) =>
 			tx
 				.update(mailSubscriptions)
@@ -2096,13 +2500,13 @@ export async function oneClickUnsubscribe(
 					unsubscribedAt: new Date(),
 					updatedAt: new Date(),
 				})
-				.where(eq(mailSubscriptions.id, id)),
+				.where(eq(mailSubscriptions.id, sub.id)),
 		);
-		revalidatePath(
-			typeof decodedForm.pathname === "string" && decodedForm.pathname
+		const pathname =
+			typeof decodedForm.pathname === "string" && decodedForm.pathname.startsWith("/")
 				? decodedForm.pathname
-				: "/dashboard/mail",
-		);
+				: "/dashboard/mail";
+		revalidatePath(pathname);
 		return { success: true };
 	});
 }

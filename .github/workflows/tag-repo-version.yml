@@ -11,6 +11,8 @@ permissions:
 
 jobs:
   tag:
+    # Upstream release flow only; never runs in forks.
+    if: ${{ github.repository == 'kurrier-org/kurrier' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (full history so tags work)

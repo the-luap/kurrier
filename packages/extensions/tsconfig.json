@@ -1,0 +1,19 @@
+{
+	"compilerOptions": {
+		"noEmit": true,
+		"esModuleInterop": true,
+		"allowSyntheticDefaultImports": true,
+		"paths": {
+			"@schema": ["../../packages/schema/src/index.ts"],
+			"@schema/*": ["../../packages/schema/src/*"],
+			"@db": ["../../packages/db/src/index.ts"],
+			"@db/*": ["../../packages/db/src/*"],
+			"@common": ["../../packages/common/src/index.ts"],
+			"@common/*": ["../../packages/common/src/*"],
+			"@distribution": ["../../packages/distribution/src/index.ts"],
+			"@distribution/*": ["../../packages/distribution/src/*"],
+		},
+		"lib": ["ES2021.String"]
+	},
+	"exclude": ["node_modules"]
+}

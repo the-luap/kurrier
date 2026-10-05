@@ -5,11 +5,17 @@ import { SesMailer } from "./mail/ses";
 import { SendgridMailer } from "./mail/sendgrid";
 import { MailgunMailer } from "./mail/mailgun";
 import { PostmarkMailer } from "./mail/postmark";
+import { GoogleMailer } from "./mail/google";
 
 import { S3Store } from "./store/s3";
+import {JmapMailer} from "./mail/jmap";
 
 export function createMailer(provider: Providers, config: unknown): Mailer {
 	switch (provider) {
+		case "google":
+			return GoogleMailer.from(config);
+		case "jmap":
+			return JmapMailer.from(config);
 		case "smtp":
 			return SmtpMailer.from(config);
 		case "ses":
@@ -38,3 +44,5 @@ export function createStore(
 }
 
 export * from "./core";
+export * from "./mail/google-client";
+export { SesMailer } from "./mail/ses";

@@ -1,0 +1,501 @@
+"use client";
+
+import {
+	ActionIcon,
+	Badge,
+	Button,
+	Card,
+	Group,
+	Modal,
+	PasswordInput,
+	Table,
+	Textarea,
+	TextInput,
+	Tooltip,
+} from "@mantine/core";
+import {
+	IconCheck,
+	IconCopy,
+	IconEye,
+	IconEyeOff,
+	IconKey,
+	IconLock,
+	IconPencil,
+	IconPlus,
+	IconShieldLock,
+	IconTrash,
+} from "@tabler/icons-react";
+import { Vault } from "lucide-react";
+import * as React from "react";
+import { toast } from "sonner";
+
+import { Container } from "@/components/common/containers";
+import { ModalActions } from "@/components/common/modal-actions";
+import { useOptionalI18n } from "@/components/providers/dictionary-provider";
+import type { FetchVaultSecretsResult } from "@/lib/actions/vault";
+
+type VaultSecret = FetchVaultSecretsResult[number];
+
+type ManageVaultProps = {
+	secrets: VaultSecret[];
+
+	createSecret: (formData: FormData) => Promise<any>;
+
+	updateSecret: (id: string, formData: FormData) => Promise<any>;
+
+	deleteSecret: (id: string) => Promise<any>;
+
+	revealSecret: (id: string) => Promise<{ value: string }>;
+};
+
+export default function ManageVault({
+	secrets,
+	createSecret,
+	updateSecret,
+	deleteSecret,
+	revealSecret,
+}: ManageVaultProps) {
+	const i18n = useOptionalI18n();
+	const dict = i18n?.dict;
+	const format = i18n?.format;
+	const [opened, setOpened] = React.useState(false);
+	const [editing, setEditing] = React.useState<VaultSecret | null>(null);
+
+	const [pending, startTransition] = React.useTransition();
+
+	const [revealed, setRevealed] = React.useState<Record<string, string>>({});
+	const [revealingId, setRevealingId] = React.useState<string | null>(null);
+	const [copiedId, setCopiedId] = React.useState<string | null>(null);
+
+	const openCreate = () => {
+		setEditing(null);
+		setOpened(true);
+	};
+
+	const openEdit = (secret: VaultSecret) => {
+		setEditing(secret);
+		setOpened(true);
+	};
+
+	const close = () => {
+		if (pending) return;
+
+		setOpened(false);
+		setEditing(null);
+	};
+
+	const submit = (formData: FormData) => {
+		startTransition(async () => {
+			try {
+				if (editing) {
+					await updateSecret(editing.id, formData);
+					toast.success(dict?.vault?.secretUpdatedToast ?? "Secret updated");
+				} else {
+					await createSecret(formData);
+					toast.success(
+						dict?.vault?.secretAddedToast ?? "Secret added to Vault",
+					);
+				}
+
+				close();
+			} catch (error) {
+				toast.error(
+					error instanceof Error
+						? error.message
+						: (dict?.vault?.couldNotSaveSecret ?? "Could not save secret"),
+				);
+			}
+		});
+	};
+
+	const reveal = async (secret: VaultSecret) => {
+		if (revealed[secret.id]) {
+			setRevealed((current) => {
+				const next = { ...current };
+				delete next[secret.id];
+				return next;
+			});
+
+			return;
+		}
+
+		try {
+			setRevealingId(secret.id);
+
+			const result = await revealSecret(secret.id);
+
+			setRevealed((current) => ({
+				...current,
+				[secret.id]: result.value,
+			}));
+		} catch {
+			toast.error(
+				dict?.vault?.couldNotRevealSecret ?? "Could not reveal secret",
+			);
+		} finally {
+			setRevealingId(null);
+		}
+	};
+
+	const copyValue = async (secret: VaultSecret) => {
+		try {
+			let value = revealed[secret.id];
+
+			if (!value) {
+				const result = await revealSecret(secret.id);
+				value = result.value;
+			}
+
+			await navigator.clipboard.writeText(value);
+
+			setCopiedId(secret.id);
+			toast.success(dict?.vault?.secretCopiedToast ?? "Secret copied");
+
+			window.setTimeout(() => {
+				setCopiedId(null);
+			}, 1500);
+		} catch {
+			toast.error(dict?.vault?.couldNotCopySecret ?? "Could not copy secret");
+		}
+	};
+
+	const remove = (secret: VaultSecret) => {
+		if (
+			!window.confirm(
+				(dict?.vault?.deleteConfirmPrefix ?? 'Delete "') +
+					secret.name +
+					(dict?.vault?.deleteConfirmSuffix ??
+						'"? Anything using this secret may stop working.'),
+			)
+		) {
+			return;
+		}
+
+		startTransition(async () => {
+			try {
+				await deleteSecret(secret.id);
+
+				setRevealed((current) => {
+					const next = { ...current };
+					delete next[secret.id];
+					return next;
+				});
+
+				toast.success(dict?.vault?.secretDeletedToast ?? "Secret deleted");
+			} catch (error) {
+				toast.error(
+					error instanceof Error
+						? error.message
+						: (dict?.vault?.couldNotDeleteSecret ?? "Could not delete secret"),
+				);
+			}
+		});
+	};
+
+	return (
+		<Container variant="wide">
+			<div className="flex flex-col items-stretch gap-4 py-4 sm:flex-row sm:items-start sm:justify-between">
+				<div>
+					<h1 className="text-xl font-semibold tracking-tight text-foreground">
+						{dict?.vault?.vault ?? "Vault"}
+					</h1>
+
+					<p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+						{dict?.vault?.pageDescription ??
+							"Securely store credentials used by integrations, adapters and external services."}
+					</p>
+				</div>
+
+				<div className="w-full sm:w-fit">
+					<Button
+						fullWidth
+						leftSection={<IconPlus size={16} />}
+						onClick={openCreate}
+					>
+						{dict?.vault?.addSecret ?? "Add secret"}
+					</Button>
+				</div>
+			</div>
+
+			<Card className="mt-4 !rounded-2xl border shadow-none overflow-hidden">
+				<div className="flex items-start gap-3 border-b bg-muted/25 px-5 py-4">
+					<div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border bg-background">
+						<IconShieldLock size={18} />
+					</div>
+
+					<div className="min-w-0 flex-1">
+						<h2 className="font-medium text-foreground">
+							{dict?.vault?.encryptedSecrets ?? "Encrypted secrets"}
+						</h2>
+
+						<p className="mt-0.5 text-sm text-muted-foreground">
+							{dict?.vault?.encryptedSecretsDescription ??
+								"Values are encrypted at rest and only decrypted when authorized services request them."}
+						</p>
+					</div>
+
+					{secrets.length > 0 && (
+						<Badge variant="light" radius="sm">
+							{format?.message(
+								secrets.length,
+								dict?.vault?.secretsCount ?? { other: "{count} secrets" },
+							) ?? `${secrets.length} secrets`}
+						</Badge>
+					)}
+				</div>
+
+				{secrets.length === 0 ? (
+					<div className="flex min-h-72 flex-col items-center justify-center px-6 text-center">
+						<div className="flex h-12 w-12 items-center justify-center rounded-xl border bg-muted/30">
+							<Vault size={21} />
+						</div>
+
+						<h3 className="mt-4 text-sm font-medium text-foreground">
+							{dict?.vault?.emptyTitle ?? "Your Vault is empty"}
+						</h3>
+
+						<p className="mt-1 max-w-md text-sm leading-6 text-muted-foreground">
+							{dict?.vault?.emptyDescription ??
+								"Store API tokens, signing secrets and credentials that Kurrier integrations can use securely."}
+						</p>
+
+						<div className="mt-5 w-full sm:w-fit">
+							<Button
+								fullWidth
+								variant="light"
+								leftSection={<IconPlus size={15} />}
+								onClick={openCreate}
+							>
+								{dict?.vault?.addFirstSecret ?? "Add your first secret"}
+							</Button>
+						</div>
+					</div>
+				) : (
+					<Table verticalSpacing="md" highlightOnHover>
+						<Table.Thead>
+							<Table.Tr>
+								<Table.Th>{dict?.vault?.columnSecret ?? "Secret"}</Table.Th>
+								<Table.Th>{dict?.vault?.columnValue ?? "Value"}</Table.Th>
+								<Table.Th>
+									{dict?.vault?.columnEncryption ?? "Encryption"}
+								</Table.Th>
+								<Table.Th>{dict?.vault?.columnUpdated ?? "Updated"}</Table.Th>
+								<Table.Th />
+							</Table.Tr>
+						</Table.Thead>
+
+						<Table.Tbody>
+							{secrets.map((secret) => {
+								const value = revealed[secret.id];
+
+								return (
+									<Table.Tr key={secret.id}>
+										<Table.Td>
+											<Group gap="sm" wrap="nowrap">
+												<div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border bg-muted/30">
+													<IconKey size={15} />
+												</div>
+
+												<div className="min-w-0">
+													<div className="font-medium">{secret.name}</div>
+
+													{secret.description ? (
+														<div className="mt-0.5 max-w-sm truncate text-xs text-muted-foreground">
+															{secret.description}
+														</div>
+													) : (
+														<div className="mt-0.5 text-xs text-muted-foreground">
+															{dict?.vault?.noDescription ?? "No description"}
+														</div>
+													)}
+												</div>
+											</Group>
+										</Table.Td>
+
+										<Table.Td>
+											<Group gap={5} wrap="nowrap">
+												<code className="inline-block max-w-72 truncate rounded bg-muted px-2 py-1 text-xs">
+													{value ? value : "••••••••••••••••••••"}
+												</code>
+
+												<Tooltip
+													label={
+														value
+															? (dict?.vault?.hide ?? "Hide")
+															: (dict?.vault?.reveal ?? "Reveal")
+													}
+												>
+													<ActionIcon
+														variant="subtle"
+														size="sm"
+														loading={revealingId === secret.id}
+														onClick={() => reveal(secret)}
+													>
+														{value ? (
+															<IconEyeOff size={14} />
+														) : (
+															<IconEye size={14} />
+														)}
+													</ActionIcon>
+												</Tooltip>
+
+												<Tooltip
+													label={dict?.vault?.copySecret ?? "Copy secret"}
+												>
+													<ActionIcon
+														variant="subtle"
+														size="sm"
+														onClick={() => copyValue(secret)}
+													>
+														{copiedId === secret.id ? (
+															<IconCheck size={14} />
+														) : (
+															<IconCopy size={14} />
+														)}
+													</ActionIcon>
+												</Tooltip>
+											</Group>
+										</Table.Td>
+
+										<Table.Td>
+											<Badge
+												variant="outline"
+												radius="sm"
+												leftSection={<IconLock size={10} />}
+											>
+												AES-256-GCM · v{secret.keyVersion}
+											</Badge>
+										</Table.Td>
+
+										<Table.Td className="text-sm text-muted-foreground">
+											{/*{formatDate(secret.updatedAt)}*/}
+										</Table.Td>
+
+										<Table.Td>
+											<Group justify="flex-end" gap={4}>
+												<Tooltip label={dict?.vault?.edit ?? "Edit"}>
+													<ActionIcon
+														variant="subtle"
+														onClick={() => openEdit(secret)}
+													>
+														<IconPencil size={15} />
+													</ActionIcon>
+												</Tooltip>
+
+												<Tooltip label={dict?.vault?.delete ?? "Delete"}>
+													<ActionIcon
+														variant="subtle"
+														color="red"
+														disabled={pending}
+														onClick={() => remove(secret)}
+													>
+														<IconTrash size={15} />
+													</ActionIcon>
+												</Tooltip>
+											</Group>
+										</Table.Td>
+									</Table.Tr>
+								);
+							})}
+						</Table.Tbody>
+					</Table>
+				)}
+			</Card>
+
+			<div className="mt-5 flex items-start gap-3 rounded-xl border bg-muted/20 px-4 py-3">
+				<IconLock size={16} className="mt-0.5 shrink-0 text-muted-foreground" />
+
+				<p className="text-xs leading-5 text-muted-foreground">
+					{dict?.vault?.footerNote ??
+						"Secret values are encrypted before storage. Integrations can reference Vault entries without storing credentials in their own configuration."}
+				</p>
+			</div>
+
+			<Modal
+				opened={opened}
+				onClose={close}
+				title={
+					editing
+						? (dict?.vault?.editSecretTitle ?? "Edit secret")
+						: (dict?.vault?.addSecretTitle ?? "Add secret")
+				}
+				centered
+				radius="lg"
+			>
+				<form action={submit}>
+					<div className="space-y-4">
+						<TextInput
+							name="name"
+							label={dict?.vault?.keyLabel ?? "Key"}
+							required
+							defaultValue={editing?.name ?? ""}
+							placeholder={dict?.vault?.keyPlaceholder ?? "MAILTRAP_API_TOKEN"}
+							description={
+								dict?.vault?.keyHelp ??
+								"A stable name applications and adapters can reference."
+							}
+						/>
+
+						<Textarea
+							name="description"
+							label={dict?.vault?.descriptionLabel ?? "Description"}
+							defaultValue={editing?.description ?? ""}
+							placeholder={
+								dict?.vault?.descriptionPlaceholder ??
+								"Mailtrap token for inbound email ingestion"
+							}
+							minRows={2}
+						/>
+
+						<PasswordInput
+							name="value"
+							label={
+								editing
+									? (dict?.vault?.newValueLabel ?? "New value")
+									: (dict?.vault?.valueLabel ?? "Value")
+							}
+							required={!editing}
+							placeholder={
+								editing
+									? (dict?.vault?.keepCurrentValuePlaceholder ??
+										"Leave blank to keep current value")
+									: (dict?.vault?.enterSecretValuePlaceholder ??
+										"Enter secret value")
+							}
+							description={
+								editing
+									? (dict?.vault?.editValueHelp ??
+										"Leave this empty if you only want to change the key or description.")
+									: (dict?.vault?.valueEncryptedHelp ??
+										"The value will be encrypted before it is stored.")
+							}
+						/>
+
+						<ModalActions>
+							<Button
+								variant="default"
+								type="button"
+								onClick={close}
+								disabled={pending}
+							>
+								{dict?.common?.cancel ?? "Cancel"}
+							</Button>
+
+							<Button
+								type="submit"
+								loading={pending}
+								leftSection={
+									editing ? <IconPencil size={15} /> : <IconPlus size={15} />
+								}
+							>
+								{editing
+									? (dict?.vault?.saveChanges ?? "Save changes")
+									: (dict?.vault?.addSecret ?? "Add secret")}
+							</Button>
+						</ModalActions>
+					</div>
+				</form>
+			</Modal>
+		</Container>
+	);
+}

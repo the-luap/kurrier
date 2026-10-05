@@ -1,24 +1,24 @@
 import { defineEventHandler, readBody } from "h3";
 import {
+	API_SCOPES,
 	apiSuccess,
+	assertValidWebhookUrl,
 	apiError,
 	validateApiKey,
+	validateIdentityOwnership,
 } from "../../../../../lib/api-helpers";
 import { db, WebhookCreateSchema, WebhookInsertEntity, webhooks } from "@db";
 
 export default defineEventHandler(async (event) => {
-	const { ownerId } = await validateApiKey(event);
-
+	const { ownerId, apiKey } = await validateApiKey(event, API_SCOPES.manage);
 	const body = await readBody(event).catch(() => ({}));
 	const parsed = WebhookCreateSchema.safeParse(body);
-
 	if (!parsed.success) {
 		const issues = parsed.error.issues.map((issue) => ({
 			path: issue.path.join("."),
 			message: issue.message,
 			code: issue.code,
 		}));
-
 		return apiError(
 			400,
 			"INVALID_REQUEST_BODY",
@@ -26,12 +26,11 @@ export default defineEventHandler(async (event) => {
 			issues,
 		);
 	}
-
 	const data = parsed.data;
 	if (!data.url) {
 		return apiError(400, "MISSING_URL", "Field `url` is required");
 	}
-
+	assertValidWebhookUrl(data.url);
 	if (!data.events || data.events.length === 0) {
 		return apiError(
 			400,
@@ -39,9 +38,16 @@ export default defineEventHandler(async (event) => {
 			"Field `events` must have at least one event",
 		);
 	}
-
+	if (data.identityId) {
+		await validateIdentityOwnership({
+			identityId: data.identityId,
+			ownerId,
+			workspaceId: apiKey.workspaceId,
+		});
+	}
 	const insertPayload = {
 		ownerId,
+		workspaceId: apiKey.workspaceId,
 		url: data.url,
 		description: data.description ?? null,
 		enabled: data.enabled ?? true,
@@ -49,11 +55,9 @@ export default defineEventHandler(async (event) => {
 		events: data.events,
 		metaData: data.metaData ?? null,
 	};
-
 	const [created] = await db
 		.insert(webhooks)
 		.values(insertPayload as WebhookInsertEntity)
 		.returning();
-
 	return apiSuccess(created);
 });

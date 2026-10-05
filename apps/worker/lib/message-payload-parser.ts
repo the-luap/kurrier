@@ -1,34 +1,26 @@
-import { generateSnippet, upsertMailboxThreadItem } from "@common";
+import { simpleParser, ParsedMail, Attachment } from "mailparser";
 import {
-	type ContactCreate,
-	contacts,
 	db,
-	type MessageAttachmentCreate,
-	MessageAttachmentInsertSchema,
-	type MessageCreate,
+	messages,
+	messageAttachments,
+	threads,
 	MessageInsertSchema,
+	MessageCreate,
+	MessageAttachmentCreate,
+	MessageAttachmentInsertSchema,
+	mailSubscriptions,
+	workspaces,
 	mailboxes,
 	mailRules,
-	mailSubscriptions,
-	messageAttachments,
-	messages,
-	threads,
 	webhooks,
 } from "@db";
-import { getPublicEnv, getServerEnv } from "@schema";
-import slugify from "@sindresorhus/slugify";
-import { createClient } from "@supabase/supabase-js";
+import { generateSnippet, upsertMailboxThreadItem } from "@common";
 import { randomUUID } from "crypto";
 import { and, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
-import { type Attachment, type ParsedMail, simpleParser } from "mailparser";
 import { getRedis } from "../lib/get-redis";
-
-const publicConfig = getPublicEnv();
-const serverConfig = getServerEnv();
-const supabase = createClient(
-	publicConfig.API_URL,
-	serverConfig.SERVICE_ROLE_KEY,
-);
+import {s3} from "../lib/create-s3-client";
+import {PutObjectCommand} from "@aws-sdk/client-s3";
+import {upsertWorkspaceSharedContactFromMessage} from "../lib/message-parser-contacts";
 
 const SEARCH_BATCH_SIZE = 100;
 const WEBHOOK_BATCH_SIZE = 100;
@@ -39,9 +31,14 @@ const FLUSH_INTERVAL_MS = 1000;
 type SearchJob = {
 	messageId: string;
 	contactId: string | null;
+	/** Owner of the contact row (the DAV job looks the contact up by owner). */
 	ownerId?: string;
 };
-type WebhookJob = { message: any; rawEmail: string };
+type WebhookJob = {
+	messageId: string;
+	mailboxId: string;
+	rawStorageKey: string | null;
+};
 type ICSJob = {
 	messageId: string;
 	messageAttachmentId: string;
@@ -58,7 +55,10 @@ let icsBuffer: ICSJob[] = [];
 let rulesBuffer: RulesJob[] = [];
 let flushTimer: any = null;
 
-/** Mailbox ids (of the given ones) whose identity has an enabled message.received webhook. */
+/**
+ * Mailbox ids (of the given ones) whose identity has an enabled
+ * message.received webhook in the mailbox's workspace.
+ */
 async function mailboxesWithWebhooks(mailboxIds: string[]) {
 	if (!mailboxIds.length) return new Set<string>();
 	const rows = await db
@@ -67,7 +67,7 @@ async function mailboxesWithWebhooks(mailboxIds: string[]) {
 		.innerJoin(
 			webhooks,
 			and(
-				eq(webhooks.ownerId, mailboxes.ownerId),
+				eq(webhooks.workspaceId, mailboxes.workspaceId),
 				or(
 					eq(webhooks.identityId, mailboxes.identityId),
 					isNull(webhooks.identityId),
@@ -94,6 +94,7 @@ async function mailboxesWithRules(mailboxIds: string[]) {
 			mailRules,
 			and(
 				eq(mailRules.identityId, mailboxes.identityId),
+				eq(mailRules.workspaceId, mailboxes.workspaceId),
 				eq(mailRules.enabled, true),
 			),
 		)
@@ -102,17 +103,12 @@ async function mailboxesWithRules(mailboxIds: string[]) {
 }
 
 async function flushBatches() {
-	if (
-		!searchBuffer.length &&
-		!webhookBuffer.length &&
-		!icsBuffer.length &&
-		!rulesBuffer.length
-	)
+	if (!searchBuffer.length && !webhookBuffer.length && !icsBuffer.length && !rulesBuffer.length)
 		return;
 
 	// Take the buffers synchronously: messages stored while the queue calls
-	// below are awaited go into fresh buffers instead of being wiped by the
-	// reset that used to happen after the await.
+	// below are awaited go into fresh buffers instead of being wiped by a
+	// reset after the await.
 	const searchJobs = searchBuffer;
 	const icsJobs = icsBuffer;
 	const webhookJobs = webhookBuffer;
@@ -135,9 +131,9 @@ async function flushBatches() {
 				{ removeOnComplete: true },
 			);
 
-			// The buffer is shared by all owners: group contacts per owner (the
-			// batch used to be filed under the first message's owner) and drop
-			// missing / duplicate contact ids.
+			// The buffer is shared by all owners and workspaces: group contacts
+			// per contact owner (the batch used to be filed under the first
+			// message's owner) and drop missing / duplicate contact ids.
 			const contactsByOwner = new Map<string, Set<string>>();
 			for (const job of searchJobs) {
 				if (!job.contactId || !job.ownerId) continue;
@@ -172,18 +168,22 @@ async function flushBatches() {
 		}
 
 		if (webhookJobs.length) {
-			// Webhook jobs carry the full raw email: only enqueue them for
+			// Webhook jobs download the raw email: only enqueue them for
 			// mailboxes that actually have a matching webhook.
 			const withHooks = await mailboxesWithWebhooks([
-				...new Set(webhookJobs.map((job) => String(job.message.mailboxId))),
+				...new Set(webhookJobs.map((job) => job.mailboxId)),
 			]);
 			const jobs = webhookJobs
-				.filter((job) => withHooks.has(String(job.message.mailboxId)))
+				.filter((job) => withHooks.has(job.mailboxId))
 				.map((job) => ({
 					name: "webhook:message.received",
 					data: {
-						message: job.message,
-						rawEmail: job.rawEmail,
+						messageId: job.messageId,
+						rawStorageKey: job.rawStorageKey,
+					},
+					opts: {
+						removeOnComplete: true,
+						removeOnFail: true,
 					},
 				}));
 
@@ -229,9 +229,9 @@ function generateFileName(att: Attachment) {
 }
 
 export async function createOrInitializeThread(
-	parsed: ParsedMail & { ownerId: string },
+	parsed: ParsedMail & { ownerId: string, workspaceId: string },
 ) {
-	const { ownerId } = parsed;
+	const { ownerId, workspaceId } = parsed;
 	const inReplyTo = parsed.inReplyTo?.trim() || null;
 	const refs = Array.isArray(parsed.references)
 		? parsed.references
@@ -263,9 +263,12 @@ export async function createOrInitializeThread(
 				.orderBy(desc(messages.date ?? sql`now()`));
 
 			if (parentMsgs.length) {
-				const chosen = inReplyTo
-					? parentMsgs.find((m) => m.messageId === inReplyTo)
-					: parentMsgs[0];
+				// In-Reply-To may name a message we do not have (sent from
+				// another account, deleted): fall back to a References match.
+				const chosen =
+					(inReplyTo
+						? parentMsgs.find((m) => m.messageId === inReplyTo)
+						: undefined) ?? parentMsgs[0];
 
 				if (chosen?.threadId) {
 					const [t] = await tx
@@ -283,6 +286,7 @@ export async function createOrInitializeThread(
 			.insert(threads)
 			.values({
 				ownerId,
+				workspaceId,
 				lastMessageDate: parsed.date ?? new Date(),
 			})
 			.returning();
@@ -300,99 +304,6 @@ function getFromAddress(parsed: ParsedMail) {
 	};
 }
 
-export async function upsertContactsFromMessage(
-	ownerId: string,
-	parsed: ParsedMail,
-) {
-	const addr = getFromAddress(parsed);
-	if (!addr) return null;
-
-	let contactId: string | null = null;
-	const email = addr.email;
-	const displayName = addr.name;
-
-	const existing = await db
-		.select()
-		.from(contacts)
-		.where(
-			and(
-				eq(contacts.ownerId, ownerId),
-				sql`${contacts.emails}::jsonb @> ${JSON.stringify([
-					{ address: email },
-				])}::jsonb`,
-			),
-		)
-		.limit(1);
-
-	if (existing.length === 0) {
-		let firstName = "Unknown";
-		let lastName: string | null = null;
-
-		if (displayName) {
-			const parts = displayName.split(" ").filter(Boolean);
-			firstName = parts[0] || "Unknown";
-			lastName = parts.length > 1 ? parts.slice(1).join(" ") : null;
-		}
-
-		const newContact = {
-			ownerId,
-			firstName,
-			lastName,
-			emails: [{ address: email }],
-			slug: slugify(displayName || email),
-			profilePictureXs: null,
-		};
-
-		const inserted = await db
-			.insert(contacts)
-			.values(newContact as ContactCreate)
-			.onConflictDoNothing()
-			.returning();
-
-		if (inserted.length > 0) {
-			contactId = inserted[0].id;
-			return contactId;
-		}
-
-		const [existingAfter] = await db
-			.select()
-			.from(contacts)
-			.where(
-				and(
-					eq(contacts.ownerId, ownerId),
-					sql`${contacts.emails}::jsonb @> ${JSON.stringify([
-						{ address: email },
-					])}::jsonb`,
-				),
-			)
-			.limit(1);
-
-		contactId = existingAfter?.id ?? null;
-		return contactId;
-	}
-
-	const contact = existing[0];
-
-	const hasName = contact.firstName || contact.lastName;
-	if (hasName || !displayName) {
-		return contact.id;
-	}
-
-	const parts = displayName.split(" ").filter(Boolean);
-	const firstName = parts[0] || contact.firstName || "Unknown";
-	const lastName = parts.length > 1 ? parts.slice(1).join(" ") : null;
-
-	await db
-		.update(contacts)
-		.set({
-			firstName,
-			lastName,
-		})
-		.where(eq(contacts.id, contact.id));
-
-	contactId = contact.id;
-	return contactId;
-}
 
 function isIcsAttachment(att: Attachment) {
 	const ct = (att.contentType || "").toLowerCase();
@@ -409,16 +320,19 @@ const ATTACHMENT_UPLOAD_CONCURRENCY = 4;
 
 /**
  * Uploads the attachments of a stored message (a few in parallel) and inserts
- * their rows with one statement instead of one INSERT per attachment.
+ * their rows with one statement instead of one INSERT per attachment. A failed
+ * upload skips that attachment instead of aborting the (IMAP) sync.
  */
 async function storeAttachments(opts: {
 	attachments: Attachment[];
 	ownerId: string;
+	workspaceId: string;
 	mailboxId: string;
 	messageId: string;
 	collectIcs: boolean;
 }) {
-	const { attachments, ownerId, mailboxId, messageId, collectIcs } = opts;
+	const { attachments, ownerId, workspaceId, mailboxId, messageId, collectIcs } =
+		opts;
 	if (!attachments.length) return;
 
 	const bucket = "attachments";
@@ -433,26 +347,29 @@ async function storeAttachments(opts: {
 			const fileName = generateFileName(attachment);
 			const objectPath = `private/${ownerId}/${messageId}/${fileName}`;
 
-			const { data, error } = await supabase.storage
-				.from(bucket)
-				.upload(objectPath, attachment.content, {
-					contentType: attachment.contentType || "application/octet-stream",
-					upsert: false,
-					cacheControl: "31536000",
-				});
-			if (error) {
+			try {
+				await s3.send(
+					new PutObjectCommand({
+						Bucket: process.env.S3_BUCKET!,
+						Key: objectPath,
+						Body: attachment.content,
+						ContentType:
+							attachment.contentType || "application/octet-stream",
+						CacheControl: "public, max-age=31536000",
+					}),
+				);
+				uploaded[index] = { attachment, path: objectPath };
+			} catch (err: any) {
 				console.warn(
 					"[parseAndStoreEmail] Attachment upload failed; skipping attachment",
 					{
 						messageId,
 						filename: attachment.filename,
 						path: objectPath,
-						message: error.message,
+						message: err?.message ?? String(err),
 					},
 				);
-				continue;
 			}
-			uploaded[index] = { attachment, path: data?.path };
 		}
 	};
 	await Promise.all(
@@ -470,6 +387,7 @@ async function storeAttachments(opts: {
 	const rows = stored.map(({ attachment, path }) =>
 		MessageAttachmentInsertSchema.parse({
 			ownerId,
+			workspaceId,
 			messageId,
 			bucketId: bucket,
 			path,
@@ -493,6 +411,7 @@ async function storeAttachments(opts: {
 
 	const idByPath = new Map(inserted.map((r) => [r.path, r.id]));
 	const seenIcsChecksums = new Set<string>();
+	let queued = false;
 	for (const { attachment, path } of stored) {
 		if (!isIcsAttachment(attachment)) continue;
 		const attachmentId = idByPath.get(path);
@@ -506,10 +425,12 @@ async function storeAttachments(opts: {
 			messageAttachmentId: attachmentId,
 			mailboxId,
 		});
+		queued = true;
 	}
+	if (!queued) return;
 	if (icsBuffer.length >= CALENDAR_BATCH_SIZE) {
 		await flushBatches();
-	} else if (icsBuffer.length) {
+	} else {
 		scheduleFlush();
 	}
 }
@@ -517,10 +438,18 @@ async function storeAttachments(opts: {
 /**
  * Parse raw email, create thread, insert message + attachments.
  */
+
+
 export async function parseAndStoreEmail(
-	rawEmail: string,
+	/**
+	 * Raw RFC822 bytes. Pass the Buffer as received: converting 8-bit
+	 * non-UTF-8 mail (e.g. ISO-8859-1 bodies) to a string first replaces
+	 * every non-ASCII byte with U+FFFD before mailparser sees the charset.
+	 */
+	rawEmail: string | Buffer,
 	opts: {
 		ownerId: string;
+		workspaceId: string;
 		mailboxId: string;
 		rawStorageKey: string;
 		emlKey: string;
@@ -533,14 +462,18 @@ export async function parseAndStoreEmail(
 		parsed?: ParsedMail;
 	},
 ) {
-	const { ownerId, mailboxId, rawStorageKey } = opts;
+	const { ownerId, workspaceId, mailboxId, rawStorageKey } = opts;
+
 	const mode = opts.mode ?? "live";
 
 	// Keep "cid:" references instead of inlining images as base64 data URIs:
 	// inline images are stored as attachments and resolved by the web app,
-	// which keeps the stored HTML (and every thread payload) small.
+	// which keeps the stored HTML (search index, thread payloads) small.
+	const emailBuffer: Uint8Array =
+		typeof rawEmail === "string" ? new TextEncoder().encode(rawEmail) : rawEmail;
 	const parsed =
-		opts.parsed ?? (await simpleParser(rawEmail, { keepCidLinks: true }));
+		opts.parsed ??
+		(await simpleParser(Buffer.from(emailBuffer), { keepCidLinks: true }));
 	const headers = parsed.headers as Map<string, any>;
 
 	const messageId =
@@ -553,36 +486,96 @@ export async function parseAndStoreEmail(
 		return null;
 	}
 
-	// Already stored in this mailbox (re-sync / duplicate delivery): stop
-	// before uploading the EML again and before creating a thread that the
-	// conflicting insert below would leave orphaned.
-	const [alreadyStored] = await db
-		.select({ id: messages.id })
+	/**
+	 * Important for IMAP replay / UIDVALIDITY recovery:
+	 *
+	 * If this message already exists in this mailbox, do not recreate
+	 * the message, attachments, thread, contacts, rules, webhooks, etc.
+	 *
+	 * Instead, refresh the IMAP metadata and flags because the UID,
+	 * mailbox path or flags may have changed on the server.
+	 */
+	const [existingMessage] = await db
+		.select()
 		.from(messages)
 		.where(
-			and(eq(messages.mailboxId, mailboxId), eq(messages.messageId, messageId)),
+			and(
+				eq(messages.mailboxId, mailboxId),
+				eq(messages.messageId, messageId),
+			),
 		)
 		.limit(1);
-	if (alreadyStored) return null;
 
-	const encoder = new TextEncoder();
-	const emailBuffer = encoder.encode(rawEmail);
-	let storedRawStorageKey: string | null = opts.rawStorageKey;
+	if (existingMessage) {
+		const existingMeta =
+			(existingMessage.metaData as Record<string, any>) ?? {};
 
-	const { error: rawUploadError } = await supabase.storage
-		.from("attachments")
-		.upload(opts.rawStorageKey, emailBuffer, {
-			contentType: "message/rfc822",
-			upsert: true,
-		});
-	if (rawUploadError) {
+		const incomingMeta = opts.metaData ?? {};
+
+		const nextMeta = {
+			...existingMeta,
+			...incomingMeta,
+			imap: {
+				...(existingMeta.imap ?? {}),
+				...(incomingMeta.imap ?? {}),
+			},
+		};
+
+		await db
+			.update(messages)
+			.set({
+				metaData: nextMeta,
+				seen:
+					typeof opts.seen === "boolean"
+						? opts.seen
+						: existingMessage.seen,
+				answered:
+					typeof opts.answered === "boolean"
+						? opts.answered
+						: existingMessage.answered,
+				flagged:
+					typeof opts.flagged === "boolean"
+						? opts.flagged
+						: existingMessage.flagged,
+				updatedAt: new Date(),
+			})
+			.where(eq(messages.id, existingMessage.id));
+
+		// Flags changed on the server (replay): keep the thread summary's
+		// unread count in sync.
+		if (
+			(typeof opts.seen === "boolean" && opts.seen !== existingMessage.seen) ||
+			(typeof opts.flagged === "boolean" &&
+				opts.flagged !== existingMessage.flagged)
+		) {
+			await upsertMailboxThreadItem(existingMessage.id);
+		}
+
+		return existingMessage;
+	}
+
+	const sizeBytes = emailBuffer.byteLength;
+
+	// A failed raw EML upload must not abort the (IMAP) sync: store the
+	// message without its raw source instead.
+	let storedRawStorageKey: string | null = rawStorageKey;
+	try {
+		await s3.send(
+			new PutObjectCommand({
+				Bucket: process.env.S3_BUCKET!,
+				Key: rawStorageKey,
+				Body: emailBuffer,
+				ContentType: "message/rfc822",
+			}),
+		);
+	} catch (err: any) {
 		storedRawStorageKey = null;
 		console.warn(
 			"[parseAndStoreEmail] Raw EML upload failed; continuing without raw source",
 			{
 				mailboxId,
-				storageKey: opts.rawStorageKey,
-				message: rawUploadError.message,
+				storageKey: rawStorageKey,
+				message: err?.message ?? String(err),
 			},
 		);
 	}
@@ -590,12 +583,13 @@ export async function parseAndStoreEmail(
 	const thread = await createOrInitializeThread({
 		...parsed,
 		ownerId,
-		// mailboxId,
+		workspaceId,
 	});
 
 	const decoratedParsed = {
 		...parsed,
 		mailboxId,
+		workspaceId,
 		threadId: thread.id,
 		ownerId,
 		headersJson: Object.fromEntries(parsed.headers as Map<string, any>),
@@ -611,6 +605,7 @@ export async function parseAndStoreEmail(
 		flagged: false,
 		draft: false,
 		html: parsed.html || "",
+		sizeBytes,
 		snippet: generateSnippet(parsed.text || parsed.html || ""),
 	} as MessageCreate | ParsedMail;
 
@@ -621,14 +616,19 @@ export async function parseAndStoreEmail(
 	if (typeof opts.seen === "boolean") {
 		(decoratedParsed as any).seen = opts.seen;
 	}
+
 	if (typeof opts.answered === "boolean") {
 		(decoratedParsed as any).answered = opts.answered;
 	}
+
 	if (typeof opts.flagged === "boolean") {
 		(decoratedParsed as any).flagged = opts.flagged;
 	}
 
-	const messagePayload = MessageInsertSchema.parse(decoratedParsed);
+	const messagePayload = sanitizePostgresValue(
+		MessageInsertSchema.parse(decoratedParsed),
+	);
+
 	const [message] = await db
 		.insert(messages)
 		.values(messagePayload as MessageCreate)
@@ -637,18 +637,57 @@ export async function parseAndStoreEmail(
 		})
 		.returning();
 
-	if (!message) return null;
+	/**
+	 * Another worker/replay may have inserted the message between our
+	 * initial lookup and this insert. In that case, just stop here.
+	 */
+	if (!message) {
+		const [existingThreadMessage] = await db
+			.select({ id: messages.id })
+			.from(messages)
+			.where(eq(messages.threadId, thread.id))
+			.limit(1);
+
+		if (!existingThreadMessage) {
+			await db
+				.delete(threads)
+				.where(eq(threads.id, thread.id));
+		}
+
+		return null;
+	}
+
+	await db
+		.update(workspaces)
+		.set({
+			storageBytesUsed: sql`${workspaces.storageBytesUsed} + ${sizeBytes}`,
+		})
+		.where(eq(workspaces.id, workspaceId));
+
 	await ingestMailSubscriptionFromMessage({
 		ownerId,
+		workspaceId,
 		parsed,
 		headersJson: (decoratedParsed as any).headersJson,
 	});
 
-	const contactId = await upsertContactsFromMessage(ownerId, parsed);
+	const contactRes = await upsertWorkspaceSharedContactFromMessage({
+		parsed,
+		mailboxId,
+		fallbackOwnerId: ownerId,
+	});
+
+	const contactId = contactRes?.contactIdForMessage ?? null;
+	const contactOwnerId =
+		contactRes?.insertedOrFound.find((r) => r.contactId === contactId)
+			?.ownerId ?? ownerId;
+
 	await upsertMailboxThreadItem(message.id);
 
 	// Single conditional UPDATE instead of SELECT + UPDATE.
-	const msgDate = message.createdAt ?? new Date();
+	// The mail's own date: backfilled history must not move every thread
+	// to "now".
+	const msgDate = message.date ?? message.createdAt ?? new Date();
 	await db
 		.update(threads)
 		.set({ lastMessageDate: msgDate })
@@ -665,6 +704,7 @@ export async function parseAndStoreEmail(
 	await storeAttachments({
 		attachments: parsed.attachments ?? [],
 		ownerId,
+		workspaceId,
 		mailboxId,
 		messageId: message.id,
 		collectIcs: mode === "live",
@@ -672,9 +712,12 @@ export async function parseAndStoreEmail(
 
 	searchBuffer.push({
 		messageId: message.id,
-		contactId: contactId ? String(contactId) : null,
-		ownerId,
+		contactId: contactId
+			? String(contactId)
+			: null,
+		ownerId: contactOwnerId,
 	});
+
 	if (searchBuffer.length >= SEARCH_BATCH_SIZE) {
 		await flushBatches();
 	} else {
@@ -682,8 +725,17 @@ export async function parseAndStoreEmail(
 	}
 
 	if (mode === "live") {
-		webhookBuffer.push({ message, rawEmail });
-		rulesBuffer.push({ messageId: message.id, mailboxId: message.mailboxId });
+		webhookBuffer.push({
+			messageId: message.id,
+			mailboxId,
+			rawStorageKey: storedRawStorageKey,
+		});
+
+		rulesBuffer.push({
+			messageId: message.id,
+			mailboxId,
+		});
+
 		if (
 			webhookBuffer.length >= WEBHOOK_BATCH_SIZE ||
 			rulesBuffer.length >= RULES_BATCH_SIZE
@@ -697,38 +749,49 @@ export async function parseAndStoreEmail(
 	return message;
 }
 
+
 async function ingestMailSubscriptionFromMessage(opts: {
 	ownerId: string;
+	workspaceId: string;
 	parsed: ParsedMail;
 	headersJson: Record<string, any>;
 }) {
-	const { ownerId, parsed, headersJson } = opts;
+	const { ownerId, workspaceId, parsed, headersJson } = opts;
 
 	const headers = parsed.headers as Map<string, any>;
 	const list =
-		(headers.get("list") as any) ?? (headersJson as any)?.list ?? null;
+		(headers.get("list") as any) ??
+		(headersJson as any)?.list ??
+		null;
 
 	const rawListId =
-		String(
-			headers.get("list-id") ?? (headersJson as any)?.["list-id"] ?? "",
-		).trim() || null;
+		String(headers.get("list-id") ?? (headersJson as any)?.["list-id"] ?? "")
+			.trim() || null;
 
-	const unsubscribeUrl =
+	// Only http(s) links are stored (the UI opens / one-click POSTs them);
+	// javascript:, data: and the like are dropped.
+	const unsubscribeUrlRaw =
 		(list?.unsubscribe?.url as string | undefined) ||
 		(list?.unsubscribe?.href as string | undefined) ||
 		null;
+	let unsubscribeUrl: string | null = null;
+	if (unsubscribeUrlRaw) {
+		try {
+			const u = new URL(String(unsubscribeUrlRaw).trim());
+			if (u.protocol === "http:" || u.protocol === "https:") {
+				unsubscribeUrl = u.toString();
+			}
+		} catch {
+			unsubscribeUrl = null;
+		}
+	}
 
 	const unsubscribePost =
 		String(list?.["unsubscribe-post"]?.name ?? "").toLowerCase() || null;
 
 	let unsubscribeMailto: string | null = null;
-	const rawListUnsub =
-		headers.get("list-unsubscribe") ??
-		(headersJson as any)?.["list-unsubscribe"];
-	if (
-		typeof rawListUnsub === "string" &&
-		rawListUnsub.toLowerCase().includes("mailto:")
-	) {
+	const rawListUnsub = headers.get("list-unsubscribe") ?? (headersJson as any)?.["list-unsubscribe"];
+	if (typeof rawListUnsub === "string" && rawListUnsub.toLowerCase().includes("mailto:")) {
 		const m = rawListUnsub.match(/mailto:([^>\s,]+)/i);
 		unsubscribeMailto = (m?.[1] ?? "").trim().toLowerCase() || null;
 	}
@@ -763,11 +826,11 @@ async function ingestMailSubscriptionFromMessage(opts: {
 	if (!subscriptionKey) return;
 
 	const oneClick = unsubscribePost?.includes("one-click") ?? false;
-
 	await db
 		.insert(mailSubscriptions)
 		.values({
 			ownerId,
+			workspaceId,
 			subscriptionKey,
 			listId: rawListId,
 			unsubscribeHttpUrl: unsubscribeUrl,
@@ -776,13 +839,42 @@ async function ingestMailSubscriptionFromMessage(opts: {
 			lastSeenAt: new Date(),
 		} as any)
 		.onConflictDoUpdate({
-			target: [mailSubscriptions.ownerId, mailSubscriptions.subscriptionKey],
+			target: [
+				mailSubscriptions.workspaceId,
+				mailSubscriptions.subscriptionKey,
+			],
 			set: {
 				listId: rawListId,
 				unsubscribeHttpUrl: unsubscribeUrl,
 				unsubscribeMailto,
 				oneClick,
 				lastSeenAt: new Date(),
-			} as any,
+			},
 		});
+
+}
+
+function sanitizePostgresValue<T>(value: T): T {
+	if (typeof value === "string") {
+		return value.replace(/\u0000/g, "") as T;
+	}
+
+	if (Array.isArray(value)) {
+		return value.map((item) => sanitizePostgresValue(item)) as T;
+	}
+
+	if (
+		value &&
+		typeof value === "object" &&
+		Object.getPrototypeOf(value) === Object.prototype
+	) {
+		return Object.fromEntries(
+			Object.entries(value).map(([key, val]) => [
+				key,
+				sanitizePostgresValue(val),
+			]),
+		) as T;
+	}
+
+	return value;
 }

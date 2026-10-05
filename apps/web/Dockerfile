@@ -3,7 +3,7 @@
 # -----------------------------
 FROM node:22-alpine AS build
 WORKDIR /repo
-RUN corepack enable
+RUN corepack enable && corepack prepare pnpm@10.18.3 --activate
 
 # Monorepo basics
 COPY pnpm-lock.yaml package.json pnpm-workspace.yaml ./
@@ -36,15 +36,18 @@ ARG TYPESENSE_PORT=1234
 ARG TYPESENSE_PROTOCOL=http
 ARG TYPESENSE_HOST=placeholder
 ARG SEARCH_REBUILD_ON_BOOT=false
-ARG WORKER_URL=http://worker
+ARG WORKER_URL=http://worker:3001
 ARG API_URL=http://kong:8000
-ARG API_PUBLIC_URL=http://kong:8000
-ARG ANON_KEY=placeholder
-ARG WEB_URL=http://localhost:3000
-ARG DOCS_URL=http://localhost:3002
 ARG DAV_URL=http://dav:80
-ARG DISABLE_SIGNUP=false
-ARG INBOUND_WEBHOOK_SECRET=placeholder
+ARG JWT_SECRET=placeholder
+ARG APP_SECRET_ENCRYPTION_KEY=placeholder
+ARG S3_REGION=placeholder
+ARG S3_BUCKET=placeholder
+ARG S3_ENDPOINT=placeholder
+ARG S3_ACCESS_KEY=placeholder
+ARG S3_SECRET_KEY=placeholder
+ARG S3_FORCE_PATH_STYLE=placeholder
+ARG WEB_URL=http://localhost:3000
 
 ENV DATABASE_URL=$DATABASE_URL
 ENV DATABASE_RLS_URL=$DATABASE_RLS_URL
@@ -59,13 +62,16 @@ ENV TYPESENSE_HOST=$TYPESENSE_HOST
 ENV SEARCH_REBUILD_ON_BOOT=$SEARCH_REBUILD_ON_BOOT
 ENV WORKER_URL=$WORKER_URL
 ENV API_URL=$API_URL
-ENV API_PUBLIC_URL=$API_PUBLIC_URL
-ENV ANON_KEY=$ANON_KEY
-ENV WEB_URL=$WEB_URL
-ENV DOCS_URL=$DOCS_URL
 ENV DAV_URL=$DAV_URL
-ENV DISABLE_SIGNUP=$DISABLE_SIGNUP
-ENV INBOUND_WEBHOOK_SECRET=$INBOUND_WEBHOOK_SECRET
+ENV JWT_SECRET=$JWT_SECRET
+ENV APP_SECRET_ENCRYPTION_KEY=$APP_SECRET_ENCRYPTION_KEY
+ENV S3_REGION=$S3_REGION
+ENV S3_BUCKET=$S3_BUCKET
+ENV S3_ENDPOINT=$S3_ENDPOINT
+ENV S3_ACCESS_KEY=$S3_ACCESS_KEY
+ENV S3_SECRET_KEY=$S3_SECRET_KEY
+ENV S3_FORCE_PATH_STYLE=$S3_FORCE_PATH_STYLE
+ENV WEB_URL=$WEB_URL
 # ---------------------------------------------
 
 RUN pnpm run build
@@ -76,6 +82,12 @@ RUN pnpm run build
 # -----------------------------
 FROM node:22-alpine
 WORKDIR /app
+
+RUN apk add --no-cache postgresql-client bash
+COPY db/init/db-bootstrap.sh /scripts/db-bootstrap.sh
+COPY db/init/migrations /scripts/migrations
+RUN chmod +x /scripts/db-bootstrap.sh
+
 ENV NODE_ENV=production
 ENV HOST=0.0.0.0
 ENV PORT=3000

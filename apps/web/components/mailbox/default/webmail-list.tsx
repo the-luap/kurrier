@@ -1,13 +1,22 @@
 "use client";
 import type { MailboxEntity, MailboxSyncEntity } from "@db";
-import { useMediaQuery } from "@mantine/hooks";
 import type { PublicConfig } from "@schema";
 import { useParams, usePathname } from "next/navigation";
-import * as React from "react";
+import {
+	use,
+	useCallback,
+	useEffect,
+	useMemo,
+	useState,
+} from "react";
 import MailListHeader from "@/components/mailbox/default/mail-list-header";
-import { getThreadBaseHref } from "@/components/mailbox/default/thread-list-utils";
+import {
+	CLOSE_THREAD_EVENT,
+	clearThreadOrder,
+	publishThreadOrder,
+} from "@/components/mailbox/default/thread-navigation-store";
 import WebmailListItem from "@/components/mailbox/default/webmail-list-item";
-import WebmailListItemMobile from "@/components/mailbox/default/webmail-list-item-mobile";
+import { useOptionalDictionary } from "@/components/providers/dictionary-provider";
 import {
 	DynamicContextProvider,
 	useDynamicContext,
@@ -16,59 +25,125 @@ import type {
 	FetchLabelsResult,
 	FetchMailboxThreadLabelsResult,
 } from "@/lib/actions/labels";
-import type { FetchMailboxThreadsResult } from "@/lib/actions/mailbox";
+import type {
+	FetchIdentityMailboxListResult,
+	FetchMailboxResult,
+	FetchMailboxThreadsResult,
+} from "@/lib/actions/mailbox";
 
 type WebListProps = {
-	mailboxThreads: FetchMailboxThreadsResult;
+	mailboxThreadPromise: Promise<{
+		mailboxThreads: FetchMailboxThreadsResult;
+		labelsByThreadId: FetchMailboxThreadLabelsResult;
+	}>;
 	publicConfig: PublicConfig;
-	activeMailbox: MailboxEntity;
 	identityPublicId: string;
-	globalLabels: FetchLabelsResult;
-	labelsByThreadId: FetchMailboxThreadLabelsResult;
-	mailboxSync?: MailboxSyncEntity;
+	identityMailboxesPromise: Promise<FetchIdentityMailboxListResult>;
+	fetchMailboxPromise: Promise<FetchMailboxResult>;
+	globalLabelsPromise: Promise<FetchLabelsResult>;
+	workspacePublicId: string;
 };
 
-type SelectionState = {
+export type SelectionState = {
 	selectedThreadIds: Set<string>;
 	activeMailbox: MailboxEntity;
 	identityPublicId: string;
 };
 
 export default function WebmailList({
-	mailboxThreads,
-	activeMailbox,
+	mailboxThreadPromise,
 	identityPublicId,
-	mailboxSync,
 	publicConfig,
-	globalLabels,
-	labelsByThreadId,
+	identityMailboxesPromise,
+	globalLabelsPromise,
+	workspacePublicId,
+	fetchMailboxPromise,
 }: WebListProps) {
+	const { labelsByThreadId, mailboxThreads } = use(mailboxThreadPromise);
+	const globalLabels = use(globalLabelsPromise);
+	const { mailboxSync, activeMailbox } = use(fetchMailboxPromise);
+	const identityMailboxes = use(identityMailboxesPromise);
+
+	return (
+		<MailThreadListView
+			mailboxThreads={mailboxThreads}
+			labelsByThreadId={labelsByThreadId}
+			globalLabels={globalLabels}
+			mailboxSync={mailboxSync ?? undefined}
+			activeMailbox={activeMailbox}
+			identityMailboxes={identityMailboxes}
+			identityPublicId={identityPublicId}
+			publicConfig={publicConfig}
+			workspacePublicId={workspacePublicId}
+		/>
+	);
+}
+
+type ListViewProps = {
+	mailboxThreads: FetchMailboxThreadsResult;
+	labelsByThreadId: FetchMailboxThreadLabelsResult;
+	globalLabels: FetchLabelsResult;
+	mailboxSync: MailboxSyncEntity | undefined;
+	activeMailbox: MailboxEntity;
+	identityMailboxes: FetchIdentityMailboxListResult;
+	identityPublicId: string;
+	publicConfig: PublicConfig;
+	workspacePublicId: string;
+};
+
+/**
+ * Shared by the mailbox list and the label/search/snoozed lists: hides the
+ * list while a thread is open (and immediately when the thread is closed),
+ * publishes the thread order for Previous/Next, and owns the selection.
+ */
+export function MailThreadListView({
+	mailboxThreads,
+	labelsByThreadId,
+	globalLabels,
+	mailboxSync,
+	activeMailbox,
+	identityMailboxes,
+	identityPublicId,
+	publicConfig,
+	workspacePublicId,
+}: ListViewProps) {
+	const dict = useOptionalDictionary();
 	const params = useParams();
 	const threadId = params?.threadId ? String(params.threadId) : null;
 
 	// The list is hidden while a thread is open. "Close" in the thread panel
-	// hides the list's thread immediately (before the route change lands), so
-	// remember which thread was closed instead of mirroring the route param
-	// into state with an effect (which cost an extra render of the list).
-	const [closedThreadId, setClosedThreadId] = React.useState<string | null>(
-		null,
-	);
+	// shows the list immediately (before the route change lands), so remember
+	// which thread was closed instead of mirroring the route param into state.
+	const [closedThreadId, setClosedThreadId] = useState<string | null>(null);
 	const threadOpen = Boolean(threadId) && closedThreadId !== threadId;
-	const [prevThreadId, setPrevThreadId] = React.useState(threadId);
+	const [prevThreadId, setPrevThreadId] = useState(threadId);
 	if (prevThreadId !== threadId) {
 		setPrevThreadId(threadId);
 		setClosedThreadId(null);
 	}
 
-	React.useEffect(() => {
+	useEffect(() => {
 		if (!threadId) return;
 		const closeThread = () => setClosedThreadId(threadId);
-		window.addEventListener("kurrier:close-thread", closeThread);
-		return () =>
-			window.removeEventListener("kurrier:close-thread", closeThread);
+		window.addEventListener(CLOSE_THREAD_EVENT, closeThread);
+		return () => window.removeEventListener(CLOSE_THREAD_EVENT, closeThread);
 	}, [threadId]);
 
-	const initialState = React.useMemo<SelectionState>(
+	const threadBaseHref = `/w/${workspacePublicId}/dashboard/mail/${identityPublicId}/${activeMailbox.slug}/threads/`;
+
+	useEffect(() => {
+		publishThreadOrder({
+			baseHref: threadBaseHref,
+			threadIds: mailboxThreads.map((t) => t.threadId),
+		});
+	}, [threadBaseHref, mailboxThreads]);
+
+	useEffect(
+		() => () => clearThreadOrder(threadBaseHref),
+		[threadBaseHref],
+	);
+
+	const initialState = useMemo<SelectionState>(
 		() => ({
 			selectedThreadIds: new Set(),
 			activeMailbox,
@@ -78,29 +153,30 @@ export default function WebmailList({
 	);
 
 	return (
-		<div className={threadOpen ? "hidden" : ""}>
+		<div className={threadOpen ? "hidden" : "min-w-0"}>
 			<DynamicContextProvider initialState={initialState}>
 				{mailboxThreads.length === 0 ? (
 					<div className="p-4 text-center text-base text-muted-foreground">
-						No messages in{" "}
+						{dict?.mailbox?.noMessagesInPrefix ?? "No messages in "}
 						<span className={"lowercase"}>{activeMailbox.name}</span>
 					</div>
 				) : (
-					<div className="rounded-xl border bg-background/50 z-[50]">
+					<div className="min-w-0 overflow-hidden rounded-xl border bg-background/50">
 						<MailListHeader
 							mailboxThreads={mailboxThreads}
 							mailboxSync={mailboxSync}
 							publicConfig={publicConfig}
+							identityMailboxes={identityMailboxes}
 							activeMailbox={activeMailbox}
 						/>
 
 						<WebmailRows
 							mailboxThreads={mailboxThreads}
 							activeMailbox={activeMailbox}
-							identityPublicId={identityPublicId}
 							mailboxSync={mailboxSync}
 							globalLabels={globalLabels}
 							labelsByThreadId={labelsByThreadId}
+							threadBaseHref={threadBaseHref}
 						/>
 					</div>
 				)}
@@ -115,24 +191,41 @@ export default function WebmailList({
 function WebmailRows({
 	mailboxThreads,
 	activeMailbox,
-	identityPublicId,
 	mailboxSync,
 	globalLabels,
 	labelsByThreadId,
-}: Omit<WebListProps, "publicConfig">) {
-	const isMobile = useMediaQuery("(max-width: 768px)");
+	threadBaseHref,
+}: {
+	mailboxThreads: FetchMailboxThreadsResult;
+	activeMailbox: MailboxEntity;
+	mailboxSync: MailboxSyncEntity | undefined;
+	globalLabels: FetchLabelsResult;
+	labelsByThreadId: FetchMailboxThreadLabelsResult;
+	threadBaseHref: string;
+}) {
 	const pathname = usePathname();
 	const isOnSnoozedPage = pathname.split("/").includes("snoozed");
-	const threadBaseHref = getThreadBaseHref(
-		pathname,
-		identityPublicId,
-		activeMailbox.slug,
-	);
 
 	const { state, setState } = useDynamicContext<SelectionState>();
 	const selectedThreadIds = state.selectedThreadIds;
 
-	const onToggleSelect = React.useCallback(
+	// The list stays mounted across ?page= changes and refreshes after a
+	// move/delete: drop selected threads that are no longer listed, so bulk
+	// actions never act on rows the user cannot see.
+	useEffect(() => {
+		const visible = new Set(mailboxThreads.map((t) => t.threadId));
+		setState((prev) => {
+			let changed = false;
+			const next = new Set<string>();
+			for (const id of prev.selectedThreadIds) {
+				if (visible.has(id)) next.add(id);
+				else changed = true;
+			}
+			return changed ? { ...prev, selectedThreadIds: next } : prev;
+		});
+	}, [mailboxThreads, setState]);
+
+	const onToggleSelect = useCallback(
 		(threadId: string, checked: boolean) => {
 			setState((prev) => {
 				const next = new Set(prev.selectedThreadIds);
@@ -145,34 +238,21 @@ function WebmailRows({
 	);
 
 	return (
-		<ul role="list" className={`divide-y rounded-4xl`}>
-			{mailboxThreads.map((mailboxThreadItem) =>
-				isMobile ? (
-					<WebmailListItemMobile
-						key={mailboxThreadItem.threadId + mailboxThreadItem.mailboxId}
-						mailboxThreadItem={mailboxThreadItem}
-						activeMailbox={activeMailbox}
-						mailboxSync={mailboxSync}
-						labelsByThreadId={labelsByThreadId}
-						threadBaseHref={threadBaseHref}
-						selected={selectedThreadIds.has(mailboxThreadItem.threadId)}
-						onToggleSelect={onToggleSelect}
-					/>
-				) : (
-					<WebmailListItem
-						key={mailboxThreadItem.threadId + mailboxThreadItem.mailboxId}
-						mailboxThreadItem={mailboxThreadItem}
-						activeMailbox={activeMailbox}
-						mailboxSync={mailboxSync}
-						globalLabels={globalLabels}
-						labelsByThreadId={labelsByThreadId}
-						threadBaseHref={threadBaseHref}
-						isOnSnoozedPage={isOnSnoozedPage}
-						selected={selectedThreadIds.has(mailboxThreadItem.threadId)}
-						onToggleSelect={onToggleSelect}
-					/>
-				),
-			)}
+		<ul className="divide-y rounded-4xl">
+			{mailboxThreads.map((mailboxThreadItem) => (
+				<WebmailListItem
+					key={mailboxThreadItem.threadId + mailboxThreadItem.mailboxId}
+					mailboxThreadItem={mailboxThreadItem}
+					activeMailbox={activeMailbox}
+					mailboxSync={mailboxSync}
+					globalLabels={globalLabels}
+					labelsByThreadId={labelsByThreadId}
+					threadBaseHref={threadBaseHref}
+					isOnSnoozedPage={isOnSnoozedPage}
+					selected={selectedThreadIds.has(mailboxThreadItem.threadId)}
+					onToggleSelect={onToggleSelect}
+				/>
+			))}
 		</ul>
 	);
 }

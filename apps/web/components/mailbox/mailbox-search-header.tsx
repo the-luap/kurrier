@@ -1,65 +1,55 @@
-import { type ReactNode, Suspense } from "react";
+import { identities } from "@db";
+import { eq } from "drizzle-orm";
+import { connection } from "next/server";
 import MailboxSearch from "@/components/mailbox/default/mailbox-search";
-import { getIdentityByPublicId } from "@/components/mailbox/identity-by-public-id";
 import IdentitySettingsLink from "@/components/mailbox/settings/identity-settings";
 import { Separator } from "@/components/ui/separator";
 import { SidebarTrigger } from "@/components/ui/sidebar";
-import { isSignedIn } from "@/lib/actions/auth";
+import { getWorkspacePublicId, rlsClient } from "@/lib/actions/clients";
 
-type Params = Promise<Record<string, string>>;
+async function MailboxSearchHeader({
+	params,
+}: {
+	params: Promise<Record<string, string>>;
+}) {
+	await connection();
 
-const HEADER_CLASS =
-	"bg-background sticky top-0 flex shrink-0 items-center gap-2 border-b p-4 z-50";
+	const { identityPublicId, mailboxSlug } = await params;
+	const workspacePublicId = await getWorkspacePublicId();
 
-function HeaderShell({ children }: { children?: ReactNode }) {
+	const rls = await rlsClient();
+
+	const [identity] = await rls((tx) =>
+		tx
+			.select({
+				value: identities.value,
+			})
+			.from(identities)
+			.where(eq(identities.publicId, identityPublicId)),
+	);
+
+	const identityLabel = identity?.value;
+
 	return (
-		<header className={HEADER_CLASS}>
+		<header className="sticky top-0 z-50 flex min-w-0 shrink-0 items-center gap-2 border-b bg-background p-2 sm:p-4">
 			<SidebarTrigger className="-ml-1" />
+
 			<Separator
 				orientation="vertical"
 				className="mr-2 data-[orientation=vertical]:h-4"
 			/>
-			{children}
-		</header>
-	);
-}
 
-async function MailboxSearchHeaderContent({ params }: { params: Params }) {
-	const { identityPublicId, mailboxSlug } = await params;
-	const [user, identity] = await Promise.all([
-		isSignedIn(),
-		getIdentityByPublicId(identityPublicId),
-	]);
-
-	return (
-		<HeaderShell>
 			<MailboxSearch
-				user={user}
 				publicId={identityPublicId}
 				mailboxSlug={mailboxSlug}
+				workspacePublicId={workspacePublicId}
 			/>
-			<IdentitySettingsLink identityLabel={identity?.value ?? ""} />
-		</HeaderShell>
-	);
-}
 
-// The header has its own Suspense boundary so the layout (and the page's
-// loading.tsx below it) can render immediately instead of waiting for the
-// auth + identity lookups.
-function MailboxSearchHeader({ params }: { params: Params }) {
-	return (
-		<Suspense
-			fallback={
-				<HeaderShell>
-					<div
-						aria-hidden
-						className="h-[42px] w-full animate-pulse rounded-lg border bg-muted/30"
-					/>
-				</HeaderShell>
-			}
-		>
-			<MailboxSearchHeaderContent params={params} />
-		</Suspense>
+			<IdentitySettingsLink
+				identityLabel={identityLabel}
+				workspacePublicId={workspacePublicId}
+			/>
+		</header>
 	);
 }
 

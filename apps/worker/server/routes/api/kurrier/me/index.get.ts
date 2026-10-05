@@ -1,21 +1,22 @@
 import { defineEventHandler } from "h3";
 import {
+	API_SCOPES,
 	apiError,
 	apiSuccess,
 	validateApiKey,
 } from "../../../../../lib/api-helpers";
-import { createSupabaseServiceClient } from "../../../../../lib/create-client-ssr";
+import { db, users } from "@db";
+import { eq } from "drizzle-orm";
 
 export default defineEventHandler(async (event) => {
-	const { ownerId } = await validateApiKey(event);
-	const supabase = await createSupabaseServiceClient();
-	const { data, error } = await supabase.auth.admin.getUserById(ownerId);
-	if (error || !data) {
+	const { ownerId } = await validateApiKey(event, API_SCOPES.manage);
+	const [user] = await db.select().from(users).where(eq(users.id, ownerId));
+	if (!user) {
 		return apiError(404, "USER_NOT_FOUND", "User not found");
 	}
 
 	return apiSuccess({
-		id: data.user?.id,
-		email: data.user?.email,
+		id: user?.id,
+		email: user?.email,
 	});
 });

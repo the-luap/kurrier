@@ -4,22 +4,34 @@ import { ChevronRight, Cog } from "lucide-react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 
-// Rendered as a single link (Mantine Button with component={Link}) instead
-// of a <button> nested inside an <a>, which is invalid interactive nesting.
-function IdentitySettingsLink({ identityLabel }: { identityLabel: string }) {
+function IdentitySettingsLink({
+	identityLabel,
+	workspacePublicId,
+}: {
+	identityLabel?: string;
+	workspacePublicId: string;
+}) {
 	const params = useParams();
 	return (
-		<Button
-			component={Link}
-			href={`/dashboard/mail/${params.identityPublicId}/settings`}
-			size={"sm"}
-			className={"!rounded-full"}
-			leftSection={<Cog size={20} />}
-			variant={"light"}
-			rightSection={<ChevronRight size={16} />}
+		<Link
+			className="shrink-0"
+			href={`/w/${workspacePublicId}/dashboard/mail/${params.identityPublicId}/settings`}
 		>
-			<span className={"font-medium"}>{identityLabel}</span>
-		</Button>
+			<Button
+				size="sm"
+				className="!size-11 !min-w-11 !rounded-full !p-0 md:!h-9 md:!w-auto md:!min-w-0 md:!px-3"
+				variant="light"
+				aria-label={identityLabel ? `Settings: ${identityLabel}` : "Settings"}
+			>
+				<span className="flex min-w-0 items-center justify-center gap-2">
+					<Cog className="shrink-0" size={20} />
+					<span className="hidden max-w-40 truncate font-medium md:inline">
+						{identityLabel}
+					</span>
+					<ChevronRight className="hidden shrink-0 md:block" size={16} />
+				</span>
+			</Button>
+		</Link>
 	);
 }
 

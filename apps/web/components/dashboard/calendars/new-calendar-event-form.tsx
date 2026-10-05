@@ -13,12 +13,14 @@ import { Dayjs } from "dayjs";
 import { ActionIcon, Alert, Checkbox, Divider, Select } from "@mantine/core";
 import { CalendarEventEntity } from "@db";
 import { Trash } from "lucide-react";
+import { toast } from "sonner";
 import { getDayjsTz, getWallTimeDate } from "@common/day-js-extended";
 import { IconAlertCircle, IconX } from "@tabler/icons-react";
 import { usePathname } from "next/navigation";
 import AddGuests from "@/components/dashboard/calendars/add-guests";
 import RecurrenceRulesFormInput from "@/components/dashboard/calendars/recurrence-rules-form-input";
 import { OnCompletedOptions } from "@/components/dashboard/calendars/calendar-add-event-popover";
+import { useOptionalDictionary } from "@/components/providers/dictionary-provider";
 
 type NewCalendarEventFormProps = {
 	onCompleted: (
@@ -34,15 +36,41 @@ function NewCalendarEventForm({
 	start,
 	end,
 }: NewCalendarEventFormProps) {
+	const dict = useOptionalDictionary();
 	const { state } = useDynamicContext<CalendarState>();
 	const dayjsTz = getDayjsTz(state.defaultCalendar.timezone);
 	const editEvent = state.activePopoverEditEvent;
+	const defaultOrganizer =
+		state.defaultCalendar.identityId
+			? state.organizers.find(
+			(o) => o.value === state.defaultCalendar.identityId,
+		) ?? null
+			: null;
+
 	const [selectedOrganizer, setSelectedOrganizer] =
 		useState<CalendarOrganizerType | null>(
-			state.organizers[0] ? state.organizers[0] : null,
+			defaultOrganizer ?? state.organizers[0] ?? null,
 		);
 	const pathname = usePathname();
 	const [allDay, setIsAllDay] = useState<boolean>(!!editEvent?.isAllDay);
+	const [deleting, setDeleting] = useState(false);
+
+	// deleteCalendarEvent reports failures in its result (handleAction).
+	const deleteEvent = async (id: string) => {
+		if (deleting) return;
+		setDeleting(true);
+		try {
+			const result = await deleteCalendarEvent(id);
+			if (!result?.success) throw new Error(result?.error);
+			onCompleted([]);
+		} catch (error) {
+			toast.error(dict?.common?.error ?? "Error", {
+				description: error instanceof Error ? error.message : undefined,
+			});
+		} finally {
+			setDeleting(false);
+		}
+	};
 
 	const fields: BaseFormProps["fields"] = [
 		{
@@ -75,18 +103,18 @@ function NewCalendarEventForm({
 		},
 		{
 			name: "title",
-			label: "Title",
+			label: dict?.calendar?.title ?? "Title",
 			wrapperClasses: "col-span-12",
 			props: {
 				required: true,
-				placeholder: "Event title",
+				placeholder: dict?.calendar?.eventTitle ?? "Event title",
 				autoComplete: "off",
 				defaultValue: editEvent?.title,
 			},
 		},
 		{
 			name: "startsAt",
-			label: "Start",
+			label: dict?.calendar?.start ?? "Start",
 			kind: "custom",
 			component: allDay ? DatePickerInput : DateTimePicker,
 			wrapperClasses: "col-span-6",
@@ -107,7 +135,7 @@ function NewCalendarEventForm({
 		},
 		{
 			name: "endsAt",
-			label: "End",
+			label: dict?.calendar?.end ?? "End",
 			kind: "custom",
 			component: allDay ? DatePickerInput : DateTimePicker,
 			wrapperClasses: "col-span-6",
@@ -133,7 +161,7 @@ function NewCalendarEventForm({
 			wrapperClasses: "col-span-12",
 			props: {
 				defaultChecked: !!editEvent?.isAllDay,
-				label: <div className="text-sm -mt-0.5">All day</div>,
+				label: <div className="text-sm -mt-0.5">{dict?.calendar?.allDay ?? "All day"}</div>,
 				size: "xs",
 				onChange: (event: React.ChangeEvent<HTMLInputElement>) => {
 					setIsAllDay(event.currentTarget.checked);
@@ -153,13 +181,14 @@ function NewCalendarEventForm({
 		},
 		{
 			name: "organizerIdentityId",
-			label: "Organizer",
+			label: dict?.calendar?.organizer ?? "Organizer",
 			kind: "custom",
 			component: Select,
 			wrapperClasses: "col-span-12",
 			props: {
 				data: state.organizers,
 				allowDeselect: false,
+				readOnly: true,
 				required: true,
 				value: selectedOrganizer?.value,
 				onChange: (val: string | null) => {
@@ -172,17 +201,16 @@ function NewCalendarEventForm({
 			? [
 					{
 						name: "newOrganizerName",
-						label: "Organizer name",
+						label: dict?.calendar?.organizerName ?? "Organizer name",
 						wrapperClasses: "col-span-12",
 						bottomStartPrefix: (
 							<span className={"text-xxs"}>
-								This name will be shown in calendar invites and saved for this
-								email identity.
+								{dict?.calendar?.organizerNameHelp ?? "This name will be shown in calendar invites and saved for this email identity."}
 							</span>
 						),
 						props: {
 							required: true,
-							placeholder: "e.g. John Doe",
+							placeholder: dict?.calendar?.organizerNamePlaceholder ?? "e.g. John Doe",
 							autoComplete: "off",
 						},
 					} as const,
@@ -190,7 +218,7 @@ function NewCalendarEventForm({
 			: []),
 		{
 			name: "description",
-			label: "Description",
+			label: dict?.calendar?.description ?? "Description",
 			kind: "textarea",
 			wrapperClasses: "col-span-12",
 			props: {
@@ -200,14 +228,14 @@ function NewCalendarEventForm({
 		},
 		{
 			name: "notifyAttendees",
-			label: "Notify attendees",
+			label: dict?.calendar?.notifyAttendees ?? "Notify attendees",
 			kind: "custom",
 			component: Checkbox,
 			wrapperClasses: "col-span-12",
 			props: {
 				defaultChecked: false,
 				label: (
-					<div className={"text-sm -mt-0.5"}>Send email notifications</div>
+					<div className={"text-sm -mt-0.5"}>{dict?.calendar?.sendEmailNotifications ?? "Send email notifications"}</div>
 				),
 				size: "xs",
 			},
@@ -228,11 +256,8 @@ function NewCalendarEventForm({
 								tabIndex={-1}
 								variant={"light"}
 								color={"red"}
-								onClick={() =>
-									deleteCalendarEvent(editEvent.id).then(() => {
-										onCompleted([]);
-									})
-								}
+								loading={deleting}
+								onClick={() => void deleteEvent(editEvent.id)}
 							>
 								<Trash size={12} />
 							</ActionIcon>
@@ -257,8 +282,7 @@ function NewCalendarEventForm({
 			{state.organizers.length === 0 ? (
 				<>
 					<Alert icon={<IconAlertCircle />} variant={"filled"}>
-						No organizers(Email Identities) found. <br /> Please add atleast one
-						email identity to create calendar events.
+						{dict?.calendar?.noOrganizersFound ?? "No organizers(Email Identities) found."} <br /> {dict?.calendar?.noOrganizersFoundHelp ?? "Please add atleast one email identity to create calendar events."}
 					</Alert>
 				</>
 			) : (
@@ -267,7 +291,7 @@ function NewCalendarEventForm({
 					fields={fields}
 					onSuccess={onCompleted}
 					submitButtonProps={{
-						submitLabel: editEvent ? "Update event" : "Create event",
+						submitLabel: editEvent ? (dict?.calendar?.updateEvent ?? "Update event") : (dict?.calendar?.createEvent ?? "Create event"),
 						wrapperClasses: "mt-4",
 						fullWidth: true,
 					}}

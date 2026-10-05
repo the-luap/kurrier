@@ -20,6 +20,19 @@ When you add an SMTP/IMAP account in Kurrier, two connections are created:
 
 You can configure only SMTP (for outbound mail) or both SMTP + IMAP (for full two-way sync).
 
+### Accounts, identities, and mailboxes
+
+Kurrier stores the connection, address, and synchronized folders separately:
+
+- an **SMTP/IMAP account** contains the encrypted server credentials;
+- an **email identity** contains the address and display name used by Kurrier;
+- **mailboxes** are the folders discovered from the IMAP server for that identity.
+
+This separation allows SMTP-only sending accounts, aliases, and advanced
+multi-identity configurations. The manual Generic SMTP flow therefore creates
+the account first and lets you create its identity separately under
+**Identities**.
+
 ---
 
 ## 2. Adding Your Account
@@ -141,3 +154,65 @@ If you’re connecting to your own mail server (e.g., Postfix/Dovecot):
 
 
 **Tip:** You can create multiple SMTP/IMAP accounts in Kurrier — one for each mailbox or domain you manage.
+
+## 8. Instance-wide provider presets
+
+Self-hosted administrators can publish company SMTP/IMAP settings on the
+**Providers** page. Users then select the company provider and enter only their
+own mailbox credentials.
+
+Set `CUSTOM_EMAIL_PROVIDERS` to a JSON array in the environment of the Kurrier
+web container:
+
+```bash
+CUSTOM_EMAIL_PROVIDERS='[{"id":"company-mail","name":"Company Mail","description":"Corporate email","credentialMode":"shared","smtp":{"host":"smtp.example.com","port":465,"secure":true},"imap":{"host":"imap.example.com","port":993,"secure":true}}]'
+```
+
+Each provider supports these fields:
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `id` | Yes | Unique lowercase identifier containing letters, numbers, `_`, or `-` |
+| `name` | Yes | Name displayed to users |
+| `description` | No | Short help text displayed on the provider card |
+| `credentialMode` | Yes | `shared` uses one login for SMTP and IMAP; `separate` requests each login separately |
+| `smtp` | Yes | `host`, `port`, `secure`, and optional `pool` settings |
+| `imap` | No | `host`, `port`, and `secure` settings for incoming mail |
+
+Do not put passwords or other credentials in this variable. Preset objects are
+strictly validated, unknown fields are rejected, and user credentials continue
+to be encrypted in the Kurrier Vault.
+
+Kurrier skips malformed entries and duplicate IDs while logging a warning. If
+the whole value is malformed JSON, no custom providers are displayed and
+Generic SMTP remains available.
+
+The selected server settings are copied into the account when it is created.
+Changing or removing a preset does not change existing accounts; it only affects
+future connections after the web container is restarted.
+
+### Connecting a preset mailbox
+
+When a preset includes IMAP, its card displays **Add mailbox**. The user enters
+their mailbox credentials, display name, and daily IMAP quota once. Kurrier then:
+
+1. stores an encrypted snapshot of the SMTP/IMAP connection in the Vault;
+2. verifies the connection and removes the account if verification fails;
+3. creates the linked email identity through the same lifecycle used by the
+   manual Identity flow;
+4. discovers the IMAP folders and starts backfill and IDLE synchronization;
+5. opens the connected Inbox.
+
+If the email identity is already connected in the workspace, Kurrier reuses it
+instead of creating a duplicate account or identity.
+
+An SMTP-only preset continues to display **Add account**. It stores an outbound
+connection but does not create an inbox; an identity can still be configured
+separately for an advanced sending-only setup.
+
+The worker service must be running while an IMAP mailbox is connected so Kurrier
+can discover its folders and start synchronization:
+
+```bash
+docker compose logs -f worker
+```

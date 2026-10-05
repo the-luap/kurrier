@@ -1,5 +1,5 @@
 import { ImapFlow } from "imapflow";
-import { db, mailboxes, mailboxSync } from "@db";
+import { db, identities, mailboxes, mailboxSync } from "@db";
 import { eq } from "drizzle-orm";
 import slugify from "@sindresorhus/slugify";
 
@@ -20,6 +20,7 @@ export async function addNewFolder(
 		parentId?: string | null;
 		identityId: string;
 		ownerId: string;
+		workspaceId?: string;
 		kind?: string;
 	},
 	client: ImapFlow,
@@ -65,10 +66,23 @@ export async function addNewFolder(
 
 	const box = await client.mailboxOpen(newPath, { readOnly: true });
 
+	// The worker has no workspace claim, so the column default can't fill it.
+	const workspaceId =
+		data.workspaceId ??
+		(
+			await db
+				.select({ workspaceId: identities.workspaceId })
+				.from(identities)
+				.where(eq(identities.id, data.identityId))
+				.limit(1)
+		)[0]?.workspaceId;
+	if (!workspaceId) throw new Error("Identity has no workspace");
+
 	const [row] = await db
 		.insert(mailboxes)
 		.values({
 			ownerId: data.ownerId,
+			workspaceId,
 			identityId: data.identityId,
 			parentId:
 				String(data.parentId)?.trim().length > 0 ? String(data.parentId) : null,

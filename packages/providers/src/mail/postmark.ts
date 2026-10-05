@@ -1,15 +1,14 @@
 // @ts-nocheck
-
-import { sanitizeFilename } from "@common/mail-client";
-import postmark from "postmark";
 import {
-	type DomainIdentity,
-	type Mailer,
-	type MailgunConfig,
-	type PostmarkConfig,
+	DomainIdentity,
+	Mailer,
+	MailgunConfig,
+	PostmarkConfig,
 	RawPostmarkConfigSchema,
-	type VerifyResult,
+	VerifyResult,
 } from "../core";
+import postmark from "postmark";
+import { sanitizeFilename } from "@common/mail-client";
 
 export class PostmarkMailer implements Mailer {
 	private accountClient: postmark.AccountClient;
@@ -58,6 +57,8 @@ export class PostmarkMailer implements Mailer {
 			await this.serverClient.sendEmail({
 				From: opts?.from ?? "no-reply@kurrier.org",
 				To: to,
+				Cc: opts.cc?.length ? opts.cc.join(",") : undefined,
+				Bcc: opts.bcc?.length ? opts.bcc.join(",") : undefined,
 				Subject: opts?.subject ?? "Test email",
 				TextBody:
 					opts?.body ??
@@ -311,7 +312,7 @@ export class PostmarkMailer implements Mailer {
 			let inboundConfigured: { updated?: boolean } | undefined;
 			if (isVerified && hook) {
 				const server = await this.serverClient.getServer();
-				await this.serverClient.editServer({
+				const res = await this.serverClient.editServer({
 					Name: server.Name,
 					InboundHookUrl: hook,
 					InboundDomain: server.InboundDomain || domain,
@@ -379,8 +380,6 @@ export class PostmarkMailer implements Mailer {
 			text: string;
 			html: string;
 			from: string;
-			cc?: string[];
-			bcc?: string[];
 			inReplyTo: string;
 			references: string[];
 			attachments?: { name: string; content: Blob; contentType: string }[];
@@ -411,8 +410,6 @@ export class PostmarkMailer implements Mailer {
 			const res = await this.serverClient.sendEmail({
 				From: opts.from,
 				To: to.join(","), // Postmark accepts comma-separated list
-				Cc: opts.cc?.length ? opts.cc.join(",") : undefined,
-				Bcc: opts.bcc?.length ? opts.bcc.join(",") : undefined,
 				Subject: opts.subject,
 				TextBody: opts.text || undefined,
 				HtmlBody: opts.html || undefined,

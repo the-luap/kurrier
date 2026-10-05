@@ -9,6 +9,8 @@ import { addNewLabel, FetchLabelsResult } from "@/lib/actions/labels";
 import ReusableFormCustomWrapper from "@/components/common/reusable-form-custom-wrapper";
 import { DEFAULT_COLORS_SWATCH } from "@common/mail-client";
 import { useDynamicContext } from "@/hooks/use-dynamic-context";
+import {useParams} from "next/navigation";
+import { useOptionalDictionary } from "@/components/providers/dictionary-provider";
 
 function useLabelOptions({ labels }: { labels: any[] }) {
 	const options = labels.map((l) => ({
@@ -24,23 +26,25 @@ export default function AddNewLabel({
 }: {
 	globalLabels: FetchLabelsResult;
 }) {
+	const dict = useOptionalDictionary();
 	const [opened, { open, close }] = useDisclosure(false);
 
 	const { options: labelOptions } = useLabelOptions({ labels: globalLabels });
 	const { state } = useDynamicContext();
+	const { identityPublicId } = useParams();
 
 	const fields = [
 		{
 			name: "name",
-			label: "Label Name",
+			label: dict?.mailbox?.labelName ?? "Label Name",
 			wrapperClasses: "col-span-12",
 			props: {
-				placeholder: "e.g., Work, Finance, Travel...",
+				placeholder: dict?.mailbox?.labelNamePlaceholder ?? "e.g., Work, Finance, Travel...",
 			},
 		},
 		{
 			name: "parentId",
-			label: "Nest Label Under (Optional)",
+			label: dict?.mailbox?.nestLabelUnder ?? "Nest Label Under (Optional)",
 			kind: "select" as const,
 			options: labelOptions,
 			wrapperClasses: "col-span-12",
@@ -69,15 +73,24 @@ export default function AddNewLabel({
 		},
 	];
 
+	if (state.scope === "thread") {
+		fields.push({
+			name: "identityPublicId",
+			type: "hidden",
+			wrapperClasses: "hidden",
+			props: { hidden: true, defaultValue: identityPublicId },
+		});
+	}
+
 	return (
 		<>
-			<Modal opened={opened} onClose={close} title="New Label" size="sm">
+			<Modal opened={opened} onClose={close} title={dict?.mailbox?.newLabel ?? "New Label"} size="sm">
 				<ReusableForm
 					fields={fields}
 					onSuccess={close}
 					action={addNewLabel}
 					submitButtonProps={{
-						submitLabel: "Create label",
+						submitLabel: dict?.mailbox?.createLabel ?? "Create label",
 						wrapperClasses: "flex justify-center my-4",
 					}}
 				/>

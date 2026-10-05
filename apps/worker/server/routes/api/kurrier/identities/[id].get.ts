@@ -1,14 +1,18 @@
 import { defineEventHandler, getRouterParam } from "h3";
-import { apiSuccess, validateApiKey } from "../../../../../lib/api-helpers";
-import { db, identities } from "@db";
-import { eq } from "drizzle-orm";
+import {
+	API_SCOPES,
+	apiSuccess,
+	validateApiKey,
+	validateIdentityOwnership,
+} from "../../../../../lib/api-helpers";
 
 export default defineEventHandler(async (event) => {
-	await validateApiKey(event);
+	const { ownerId, apiKey } = await validateApiKey(event, API_SCOPES.manage);
 	const id = getRouterParam(event, "id");
-	const [identity] = await db
-		.select()
-		.from(identities)
-		.where(eq(identities.id, String(id)));
+	const identity = await validateIdentityOwnership({
+		identityId: String(id),
+		ownerId,
+		workspaceId: apiKey.workspaceId,
+	});
 	return apiSuccess(identity);
 });

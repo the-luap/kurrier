@@ -1,13 +1,13 @@
 import type { NextConfig } from "next";
 
+const assetPrefix = process.env.NEXT_PUBLIC_ASSET_PREFIX || "/";
 const nextConfig: NextConfig = {
-	devIndicators: false,
-	output: "standalone",
-	serverExternalPackages: ["pino", "pino-pretty", "thread-stream"],
-	reactCompiler: true,
-	poweredByHeader: false,
+	assetPrefix,
+	devIndicators: { position: "top-right" },
 	experimental: {
-		proxyClientMaxBodySize: "10gb",
+		serverActions: {
+			bodySizeLimit: "20mb",
+		},
 		// lucide-react and @tabler/icons-react are optimized by Next by default;
 		// Mantine recommends adding its barrel packages explicitly.
 		optimizePackageImports: [
@@ -16,7 +16,12 @@ const nextConfig: NextConfig = {
 			"@mantine/dates",
 		],
 	},
-	// cacheComponents: true,
+	output: "standalone",
+	poweredByHeader: false,
+	cacheComponents: true,
+	partialPrefetching: true,
+	serverExternalPackages: ["pino", "pino-pretty", "thread-stream"],
+	reactCompiler: true,
 	images: {
 		remotePatterns: [
 			{
@@ -33,16 +38,12 @@ const nextConfig: NextConfig = {
 		return {
 			beforeFiles: [
 				{
-					source: "/api/kong/:path*",
-					destination: `${process.env.API_URL}/:path*`,
-				},
-				{
 					source: "/api/v1/:path*",
-					destination: `${process.env.WORKER_URL}:3001/api/v1/:path*`,
+					destination: `${process.env.WORKER_URL}/api/v1/:path*`,
 				},
 				{
 					source: "/api/kurrier/:path*",
-					destination: `${process.env.WORKER_URL}:3001/api/kurrier/:path*`,
+					destination: `${process.env.WORKER_URL}/api/kurrier/:path*`,
 				},
 
 				{
@@ -61,10 +62,6 @@ const nextConfig: NextConfig = {
 					source: "/principals/:path*",
 					destination: `${process.env.DAV_URL}/dav.php/principals/:path*`,
 				},
-				// {
-				//     source: "/.well-known/carddav",
-				//     destination: `${DAV}/dav.php/principals/kurrier/`,
-				// },
 				{
 					source: "/.well-known/caldav",
 					destination: `${process.env.DAV_URL}/dav.php`,

@@ -1,27 +1,28 @@
 "use client";
 
-import React, { useMemo } from "react";
+import type {
+	CalendarEventAttendeeEntity,
+	CalendarEventEntity,
+	IdentityEntity,
+} from "@db";
 import {
 	CalendarDays,
-	Clock,
-	MapPin,
-	User,
 	CheckCircle,
 	CircleDashed,
 	CircleX,
+	Clock,
+	MapPin,
+	User,
 } from "lucide-react";
-import type {
-	CalendarEventEntity,
-	CalendarEventAttendeeEntity,
-	IdentityEntity,
-} from "@db";
+import React, { useMemo } from "react";
 import { ReusableFormButton } from "@/components/common/reusable-form-button";
+import { useOptionalDictionary } from "@/components/providers/dictionary-provider";
 import {
 	maybeCalendarInvite,
 	noCalendarInvite,
 	yesCalendarInvite,
 } from "@/lib/actions/calendar";
-import { useIsClient } from "@/components/mailbox/default/thread-list-utils";
+import type { Dictionary } from "@/lib/dictionaries";
 
 type Props = {
 	calendarEvent: CalendarEventEntity;
@@ -55,12 +56,17 @@ function fmtRange(startsAt: string, endsAt: string) {
 	return `${fmtStart.format(start)} – ${fmtStart.format(end)}`;
 }
 
-function partstatLabel(partstat?: string | null) {
+function partstatLabel(
+	partstat: string | null | undefined,
+	dict: Dictionary | null,
+) {
 	const v = (partstat || "").toLowerCase();
-	if (v === "needs_action") return "Awaiting your response";
-	if (v === "accepted") return "You accepted";
-	if (v === "declined") return "You declined";
-	if (v === "tentative") return "You responded maybe";
+	if (v === "needs_action")
+		return dict?.mailbox?.awaitingYourResponse ?? "Awaiting your response";
+	if (v === "accepted") return dict?.mailbox?.youAccepted ?? "You accepted";
+	if (v === "declined") return dict?.mailbox?.youDeclined ?? "You declined";
+	if (v === "tentative")
+		return dict?.mailbox?.youRespondedMaybe ?? "You responded maybe";
 	return null;
 }
 
@@ -69,6 +75,7 @@ export default function RenderInvite({
 	attendees,
 	identity,
 }: Props) {
+	const dict = useOptionalDictionary();
 	const selfAttendee = useMemo(() => {
 		const me = (identity.value || "").trim().toLowerCase();
 		return (
@@ -76,14 +83,9 @@ export default function RenderInvite({
 		);
 	}, [attendees, identity.value]);
 
-	// Viewer-local time range: computed on the client only so the server's
-	// timezone never ends up in (or mismatches) the hydrated markup.
-	const isClient = useIsClient();
 	const when = calendarEvent.isAllDay
-		? "All day"
-		: isClient
-			? fmtRange(String(calendarEvent.startsAt), String(calendarEvent.endsAt))
-			: "";
+		? (dict?.mailbox?.allDay ?? "All day")
+		: fmtRange(String(calendarEvent.startsAt), String(calendarEvent.endsAt));
 
 	const organizer =
 		calendarEvent.organizerName || calendarEvent.organizerEmail
@@ -94,7 +96,7 @@ export default function RenderInvite({
 				}`
 			: null;
 
-	const responseLabel = partstatLabel(selfAttendee?.partstat);
+	const responseLabel = partstatLabel(selfAttendee?.partstat, dict);
 	const isPending =
 		(selfAttendee?.partstat || "").toLowerCase() === "needs_action";
 
@@ -110,16 +112,17 @@ export default function RenderInvite({
 				<div className="min-w-0">
 					<div className="flex items-center gap-2">
 						<span className="inline-flex items-center rounded-full border border-neutral-200 bg-white px-2 py-0.5 text-xs font-medium text-neutral-700 dark:border-neutral-800 dark:bg-neutral-950 dark:text-neutral-300">
-							Invite
+							{dict?.mailbox?.inviteBadge ?? "Invite"}
 						</span>
 					</div>
 
 					<div className="mt-2 text-sm font-semibold text-neutral-500 dark:text-neutral-400">
-						Invitation
+						{dict?.mailbox?.invitationFallback ?? "Invitation"}
 					</div>
 
 					<div className="mt-1 truncate text-2xl font-extrabold text-neutral-900 dark:text-neutral-100">
-						{calendarEvent.title || "Invitation"}
+						{calendarEvent.title ||
+							(dict?.mailbox?.invitationFallback ?? "Invitation")}
 					</div>
 
 					<div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-neutral-600 dark:text-neutral-300">
@@ -133,7 +136,10 @@ export default function RenderInvite({
 						<div className="mt-2 flex items-center gap-1.5 text-sm text-neutral-600 dark:text-neutral-300">
 							<User size={14} />
 							<span className="truncate">
-								{organizer} <span className="opacity-70">— Organizer</span>
+								{organizer}{" "}
+								<span className="opacity-70">
+									— {dict?.mailbox?.organizerSuffix ?? "Organizer"}
+								</span>
 							</span>
 						</div>
 					) : null}
@@ -157,7 +163,7 @@ export default function RenderInvite({
 				<div className="flex flex-wrap items-center gap-2">
 					<ReusableFormButton
 						action={yesCalendarInvite}
-						label="Yes"
+						label={dict?.mailbox?.rsvpYes ?? "Yes"}
 						buttonProps={{
 							leftSection: <CheckCircle size={16} />,
 							size: "compact-xs",
@@ -176,7 +182,7 @@ export default function RenderInvite({
 
 					<ReusableFormButton
 						action={maybeCalendarInvite}
-						label="Maybe"
+						label={dict?.mailbox?.rsvpMaybe ?? "Maybe"}
 						buttonProps={{
 							leftSection: <CircleDashed size={16} />,
 							size: "compact-xs",
@@ -195,7 +201,7 @@ export default function RenderInvite({
 
 					<ReusableFormButton
 						action={noCalendarInvite}
-						label="No"
+						label={dict?.mailbox?.rsvpNo ?? "No"}
 						buttonProps={{
 							leftSection: <CircleX size={16} />,
 							size: "compact-xs",

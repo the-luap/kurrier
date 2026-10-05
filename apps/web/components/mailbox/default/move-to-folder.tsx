@@ -8,20 +8,20 @@ import { useDynamicContext } from "@/hooks/use-dynamic-context";
 import type { MailboxEntity } from "@db";
 import {
 	FetchIdentityMailboxListResult,
-	fetchIdentityMailboxList,
 	moveToFolder,
 } from "@/lib/actions/mailbox";
 import { toast } from "sonner";
+import { useOptionalDictionary } from "@/components/providers/dictionary-provider";
 
 function MoveToFolder({
+	identityMailboxes,
 	activeMailbox,
 }: {
+	identityMailboxes: FetchIdentityMailboxListResult;
 	activeMailbox: MailboxEntity;
 }) {
+	const dict = useOptionalDictionary();
 	const [opened, { open, close }] = useDisclosure(false);
-	const [identityMailboxes, setIdentityMailboxes] =
-		React.useState<FetchIdentityMailboxListResult>([]);
-	const [loadingFolders, setLoadingFolders] = React.useState(false);
 	const params = useParams();
 
 	const entry =
@@ -32,7 +32,7 @@ function MoveToFolder({
 	const mailboxes = entry?.mailboxes ?? [];
 	const { options: mailboxOptions } = useMailboxOptions({
 		mailboxes,
-		identityLabel: entry?.identity?.value ?? "Folders",
+		identityLabel: entry?.identity?.value ?? (dict?.mailbox?.folders ?? "Folders"),
 	});
 
 	const { state } = useDynamicContext<{
@@ -44,36 +44,23 @@ function MoveToFolder({
 	const [destId, setDestId] = React.useState<string | null>(null);
 	const [submitting, setSubmitting] = React.useState(false);
 
-	const openMoveDialog = async () => {
-		open();
-		if (identityMailboxes.length > 0 || loadingFolders) return;
-		try {
-			setLoadingFolders(true);
-			setIdentityMailboxes(await fetchIdentityMailboxList());
-		} catch (e: any) {
-			toast.error(e?.message ?? "Could not load folders");
-		} finally {
-			setLoadingFolders(false);
-		}
-	};
-
 	const onConfirm = async () => {
 		const active = activeMailbox;
 		const ids = Array.from(state?.selectedThreadIds ?? []);
 		if (!active?.id || !ids.length || !destId || destId === "none") return;
 		if (destId === active.id) {
-			toast.info("Already in this folder");
+			toast.info(dict?.mailbox?.alreadyInFolder ?? "Already in this folder");
 			return;
 		}
 
 		try {
 			setSubmitting(true);
 			await moveToFolder(ids, active.id, destId, !!active.metaData?.imap, true);
-			toast.success("Moved to folder");
+			toast.success(dict?.mailbox?.movedToFolder ?? "Moved to folder");
 			close();
 			setDestId(null);
 		} catch (e: any) {
-			toast.error(e?.message ?? "Move failed");
+			toast.error(e?.message ?? (dict?.mailbox?.moveFailed ?? "Move failed"));
 		} finally {
 			setSubmitting(false);
 		}
@@ -81,28 +68,27 @@ function MoveToFolder({
 
 	return (
 		<>
-			<Modal opened={opened} onClose={close} title="Move to">
+			<Modal opened={opened} onClose={close} title={dict?.mailbox?.moveTo ?? "Move to"}>
 				<div className="space-y-4">
 					<Select
 						data={mailboxOptions[0]?.items ?? []}
-						label="Choose folder"
-						placeholder={loadingFolders ? "Loading folders…" : "Select…"}
+						label={dict?.mailbox?.chooseFolder ?? "Choose folder"}
+						placeholder={dict?.mailbox?.selectEllipsis ?? "Select…"}
 						value={destId}
 						onChange={(v) => setDestId(v)}
 						searchable
-						disabled={loadingFolders}
-						nothingFoundMessage="No folders"
+						nothingFoundMessage={dict?.mailbox?.noFolders ?? "No folders"}
 					/>
 					<div className="flex gap-2 justify-end">
 						<Button variant="default" onClick={close} disabled={submitting}>
-							Cancel
+							{dict?.common?.cancel ?? "Cancel"}
 						</Button>
 						<Button
 							onClick={onConfirm}
 							loading={submitting}
 							disabled={!destId || destId === "none"}
 						>
-							Move
+							{dict?.mailbox?.move ?? "Move"}
 						</Button>
 					</div>
 				</div>
@@ -110,9 +96,9 @@ function MoveToFolder({
 
 			<button
 				type="button"
-				onClick={openMoveDialog}
+				onClick={open}
 				className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs hover:bg-muted"
-				title="Move to folder"
+				title={dict?.mailbox?.moveToFolder ?? "Move to folder"}
 			>
 				<IconFolderSymlink className="h-5 w-5" />
 			</button>

@@ -1,6 +1,6 @@
 import {db, mailboxThreads, messages} from "@db";
 import { and, eq, sql } from "drizzle-orm";
-import { enqueueThreadRefresh, getRedis } from "../../../lib/get-redis";
+import { getRedis } from "../../../lib/get-redis";
 
 export const toggleStar = async (
     threadId: string,
@@ -10,7 +10,7 @@ export const toggleStar = async (
 ) => {
 
     if (!threadId || !mailboxId) return;
-    const { smtpQueue } = await getRedis();
+    const { smtpQueue, searchIngestQueue } = await getRedis();
 
     if (imap) {
         await smtpQueue.add(
@@ -78,6 +78,16 @@ export const toggleStar = async (
             );
     }
 
-    await enqueueThreadRefresh(threadId);
+    await searchIngestQueue.add(
+        "refresh-thread",
+        { threadId: threadId },
+        {
+            jobId: `refresh-${threadId}`,
+            removeOnComplete: true,
+            removeOnFail: true,
+            attempts: 3,
+            backoff: { type: "exponential", delay: 1500 },
+        },
+    );
 
 };

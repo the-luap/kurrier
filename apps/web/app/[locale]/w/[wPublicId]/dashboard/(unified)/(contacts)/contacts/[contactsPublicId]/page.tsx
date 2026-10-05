@@ -1,0 +1,435 @@
+import { eq } from "drizzle-orm";
+import {getWorkspacePublicId, rlsClient} from "@/lib/actions/clients";
+import { contacts } from "@db";
+import { ActionIcon } from "@mantine/core";
+import {
+	IconEdit,
+	IconLabelFilled,
+	IconMap,
+} from "@tabler/icons-react";
+import Link from "next/link";
+import DeleteContactButton from "@/components/dashboard/contacts/delete-contact-button";
+import { revalidatePath } from "next/cache";
+import { ContactLabelHoverButtons } from "@/components/dashboard/labels/contact-label-hover-buttons";
+import {
+	fetchContactLabelsByContactIds,
+	fetchLabels,
+	toggleFavoriteContact,
+} from "@/lib/actions/labels";
+import {LabelScope} from "@schema";
+import { Star } from "lucide-react";
+import Form from "next/form";
+import { getCountryDataList, TCountryCode } from "countries-list";
+import ContactListAvatar from "@/components/dashboard/contacts/contact-list-avatar";
+import {getRedis} from "@/lib/actions/get-redis";
+import {generateSignedUrl} from "@common";
+import { getI18n } from "@/lib/dictionaries";
+
+// Static country -> dialing-code lookup, built once per server instance
+// instead of on every request.
+const phoneByCountry = new Map<string, string>(
+	getCountryDataList().map((c) => [c.iso2, String(c.phone).split(",")[0].trim()]),
+);
+
+async function Page({
+	params,
+}: {
+	params: Promise<{ contactsPublicId: string; locale: string }>;
+}) {
+	const { contactsPublicId, locale } = await params;
+	const { dict, format } = await getI18n(locale);
+	const c = dict.contacts;
+
+	const rls = await rlsClient();
+	const [contact] = await rls((tx) =>
+		tx.select().from(contacts).where(eq(contacts.publicId, contactsPublicId)),
+	);
+
+	if (!contact) {
+		return (
+			<div className="flex h-full flex-col items-center justify-center gap-2 px-6 py-4 text-sm text-muted-foreground">
+				<p>{c.noContactFound}</p>
+			</div>
+		);
+	}
+
+	const emails = Array.isArray(contact.emails) ? contact.emails : [];
+	const phones = Array.isArray(contact.phones) ? contact.phones : [];
+	const addresses = Array.isArray(contact.addresses) ? contact.addresses : [];
+
+	const onDeleteAction = async (id: string) => {
+		"use server";
+		// The id comes from the client: resolve it through RLS first.
+		const rls = await rlsClient();
+		const [owned] = await rls((tx) =>
+			tx
+				.select({
+					id: contacts.id,
+					ownerId: contacts.ownerId,
+					davUri: contacts.davUri,
+				})
+				.from(contacts)
+				.where(eq(contacts.id, id))
+				.limit(1),
+		);
+		if (!owned) return { success: false };
+
+		if (owned.davUri) {
+			// Synced card: the worker deletes it on the DAV server and then
+			// the row. Deleting the row here first would race the job (it
+			// looks the row up) and the card would come back on next sync.
+			const { davQueue } = await getRedis();
+			await davQueue.add("dav:delete-contact", {
+				contactId: owned.id,
+				ownerId: owned.ownerId,
+			});
+		} else {
+			await rls((tx) => tx.delete(contacts).where(eq(contacts.id, owned.id)));
+		}
+
+		revalidatePath("/dashboard/contacts");
+		return { success: true };
+	};
+
+	// Independent lookups in parallel; skip signing when there is no picture.
+	const [profilePictureUrl, allLabels, labelsByContactId, workspacePublicId] =
+		await Promise.all([
+			contact.profilePicture
+				? generateSignedUrl(contact.profilePicture)
+				: Promise.resolve(null),
+			fetchLabels("contact" as LabelScope),
+			fetchContactLabelsByContactIds([contact.id]),
+			getWorkspacePublicId(),
+		]);
+
+
+	const isFavorite = labelsByContactId[contact.id]?.some(
+		(entry) => entry.label.name === "Favorite",
+	);
+
+	function formatPhone(p: any) {
+		if (!p?.number) return null;
+
+		const countryCode = p.countryCode || p.code;
+		let prefix = "";
+
+		if (countryCode && phoneByCountry.has(countryCode as TCountryCode)) {
+			prefix = `+${phoneByCountry.get(countryCode as TCountryCode)} `;
+		}
+
+		return `${prefix}${p.number}`;
+	}
+
+	const filteredLabels =
+		labelsByContactId[contact.id]?.filter((l) => l.label.name !== "Favorite") ||
+		[];
+
+	function formatDob(dob?: string | null) {
+		if (!dob) return c.notSpecified;
+		try {
+			return new Date(dob).toLocaleDateString(undefined, {
+				year: "numeric",
+				month: "short",
+				day: "numeric",
+			});
+		} catch {
+			return dob;
+		}
+	}
+
+	return (
+		<div className="flex h-full flex-col">
+			<div className="bg-gradient-to-b from-primary/5 via-background to-background/80 dark:from-primary/15 dark:via-background dark:to-background/40 px-3 py-4 sm:px-6 lg:px-8 shadow-[0_1px_0_rgba(15,23,42,0.04)] dark:shadow-[0_1px_0_rgba(15,23,42,0.6)]">
+				<div className="mx-auto flex max-w-5xl flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+					<div className="flex items-start gap-4">
+                        <ContactListAvatar signedUrl={profilePictureUrl} alt={contact?.firstName} size={64} />
+
+						<div className="min-w-0 flex-1 space-y-1.5">
+							<div className="flex flex-wrap items-center gap-2">
+								<h2 className="truncate text-lg font-semibold text-foreground sm:text-xl">
+									{contact.firstName} {contact.lastName}
+								</h2>
+
+								<Form action={toggleFavoriteContact}>
+									<input name="contactId" type="hidden" value={contact.id} />
+									<ActionIcon
+										type="submit"
+										variant="subtle"
+										title={c.toggleFavorite}
+										aria-label={c.toggleFavorite}
+										className="h-7 w-7 rounded-full bg-primary/5 text-amber-400 hover:bg-primary/10 dark:bg-primary/20 dark:hover:bg-primary/30"
+									>
+										<Star
+											size={14}
+											className={
+												isFavorite
+													? "text-yellow-400 fill-yellow-400"
+													: "text-muted-foreground"
+											}
+										/>
+									</ActionIcon>
+								</Form>
+							</div>
+
+							{(contact.company || contact.jobTitle) && (
+								<p className="truncate text-xs text-muted-foreground sm:text-[13px]">
+									{[contact.jobTitle, contact.company]
+										.filter(Boolean)
+										.join(" · ")}
+								</p>
+							)}
+
+							<div className="mt-2 flex flex-wrap items-center gap-2">
+								{filteredLabels.length > 0 && (
+									<div className="flex flex-wrap items-center gap-1.5">
+										{filteredLabels.map((entry) => (
+											<div
+												key={entry.label.id}
+												className="inline-flex items-center gap-1 rounded-full bg-primary/5 px-2.5 py-1 text-[11px] text-foreground/90 dark:bg-primary/15"
+											>
+												<IconLabelFilled
+													size={16}
+													color={entry.label.colorBg ?? "#64748b"}
+												/>
+												<span className="truncate">{entry.label.name}</span>
+											</div>
+										))}
+									</div>
+								)}
+
+								<div className="ml-auto sm:ml-0">
+									<ContactLabelHoverButtons
+										contact={{ id: contact.id }}
+										allLabels={allLabels}
+										labelsByContactId={labelsByContactId}
+									/>
+								</div>
+							</div>
+						</div>
+					</div>
+
+					<div className="flex items-center gap-2 sm:self-start">
+						<ActionIcon
+							component={Link}
+							href={`/w/${workspacePublicId}/dashboard/contacts/${contact.publicId}/edit`}
+							size="sm"
+							variant="outline"
+							title={c.editContact}
+							aria-label={c.editContact}
+							className="border-transparent bg-background/60 hover:bg-primary/5 dark:bg-background/80 dark:hover:bg-primary/15"
+						>
+							<IconEdit size={14} stroke={1.5} />
+						</ActionIcon>
+
+						<DeleteContactButton
+							contact={{
+								id: contact.id,
+								firstName: contact.firstName,
+								lastName: contact.lastName,
+							}}
+							workspacePublicId={workspacePublicId}
+							onDeleteAction={onDeleteAction}
+						/>
+					</div>
+				</div>
+			</div>
+
+			<div className="flex-1 overflow-y-auto px-3 py-4 text-sm sm:px-6 lg:px-8">
+				<div className="mx-auto flex max-w-5xl flex-col gap-5 sm:gap-6 lg:gap-8">
+					<section className="relative overflow-hidden rounded-2xl bg-primary/5 px-4 py-4 transition-colors dark:bg-primary/15 sm:px-6 sm:py-5">
+						<div className="pointer-events-none absolute inset-y-4 left-0 w-[3px] rounded-full bg-primary/50 dark:bg-primary/70" />
+						<header className="mb-4 flex flex-wrap items-center justify-between gap-3">
+							<div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-brand dark:text-brand-foreground/90">
+								<span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary/10 text-primary dark:bg-primary/25">
+									<span className="h-1.5 w-1.5 rounded-full bg-primary" />
+								</span>
+								<span>{c.contactDetails}</span>
+							</div>
+							{(emails.length > 0 || phones.length > 0) && (
+								<span className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-3 py-1 text-[11px] font-medium text-brand dark:bg-brand/25 dark:text-brand-foreground/90">
+									<span className="h-1.5 w-1.5 rounded-full bg-emerald-400 dark:bg-emerald-300" />
+									{emails.length > 0 && phones.length > 0
+										? c.emailAndPhoneOnFile
+										: emails.length > 0
+											? c.emailOnFile
+											: c.phoneOnFile}
+								</span>
+							)}
+						</header>
+
+						<dl className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+							<div className="space-y-1.5">
+								<dt className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+									<span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary/10 text-[10px] text-primary dark:bg-primary/25">
+										@
+									</span>
+									<span>{c.primaryEmail}</span>
+								</dt>
+								<dd className="rounded-xl bg-white/70 px-3 py-2 text-[13px] text-foreground/90 ring-1 ring-white/40 backdrop-blur-sm dark:bg-slate-900/70 dark:text-slate-50 dark:ring-slate-900/80">
+									{emails.length > 0 && emails[0]?.address ? (
+										emails[0].address
+									) : (
+										<span className="text-muted-foreground/70">
+											{c.notSpecified}
+										</span>
+									)}
+								</dd>
+							</div>
+
+							<div className="space-y-1.5">
+								<dt className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+									<span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary/10 text-[10px] text-primary dark:bg-primary/25">
+										☎
+									</span>
+									<span>{c.primaryPhone}</span>
+								</dt>
+								<dd className="rounded-xl bg-white/70 px-3 py-2 text-[13px] text-foreground/90 ring-1 ring-white/40 backdrop-blur-sm dark:bg-slate-900/70 dark:text-slate-50 dark:ring-slate-900/80">
+									{phones.length > 0 && phones[0]?.number ? (
+										formatPhone(phones[0])
+									) : (
+										<span className="text-muted-foreground/70">
+											{c.notSpecified}
+										</span>
+									)}
+								</dd>
+							</div>
+
+							<div className="space-y-1.5">
+								<dt className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+									<span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary/10 text-[10px] text-primary dark:bg-primary/25">
+										🎂
+									</span>
+									<span>{c.birthday}</span>
+								</dt>
+								<dd className="rounded-xl bg-white/70 px-3 py-2 text-[13px] text-foreground/90 ring-1 ring-white/40 backdrop-blur-sm dark:bg-slate-900/70 dark:text-slate-50 dark:ring-slate-900/80">
+									{formatDob(contact.dob) ?? (
+										<span className="text-muted-foreground/70">
+											{c.notSpecified}
+										</span>
+									)}
+								</dd>
+							</div>
+						</dl>
+
+						{(emails.length > 1 || phones.length > 1) && (
+							<div className="mt-5 grid gap-4 md:grid-cols-2">
+								{emails.length > 1 && (
+									<div className="space-y-2">
+										<p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+											{c.allEmails}
+										</p>
+										<ul className="space-y-1.5">
+											{emails.map((e, idx) =>
+												e?.address ? (
+													<li
+														key={`${e.address}-${idx}`}
+														className="group flex items-center gap-2 rounded-xl bg-white/60 px-3 py-1.5 text-[12px] text-foreground/90 transition-all hover:bg-white dark:bg-slate-900/70 dark:text-slate-50 dark:hover:bg-slate-900"
+													>
+														<span className="inline-flex h-1.5 w-1.5 rounded-full bg-emerald-400 transition group-hover:scale-110" />
+														<span className="truncate">{e.address}</span>
+													</li>
+												) : null,
+											)}
+										</ul>
+									</div>
+								)}
+
+								{phones.length > 1 && (
+									<div className="space-y-2">
+										<p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+											{c.allPhones}
+										</p>
+										<ul className="space-y-1.5">
+											{phones.map((p, idx) =>
+												p?.number ? (
+													<li
+														key={`${p.number}-${idx}`}
+														className="group flex items-center gap-2 rounded-xl bg-white/60 px-3 py-1.5 text-[12px] text-foreground/90 transition-all hover:bg-white dark:bg-slate-900/70 dark:text-slate-50 dark:hover:bg-slate-900"
+													>
+														<span className="inline-flex h-1.5 w-1.5 rounded-full bg-sky-500 transition group-hover:scale-110" />
+														<span className="truncate">{formatPhone(p)}</span>
+													</li>
+												) : null,
+											)}
+										</ul>
+									</div>
+								)}
+							</div>
+						)}
+					</section>
+
+					{addresses.length > 0 && (
+						<section className="relative overflow-hidden rounded-2xl bg-slate-50 px-4 py-4 transition-colors dark:bg-slate-900/70 sm:px-6 sm:py-5">
+							<div className="pointer-events-none absolute inset-y-4 left-0 w-[3px] rounded-full bg-primary/30 dark:bg-primary/50" />
+							<header className="mb-4 flex items-center justify-between gap-3">
+								<div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+									<span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary/10 text-[12px] text-primary dark:bg-primary/20">
+										<IconMap size={16} />
+									</span>
+									<span className={"text-brand dark:text-brand-foreground/90"}>
+										{c.addresses}
+									</span>
+								</div>
+								<span className="text-[11px] text-muted-foreground/70">
+									{format.message(addresses.length, c.locationsCount)}
+								</span>
+							</header>
+
+							<div className="grid gap-3 sm:grid-cols-2">
+								{addresses.map((addr, idx) => {
+									const lines = [
+										[addr.streetAddress, addr.streetAddressLine2]
+											.filter(Boolean)
+											.join(", "),
+										[addr.city, addr.state, addr.code]
+											.filter(Boolean)
+											.join(", "),
+										addr.country,
+									]
+										.filter((l) => l && l.trim().length > 0)
+										.join("\n");
+
+									if (!lines) return null;
+
+									return (
+										<div
+											key={idx}
+											className="group whitespace-pre-line rounded-xl bg-white/80 px-3.5 py-3 text-xs leading-relaxed text-foreground/90 transition-all  dark:bg-slate-900/80 dark:text-slate-50 dark:hover:bg-slate-900"
+										>
+											<div className="mb-1 flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground/90">
+												<span className="flex h-4 w-4 items-center justify-center rounded-full bg-primary/10 text-[10px] text-primary dark:bg-primary/25">
+													●
+												</span>
+												<span>{c.locationPrefix}{idx + 1}</span>
+											</div>
+											{lines}
+										</div>
+									);
+								})}
+							</div>
+						</section>
+					)}
+
+					{contact.notes && contact.notes.trim().length > 0 && (
+						<section className="relative overflow-hidden rounded-2xl bg-slate-50 px-4 py-4 transition-colors dark:bg-slate-900/70 sm:px-6 sm:py-5">
+							<div className="pointer-events-none absolute inset-y-4 left-0 w-[3px] rounded-full bg-primary/30 dark:bg-primary/50" />
+							<h3 className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+								<span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary/10 text-[13px] text-primary dark:bg-primary/20">
+									✎
+								</span>
+								<span className={"text-brand dark:text-brand-foreground/90"}>
+									{c.notes}
+								</span>
+							</h3>
+							<div className="rounded-xl bg-white/80 px-4 py-3 text-sm leading-relaxed text-foreground/90 dark:bg-slate-900/80 dark:text-slate-50">
+								{contact.notes}
+							</div>
+						</section>
+					)}
+				</div>
+			</div>
+		</div>
+	);
+}
+
+export default Page;

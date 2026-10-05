@@ -1,0 +1,86 @@
+import { driveVolumes } from "@db";
+import { STORAGE_PROVIDERS } from "@schema";
+import { DISTRIBUTION_CONFIG } from "@distribution";
+import { redirect } from "next/navigation";
+import { Container } from "@/components/common/containers";
+import ProviderCardShell from "@/components/dashboard/providers/provider-card-shell";
+import VolumesManager from "@/components/dashboard/storage/volumes-manager";
+import { Separator } from "@/components/ui/separator";
+import { SidebarTrigger } from "@/components/ui/sidebar";
+import { getWorkspacePublicId, rlsClient } from "@/lib/actions/clients";
+import { syncProviders } from "@/lib/actions/dashboard";
+import { access } from "@/lib/actions/shared";
+import { getDictionary } from "@/lib/dictionaries";
+
+export default async function ProvidersPage({
+												params,
+											}: {
+	params: Promise<{ locale: string }>;
+}) {
+	const { locale } = await params;
+	const [dict, workspacePublicId] = await Promise.all([
+		getDictionary(locale),
+		getWorkspacePublicId(),
+	]);
+
+	if (!DISTRIBUTION_CONFIG.features.drive) {
+		redirect(
+			`/${locale}/w/${workspacePublicId}/dashboard/platform/overview`,
+		);
+	}
+
+	const rls = await rlsClient();
+	const [{ canCreateStorageVolume }, userProviders, vols] = await Promise.all([
+		access("canCreateStorageVolume"),
+		syncProviders(),
+		rls((tx) => tx.select().from(driveVolumes)),
+	]);
+
+	return (
+		<>
+			<header className="flex h-16 shrink-0 items-center gap-2">
+				<div className="flex items-center gap-2 px-4">
+					<SidebarTrigger className="-ml-1" />
+					<Separator
+						orientation="vertical"
+						className="mr-2 data-[orientation=vertical]:h-4"
+					/>
+				</div>
+			</header>
+
+			<div className="flex flex-1 flex-col gap-4 p-4 pt-0">
+				<Container variant="wide">
+					<div className="flex items-center justify-between my-4">
+						<h1 className="text-xl font-bold text-foreground">
+							{dict.platform.storageProviders}
+						</h1>
+					</div>
+
+					<p className="max-w-prose text-sm text-muted-foreground my-6">
+						{dict.platform.storageProvidersPageDescription}
+					</p>
+
+					<div className="grid gap-6 lg:grid-cols-2">
+						{STORAGE_PROVIDERS.map((p) => (
+							<ProviderCardShell
+								key={p.key}
+								mode="managed"
+								spec={p}
+								userProviders={userProviders}
+							/>
+						))}
+					</div>
+				</Container>
+
+				<div className="mx-1">
+					<VolumesManager
+						userProviders={userProviders}
+						workspacePublicId={workspacePublicId}
+						volumes={vols}
+						canCreateVolume={canCreateStorageVolume}
+					/>
+				</div>
+			</div>
+		</>
+	);
+}

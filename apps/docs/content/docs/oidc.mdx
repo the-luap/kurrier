@@ -1,0 +1,280 @@
+---
+title: OpenID Connect (OIDC)
+description: Authentication using penID Connect (OIDC) providers.
+---
+
+## 🔐 OpenID Connect (OIDC) Login
+
+Kurrier supports authentication using **OpenID Connect (OIDC)** providers.
+
+Currently, **Google** login is available out of the box, and a **generic OIDC provider** lets you plug in any spec-compliant IdP such as Authelia, Keycloak, Authentik, Zitadel, Okta, Auth0, or Microsoft Entra ID — configured entirely through environment variables.
+
+---
+
+## ✨ Currently Supported
+
+- Google OIDC Login
+- Generic OIDC Login (any spec-compliant OpenID Connect provider)
+
+Additional dedicated providers can be implemented by adding another OIDC route and provider configuration.
+
+---
+
+## 🧠 How It Works
+
+Kurrier uses the standard:
+
+- OAuth 2.0 Authorization Code Flow
+- PKCE (Proof Key for Code Exchange)
+- OpenID Connect identity claims
+
+The authentication flow is:
+
+1. User clicks “Continue with Google”
+2. Kurrier redirects the user to Google
+3. Google authenticates the user
+4. Google redirects back to Kurrier callback route
+5. Kurrier verifies the response
+6. User account + workspace are created automatically if they do not exist
+7. Session cookie is issued
+8. User is redirected into the workspace dashboard
+
+---
+
+## 📦 Environment Variables
+
+Add the following to your `.env`:
+
+```
+env
+OIDC_GOOGLE_CLIENT_ID=your_google_client_id
+OIDC_GOOGLE_CLIENT_SECRET=your_google_client_secret
+```
+
+---
+
+## 🛠 Creating Google OAuth Credentials
+
+1. Open Google Cloud Console
+2. Navigate to:
+- APIs & Services → Credentials
+3. Click:
+- Create Credentials → OAuth Client ID
+4. Choose:
+- Web Application
+
+### Authorized Redirect URI
+
+Add:
+
+```txt
+http://localhost:3000/api/auth/oidc/google/callback
+```
+
+For production:
+
+```txt
+https://your-domain.com/api/auth/oidc/google/callback
+```
+
+---
+
+## 📁 Route Structure
+
+Google OIDC flow is implemented using App Router route handlers.
+
+```txt
+app/
+└── api/
+    └── auth/
+        └── oidc/
+            └── google/
+                ├── route.ts
+                └── callback/
+                    └── route.ts
+```
+
+---
+
+## 🚀 Start Route
+
+The start route:
+
+```txt
+/api/auth/oidc/google
+```
+
+Responsibilities:
+
+- Discover Google OIDC configuration
+- Generate PKCE verifier/challenge
+- Generate state token
+- Store temporary cookies
+- Redirect user to Google authorization endpoint
+
+---
+
+## ↩ Callback Route
+
+The callback route:
+
+```txt
+/api/auth/oidc/google/callback
+```
+
+Responsibilities:
+
+- Validate PKCE verifier
+- Validate state
+- Exchange authorization code for tokens
+- Read user claims
+- Create or locate user
+- Create auth provider/account records
+- Create session cookie
+- Redirect into workspace
+
+---
+
+## 🗄 Database Records
+
+Successful OIDC login creates:
+
+### `users`
+
+Primary application user.
+
+### `workspaces`
+
+Default workspace for the user.
+
+### `workspace_members`
+
+Workspace ownership membership.
+
+### `auth_providers`
+
+OIDC provider metadata for the workspace.
+
+### `auth_accounts`
+
+Provider-linked external identity record.
+
+---
+
+## 🔒 Security Notes
+
+Kurrier uses:
+
+- PKCE
+- State validation
+- HttpOnly session cookies
+- Verified Google email requirement
+- Signed JWT session tokens
+
+Sensitive provider tokens are never logged in production.
+
+---
+
+## 🌐 Generic OIDC Provider
+
+Any OpenID Connect provider that supports **discovery** (`/.well-known/openid-configuration`) and the **Authorization Code Flow with PKCE** can be used for login — no code changes required.
+
+### Environment Variables
+
+```
+OIDC_ISSUER_URL=https://auth.example.com
+OIDC_CLIENT_ID=kurrier
+OIDC_CLIENT_SECRET=your_client_secret
+
+# Optional
+OIDC_PROVIDER_NAME=My Company SSO   # label on the login button (default: "SSO")
+OIDC_SCOPES=openid email profile    # default shown
+OIDC_TOKEN_AUTH_METHOD=client_secret_basic  # or client_secret_post
+OIDC_REQUIRE_VERIFIED_EMAIL=true    # set to "false" to accept unverified emails
+```
+
+The generic login button appears on the login and signup pages as soon as `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID` and `OIDC_CLIENT_SECRET` are all set.
+
+### Redirect URI
+
+Register the following redirect URI with your provider:
+
+```txt
+https://your-domain.com/api/auth/oidc/generic/callback
+```
+
+### Route Structure
+
+```txt
+/api/auth/oidc/generic            → start route (discovery, PKCE, state, redirect)
+/api/auth/oidc/generic/callback   → callback route (code exchange, user provisioning, session)
+```
+
+### Provider Notes
+
+- **Token endpoint authentication** defaults to `client_secret_basic` (the OAuth 2.0 default). Some providers default to or require `client_secret_post` — set `OIDC_TOKEN_AUTH_METHOD` accordingly.
+- **Claims**: Kurrier needs the `email` and `sub` claims. If the ID token does not carry `email` (e.g. Authelia exposes profile claims only through the userinfo endpoint), Kurrier automatically falls back to the **userinfo endpoint**.
+- **Identity mapping**: returning users are identified by the stable `issuer + sub` pair stored in `auth_accounts` — never by email. A change to the email reported by the IdP does not change which Kurrier user is authenticated.
+- **User provisioning**: on the very first login, the **verified** email claim is used once, to link the external identity to an existing Kurrier user or to create a new user + default workspace. Unverified emails are rejected by default.
+- **Unverified emails**: some IdPs never set `email_verified: true` (e.g. OpenCloud's native OIDC provider). Set `OIDC_REQUIRE_VERIFIED_EMAIL=false` to accept the email claim regardless of the `email_verified` value. Leave this unset (or `true`) unless your IdP requires it — it's a deliberate security default.
+
+### Example: Authelia
+
+```yaml
+identity_providers:
+  oidc:
+    clients:
+      - client_id: kurrier
+        client_name: Kurrier
+        client_secret: '$pbkdf2-sha512$...'   # hashed secret
+        public: false
+        authorization_policy: one_factor
+        redirect_uris:
+          - https://mail.example.com/api/auth/oidc/generic/callback
+        scopes:
+          - openid
+          - email
+          - profile
+        userinfo_signed_response_alg: none
+```
+
+Authelia authenticates clients with `client_secret_basic` by default, which matches Kurrier's default — no extra configuration needed.
+
+### Example: Keycloak
+
+1. Create a new **confidential** client in your realm
+2. Enable **Standard Flow** (Authorization Code)
+3. Set the redirect URI to `https://your-domain.com/api/auth/oidc/generic/callback`
+4. Use the realm issuer URL, e.g. `https://keycloak.example.com/realms/myrealm`, as `OIDC_ISSUER_URL`
+
+---
+
+## ➕ Adding More Providers
+
+Additional providers can be added by implementing another OIDC route pair.
+
+Examples:
+
+```txt
+/api/auth/oidc/github
+/api/auth/oidc/microsoft
+/api/auth/oidc/keycloak
+```
+
+Most providers only require:
+
+- Discovery URL
+- Client ID
+- Client Secret
+- Redirect URI
+- Scope configuration
+
+The rest of the flow remains identical.
+
+---
+
+## 📚 References
+
+- OpenID Connect: https://openid.net/connect/
+- OAuth 2.0 PKCE: https://oauth.net/2/pkce/
+- openid-client: https://github.com/panva/openid-client

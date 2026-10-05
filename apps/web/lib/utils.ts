@@ -81,3 +81,29 @@ export function setSidebarWidth(width: string) {
 
 	el.style.setProperty("--sidebar-width", width);
 }
+
+export function withLocale(locale: string, path: string,) {
+	if (path.startsWith("/")) {
+		return `/${locale}${path}`;
+	}
+	return `/${locale}/${path}`;
+}
+
+export const bytesToGb = (bytes: number) => {
+	return (bytes ?? 0) / (1024 ** 3)
+};
+
+export function formatBytes(bytes?: number | null) {
+	if (!bytes) return "—";
+
+	const units = ["B", "KB", "MB", "GB", "TB"];
+	let value = bytes;
+	let unit = 0;
+
+	while (value >= 1024 && unit < units.length - 1) {
+		value /= 1024;
+		unit++;
+	}
+
+	return `${value.toFixed(value >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
+}

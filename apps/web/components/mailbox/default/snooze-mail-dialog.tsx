@@ -7,6 +7,7 @@ import { getTimeZones } from "@vvo/tzdb";
 import type { Dayjs } from "dayjs";
 import { CalendarClock } from "lucide-react";
 import { useMemo, useState } from "react";
+import { useOptionalI18n } from "@/components/providers/dictionary-provider";
 
 // The snooze dialogs (timezone database, date picker, dayjs tz) are only
 // needed once the user opens them: SnoozeMail loads this module lazily so
@@ -22,6 +23,10 @@ export default function SnoozeMailDialog({
 	onCommit: (next: Date) => void;
 	onClose: () => void;
 }) {
+	const i18n = useOptionalI18n();
+	const dict = i18n?.dict;
+	const format = i18n?.format;
+
 	const [step, setStep] = useState<"presets" | "picker">("presets");
 	// Every (re)open starts at the presets with fresh preset times.
 	const [openedAt, setOpenedAt] = useState(() => Date.now());
@@ -48,21 +53,24 @@ export default function SnoozeMailDialog({
 		// Relative to the moment the dialog was (re)opened.
 		const now = () => dayjsTz(openedAt);
 		return [
-			{ label: "Later today", date: now().add(2, "h") },
 			{
-				label: "Tomorrow morning",
+				label: dict?.mailbox?.laterToday ?? "Later today",
+				date: now().add(2, "h"),
+			},
+			{
+				label: dict?.mailbox?.tomorrowMorning ?? "Tomorrow morning",
 				date: now().endOf("d").add(8, "h").add(1, "m"),
 			},
 			{
-				label: "Tomorrow afternoon",
+				label: dict?.mailbox?.tomorrowAfternoon ?? "Tomorrow afternoon",
 				date: now().endOf("d").add(13, "h").add(1, "m"),
 			},
 			{
-				label: "Monday morning",
+				label: dict?.mailbox?.mondayMorning ?? "Monday morning",
 				date: now().endOf("w").add(8, "h").add(1, "m"),
 			},
 		];
-	}, [dayjsTz, openedAt]);
+	}, [dayjsTz, openedAt, dict]);
 
 	const [pickerValue, setPickerValue] = useState<Dayjs>(() => dayjsTz());
 	const pickerDateValue = useMemo(
@@ -70,32 +78,36 @@ export default function SnoozeMailDialog({
 		[pickerValue],
 	);
 
+	const is24h = format?.hourCycle() === "h23" || format?.hourCycle() === "h24";
+
 	return (
 		<>
 			<Modal
 				centered
 				opened={opened && step === "picker"}
 				onClose={onClose}
-				title={<span className="text-xl">Snooze</span>}
+				title={
+					<span className="text-xl">{dict?.mailbox?.snooze ?? "Snooze"}</span>
+				}
 				size="sm"
 				zIndex={1003}
 			>
 				<DateTimePicker
-					label="Pick date and time"
-					placeholder="Pick date and time"
+					label={dict?.mailbox?.pickDateAndTime ?? "Pick date and time"}
+					placeholder={dict?.mailbox?.pickDateAndTime ?? "Pick date and time"}
 					value={pickerDateValue}
 					onChange={(val) => {
 						if (!val) return;
 						const d = dayjsTz(val);
 						if (d.isValid()) setPickerValue(d);
 					}}
-					valueFormat="DD MMM hh:mm A"
+					valueFormat={is24h ? "DD.MM.YYYY HH:mm" : "DD MMM hh:mm A"}
 					popoverProps={{ zIndex: 1004 }}
 					className="my-4"
 					timePickerProps={{
 						withDropdown: true,
 						popoverProps: { withinPortal: false },
-						format: "12h",
+						format: is24h ? "24h" : "12h",
 					}}
 					disabled={saving}
 				/>
@@ -108,7 +120,7 @@ export default function SnoozeMailDialog({
 						onCommit(pickerValue.toDate());
 					}}
 				>
-					Snooze
+					{dict?.mailbox?.snooze ?? "Snooze"}
 				</Button>
 			</Modal>
 
@@ -117,7 +129,9 @@ export default function SnoozeMailDialog({
 				opened={opened && step === "presets"}
 				closeOnClickOutside={false}
 				onClose={onClose}
-				title={<span className="text-xl">Snooze</span>}
+				title={
+					<span className="text-xl">{dict?.mailbox?.snooze ?? "Snooze"}</span>
+				}
 				size="sm"
 				zIndex={1001}
 			>
@@ -134,7 +148,12 @@ export default function SnoozeMailDialog({
 						onClick={() => onCommit(preset.date.toDate())}
 					>
 						<span className="my-1">{preset.label}</span>
-						<span>{preset.date.format("MMM DD, hh:mm A")}</span>
+						<span>
+							{format?.date(preset.date.toDate(), {
+								dateStyle: "medium",
+								timeStyle: "short",
+							}) ?? preset.date.format("MMM DD, hh:mm A")}
+						</span>
 					</button>
 				))}
 
@@ -147,7 +166,7 @@ export default function SnoozeMailDialog({
 					disabled={saving}
 					onClick={() => setStep("picker")}
 				>
-					Pick date and time
+					{dict?.mailbox?.pickDateAndTime ?? "Pick date and time"}
 				</Button>
 			</Modal>
 		</>

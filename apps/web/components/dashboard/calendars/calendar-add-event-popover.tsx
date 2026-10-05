@@ -1,10 +1,11 @@
 "use client";
-import React from "react";
 import { Popover } from "@mantine/core";
-import { Dayjs } from "dayjs";
-import CombinedEventView from "@/components/dashboard/calendars/combined-event-view";
-import { toast } from "sonner";
+import type { Dayjs } from "dayjs";
 import { useParams } from "next/navigation";
+import type React from "react";
+import { toast } from "sonner";
+import CombinedEventView from "@/components/dashboard/calendars/combined-event-view";
+import { useOptionalDictionary } from "@/components/providers/dictionary-provider";
 export type OnCompletedOptions = {
 	showToast?: boolean;
 };
@@ -22,6 +23,7 @@ function CalendarAddEventPopover({
 	end: Dayjs;
 	onChange: (open: boolean) => void;
 }) {
+	const dict = useOptionalDictionary();
 	const { view } = useParams();
 	return (
 		<Popover
@@ -39,7 +41,7 @@ function CalendarAddEventPopover({
 		>
 			<Popover.Target>{children}</Popover.Target>
 
-			<Popover.Dropdown className="min-w-md max-w-md bg-popover border border-border rounded-xl p-3 shadow-lg">
+			<Popover.Dropdown className="h-96 w-[min(28rem,calc(100vw-2rem))] max-w-[calc(100vw-2rem)] overflow-auto rounded-xl border border-border bg-popover p-3 shadow-lg">
 				<CombinedEventView
 					newCalendarEventFormProps={{
 						start,
@@ -49,7 +51,7 @@ function CalendarAddEventPopover({
 							{ showToast }: { showToast?: boolean } = {},
 						) => {
 							if (showToast ?? true) {
-								toast.success("Success");
+								toast.success(dict?.common?.success ?? "Success");
 							}
 							onChange(false);
 						},

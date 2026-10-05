@@ -41,6 +41,8 @@ export async function setModeServer(mode: unknown) {
 }
 
 export async function setResolvedServer(value: Partial<ThemeMode>) {
+	// Public endpoint: only the two resolved modes end up in the cookie.
+	if (value !== "light" && value !== "dark") return;
 	(await cookies()).set(RESOLVED_COOKIE, value, {
 		path: "/",
 		sameSite: "lax",

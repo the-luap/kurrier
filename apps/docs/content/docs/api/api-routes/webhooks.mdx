@@ -56,9 +56,16 @@ Create a new webhook subscription.
 | **url** *(required)* | HTTPS endpoint that Kurrier will POST events to. | `"https://example.com/webhooks/kurrier"` |
 | **events** *(required)* | Array of event types to subscribe to. | `["message.sent", "message.delivered"]` |
 | **ownerId** *(required)* | The user ID associated with the API key. You can retrieve this using the **GET /me** endpoint. | `"7f3b1a84-c1ef-4c8d-a9fb-8e9dc3d1a230"` |
-| **identityId** *(optional)* | The Kurrier Identity this webhook belongs to. Only events for this identity will trigger the webhook. Or it will be invoked for all identities | `"id_12345"` |
+| **identityId** *(optional)* | The Kurrier Identity this webhook belongs to. Only events for this identity will trigger the webhook. Without it, the webhook is invoked for all identities of the workspace that the webhook owner can access (own, shared with the workspace, or assigned to them). | `"id_12345"` |
 | **enabled** | Whether this webhook is active. Defaults to `true`. | `true` |
 | **description** | Free-form label to help you remember what this webhook does. | `"Notify billing service"` |
+
+The `url` must be an absolute `http(s)` URL that resolves to a public address.
+Loopback, private (RFC 1918 / ULA), link-local and cloud metadata addresses are
+rejected (at creation and again at delivery time). Self-hosted setups that
+deliver to an internal service can allow private addresses with
+`OUTBOUND_ALLOW_PRIVATE_NETWORKS=true` on the worker; metadata/link-local
+addresses stay blocked.
 
 ---
 
@@ -95,6 +102,10 @@ Permanently delete a webhook.
 ---
 
 ## Webhook delivery format
+
+Deliveries are `POST` requests with `Content-Type: application/json`,
+`User-Agent: Kurrier-Webhooks` and `X-Kurrier-Event: <event name>`. Redirects
+are not followed and a delivery times out after 15 seconds.
 
 Webhook POST request example:
 

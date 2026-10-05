@@ -1,19 +1,22 @@
-import { ImapFlow } from "imapflow";
 import nodemailer, { type Transporter } from "nodemailer";
-import type SMTPTransport from "nodemailer/lib/smtp-transport";
 import {
-	type DomainIdentity,
-	type Mailer,
+	DomainIdentity,
+	Mailer,
 	RawSmtpConfigSchema,
-	type SmtpVerifyInput,
-	type VerifyResult,
+	SmtpVerifyInput,
+	VerifyResult,
 } from "../core";
+import { ImapFlow } from "imapflow";
+import SMTPTransport from "nodemailer/lib/smtp-transport";
+import { assertHostAllowed, mailHostPolicy } from "../net-guard";
 
 export class SmtpMailer implements Mailer {
 	private transporter: Transporter;
-	private imapCfg: SmtpVerifyInput["imap"];
+	private imapConfig: SmtpVerifyInput["imap"] | null;
+	private host: string;
 
 	private constructor(cfg: SmtpVerifyInput) {
+		this.host = cfg.host;
 		this.transporter = nodemailer.createTransport({
 			host: cfg.host,
 			port: cfg.port,
@@ -21,24 +24,10 @@ export class SmtpMailer implements Mailer {
 			auth: cfg.auth,
 			pool: cfg.pool ?? false,
 		} as SMTPTransport.Options);
-		// The IMAP client is only needed by verify(); create it there instead
-		// of for every mailer (sendEmail never uses it).
-		this.imapCfg = cfg.imap;
-	}
 
-	private createImapClient(): ImapFlow | null {
-		const imap = this.imapCfg;
-		return imap
-			? new ImapFlow({
-					host: imap.host,
-					port: imap.port,
-					secure: imap.secure,
-					auth: {
-						user: imap.user,
-						pass: imap.pass,
-					},
-				})
-			: null;
+		// The IMAP client is only needed by verify(): build it there instead
+		// of for every mailer (one per sent mail).
+		this.imapConfig = cfg.imap ?? null;
 	}
 
 	static from(raw: unknown): SmtpMailer {
@@ -47,17 +36,33 @@ export class SmtpMailer implements Mailer {
 	}
 
 	async verify(): Promise<VerifyResult> {
-		const meta: Record<string, unknown> = { send: false, receive: undefined };
+		const meta: Record<string, unknown> = {
+			send: false,
+			receive: undefined,
+		};
 
 		try {
+			// User supplied host: never connect to cloud metadata / link-local
+			// (or private ranges with MAIL_HOST_BLOCK_PRIVATE_NETWORKS=true).
+			await assertHostAllowed(this.host, mailHostPolicy());
 			const ok = await this.transporter.verify();
 			meta.send = !!ok;
 
-			const imapClient = this.createImapClient();
-			if (imapClient) {
+			if (this.imapConfig) {
+				await assertHostAllowed(this.imapConfig.host, mailHostPolicy());
+				const imapClient = new ImapFlow({
+					host: this.imapConfig.host,
+					port: this.imapConfig.port,
+					secure: this.imapConfig.secure,
+					auth: {
+						user: this.imapConfig.user,
+						pass: this.imapConfig.pass,
+					},
+				});
 				try {
 					await imapClient.connect();
 					await imapClient.noop();
+
 					meta.receive = true;
 				} catch (err: any) {
 					meta.receive = false;
@@ -69,18 +74,25 @@ export class SmtpMailer implements Mailer {
 						} catch {}
 					} else {
 						try {
-							imapClient.close();
+							await imapClient.close();
 						} catch {}
 					}
 				}
 			}
 
-			return { ok: true, message: "OK", meta };
+			return {
+				ok: true,
+				message: "OK",
+				meta,
+			};
 		} catch (err: any) {
 			return {
 				ok: false,
 				message: err?.message ?? "SMTP verify failed",
-				meta: { code: err?.code, response: err?.response || err?.responseText },
+				meta: {
+					code: err?.code,
+					response: err?.response || err?.responseText,
+				},
 			};
 		} finally {
 			try {
@@ -91,19 +103,26 @@ export class SmtpMailer implements Mailer {
 
 	async sendTestEmail(
 		to: string,
-		opts?: { subject?: string; body?: string },
+		opts?: {
+			subject?: string;
+			body?: string;
+		},
 	): Promise<boolean> {
 		try {
+			await assertHostAllowed(this.host, mailHostPolicy());
 			await this.transporter.sendMail({
 				from: (this.transporter.options as any).auth.user,
 				to,
 				subject: opts?.subject ?? "Test email",
 				text:
-					opts?.body ?? "This is a test email from your configured provider.",
+					opts?.body ??
+					"This is a test email from your configured provider.",
 			});
+
 			return true;
 		} catch (err) {
 			console.error("sendTestEmail error", err);
+
 			return false;
 		}
 	}
@@ -113,7 +132,9 @@ export class SmtpMailer implements Mailer {
 			domain: "",
 			status: "unverified",
 			dns: [],
-			meta: { info: "SMTP does not support domain identities" },
+			meta: {
+				info: "SMTP does not support domain identities",
+			},
 		};
 	}
 
@@ -122,7 +143,9 @@ export class SmtpMailer implements Mailer {
 			domain: "",
 			status: "unverified",
 			dns: [],
-			meta: { info: "SMTP does not support domain identities" },
+			meta: {
+				info: "SMTP does not support domain identities",
+			},
 		};
 	}
 
@@ -131,7 +154,9 @@ export class SmtpMailer implements Mailer {
 			domain: "",
 			status: "unverified",
 			dns: [],
-			meta: { info: "SMTP does not support domain identities" },
+			meta: {
+				info: "SMTP does not support domain identities",
+			},
 		};
 	}
 
@@ -146,35 +171,54 @@ export class SmtpMailer implements Mailer {
 	async sendEmail(
 		to: string[],
 		opts: {
+			cc?: string[];
+			bcc?: string[];
 			subject: string;
 			text: string;
 			html: string;
 			from: string;
-			cc?: string[];
-			bcc?: string[];
 			inReplyTo: string;
 			references: string[];
-			attachments?: { name: string; content: Blob; contentType: string }[];
+			headers?: Record<string, string>;
+			attachments?: {
+				name: string;
+				content: Blob;
+				contentType: string;
+			}[];
 		},
-	): Promise<{ success: boolean; MessageId?: string; error?: string }> {
+	): Promise<{
+		success: boolean;
+		MessageId?: string;
+		error?: string;
+	}> {
 		try {
-			// convert Blob attachments -> Nodemailer format (Buffer)
+			await assertHostAllowed(this.host, mailHostPolicy());
 			const attachments = await Promise.all(
-				(opts.attachments ?? []).map(async (a) => ({
-					filename: a.name,
-					content: Buffer.from(await a.content.arrayBuffer()),
-					contentType: a.contentType || "application/octet-stream",
+				(opts.attachments ?? []).map(async (attachment) => ({
+					filename: attachment.name,
+					content: Buffer.from(
+						await attachment.content.arrayBuffer(),
+					),
+					contentType:
+						attachment.contentType ||
+						"application/octet-stream",
 				})),
 			);
 
-			const headers: Record<string, string> = {};
-			if (opts.inReplyTo) headers["In-Reply-To"] = opts.inReplyTo;
-			if (opts.references?.length)
-				headers["References"] = opts.references.join(" ");
+			const headers: Record<string, string> = { ...opts.headers };
+
+			if (opts.inReplyTo) {
+				headers["In-Reply-To"] = opts.inReplyTo;
+			}
+
+			if (opts.references?.length) {
+				headers["References"] =
+					opts.references.join(" ");
+			}
 
 			const info = await this.transporter.sendMail({
 				from: opts.from,
-				to, // array is fine; Nodemailer will join
+				to,
 				cc: opts.cc?.length ? opts.cc : undefined,
 				bcc: opts.bcc?.length ? opts.bcc : undefined,
 				subject: opts.subject,
@@ -184,20 +228,23 @@ export class SmtpMailer implements Mailer {
 				attachments,
 			});
 
-			return { success: true, MessageId: String(info.messageId || "") };
-		} catch (err) {
-			console.error("smtp sendEmail error", err);
+			return {
+				success: true,
+				MessageId: String(info.messageId || ""),
+			};
+		} catch (error) {
+			console.error("[smtp-mailer] sendEmail error", error);
+
 			return {
 				success: false,
-				error: err instanceof Error ? err.message : String(err),
+				error:
+					error &&
+					typeof error === "object" &&
+					"code" in error &&
+					typeof error.code === "string"
+						? error.code
+						: "SmtpSendFailed",
 			};
 		}
 	}
-
-	// async close(): Promise<void> {
-	//     // best-effort close if transport supports it
-	//     try {
-	//         this.transporter.close?.();
-	//     } catch { /* ignore */ }
-	// }
 }

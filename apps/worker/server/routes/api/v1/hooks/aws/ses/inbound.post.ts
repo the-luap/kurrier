@@ -2,6 +2,7 @@ import { defineEventHandler, readRawBody } from "h3";
 import {
 	db,
 	decryptAdminSecrets,
+	identities,
 	mailboxes,
 	providers,
 	providerSecrets,
@@ -10,41 +11,47 @@ import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 
 import { simpleParser } from "mailparser";
 import { and, eq } from "drizzle-orm";
-import { getPublicEnv, getServerEnv } from "@schema";
-import { createClient } from "@supabase/supabase-js";
-
-import {
-	isTrustedSnsUrl,
-	verifySnsMessage,
-} from "../../../../../../../lib/aws-sns";
 import { parseAndStoreEmail } from "../../../../../../../lib/message-payload-parser";
+import {MessageValidator} from "aws-sns-validator";
+const snsValidator = new MessageValidator();
+async function verifySnsMessage(message: unknown): Promise<void> {
+	await snsValidator.validate(message as Record<string, unknown>);
+}
+function isSafeSnsSubscribeUrl(value: unknown): value is string {
 
-const publicConfig = getPublicEnv();
-const serverConfig = getServerEnv();
-const supabase = createClient(
-	publicConfig.API_URL,
-	serverConfig.SERVICE_ROLE_KEY,
-);
+	if (typeof value !== "string") return false;
+	try {
+		const url = new URL(value);
+		if (url.protocol !== "https:") {
+			return false;
+		}
+		return (
+			/^sns\.[a-z0-9-]+\.amazonaws\.com$/.test(url.hostname) ||
+			/^sns\.[a-z0-9-]+\.amazonaws\.com\.cn$/.test(url.hostname)
+		);
+	} catch {
+		return false;
+	}
+
+}
 
 export default defineEventHandler(async (event) => {
 	try {
 		const raw = (await readRawBody(event)) || "";
 		const sns = JSON.parse(raw as string);
 
-		// Reject anything that is not a genuine, signed SNS delivery.
-		if (!(await verifySnsMessage(sns))) {
-			console.warn("[Webhook] Rejected SNS payload with invalid signature");
-			return { ok: false };
-		}
+		await verifySnsMessage(sns);
 
 		// 1) One-time SNS handshake
 		if (sns?.Type === "SubscriptionConfirmation" && sns.SubscribeURL) {
-			// Only ever call back to AWS SNS (prevents SSRF via SubscribeURL).
-			if (!isTrustedSnsUrl(sns.SubscribeURL)) {
-				console.warn("[Webhook] Refusing untrusted SNS SubscribeURL");
-				return { ok: false };
+
+			if (!isSafeSnsSubscribeUrl(sns.SubscribeURL)) {
+				throw new Error("Invalid SNS SubscribeURL");
 			}
-			await $fetch(sns.SubscribeURL as string, { method: "GET" });
+			await $fetch(sns.SubscribeURL, {
+				method: "GET",
+				redirect: "error",
+			});
 			console.log("[Webhook] SNS subscription confirmed");
 			return { ok: true };
 		}
@@ -61,16 +68,25 @@ export default defineEventHandler(async (event) => {
 
 			const bucket: string = rec.s3?.bucket?.name;
 			const key: string = decodeURIComponent(rec.s3?.object?.key || "");
-			const size: number = rec.s3?.object?.size ?? 0;
+			// const size: number = rec.s3?.object?.size ?? 0;
 
-			console.log("[S3] ObjectCreated:", { bucket, key, size });
-
-			const [, ownerId, providerId, identityId, emlId] = key.split("/");
-			if (!ownerId || !providerId || !identityId || !emlId) {
+			const parts = key.split("/");
+			const [prefix, ownerId, providerId, identityId, emlId] = parts;
+			if (
+				parts.length !== 5 ||
+				prefix !== "inbound" ||
+				!ownerId ||
+				!providerId ||
+				!identityId ||
+				!emlId
+			) {
 				console.warn("[Webhook] Unexpected S3 key layout, ignoring.", { key });
 				return { ok: true };
 			}
 
+			// A validly signed SNS message can come from any AWS account's
+			// topic: the key (owner/provider/identity) and bucket are attacker
+			// controlled until they are checked against the stored provider.
 			const [provider] = await db
 				.select()
 				.from(providers)
@@ -85,21 +101,37 @@ export default defineEventHandler(async (event) => {
 				return { ok: true };
 			}
 
-			// The notification must come from the bucket/topic bootstrapped for this
-			// provider; otherwise anyone could point us at arbitrary objects.
-			const resourceIds = provider.metaData?.verification?.resourceIds as
-				| { bucket?: string; topicArn?: string }
-				| undefined;
-			if (resourceIds?.bucket && resourceIds.bucket !== bucket) {
+			// The notification must come from the bucket/topic bootstrapped for
+			// this provider; otherwise anyone could point us at arbitrary objects.
+			const resourceIds = (provider.metaData as any)?.verification
+				?.resourceIds as { bucket?: string; topicArn?: string } | undefined;
+			if (!resourceIds?.bucket || resourceIds.bucket !== bucket) {
 				console.warn("[Webhook] S3 bucket does not match provider", {
 					bucket,
 					providerId,
 				});
 				return { ok: true };
 			}
-			if (resourceIds?.topicArn && resourceIds.topicArn !== sns.TopicArn) {
+			if (resourceIds.topicArn && resourceIds.topicArn !== sns.TopicArn) {
 				console.warn("[Webhook] SNS topic does not match provider", {
 					topicArn: sns.TopicArn,
+					providerId,
+				});
+				return { ok: true };
+			}
+
+			const [identity] = await db
+				.select()
+				.from(identities)
+				.where(
+					and(
+						eq(identities.id, identityId),
+						eq(identities.workspaceId, provider.workspaceId),
+					),
+				);
+			if (!identity) {
+				console.warn("[Webhook] SES identity does not belong to provider", {
+					identityId,
 					providerId,
 				});
 				return { ok: true };
@@ -130,10 +162,9 @@ export default defineEventHandler(async (event) => {
 			);
 			const rawEmail = (await getObj?.Body?.transformToString("utf-8")) || "";
 
-			// The raw EML is stored by parseAndStoreEmail (under `key`); it used
-			// to be uploaded a second time here to a path nothing references.
 			// Parse once with the options parseAndStoreEmail needs and hand the
-			// result over instead of parsing the message twice.
+			// result over instead of parsing the message twice. (No full mail
+			// dumps in the logs.)
 			const parsed = await simpleParser(rawEmail, { keepCidLinks: true });
 			const headers = parsed.headers as Map<string, any>;
 
@@ -142,20 +173,20 @@ export default defineEventHandler(async (event) => {
 				.from(mailboxes)
 				.where(
 					and(
-						eq(mailboxes.identityId, identityId),
-						eq(mailboxes.ownerId, ownerId),
+						eq(mailboxes.identityId, identity.id),
+						eq(mailboxes.workspaceId, provider.workspaceId),
 					),
 				);
 
 			const inbox = userMailboxes.find((m) => m.kind === "inbox");
 			const spamMb = userMailboxes.find((m) => m.kind === "spam");
-			// const junkMb = userMailboxes.find(m => m.kind === "junk");
 
-			if (!inbox)
-				throw new Error("No inbox mailbox found for identity " + identityId);
-			if (!spamMb)
-				throw new Error("No spam mailbox found for identity " + identityId);
-			if (!provider) throw new Error("No provider found for id " + providerId);
+			if (!inbox) {
+				console.warn("[Webhook] No inbox mailbox for SES identity", {
+					identityId,
+				});
+				return { ok: true };
+			}
 
 			let providerSaysSpam = false;
 			if (provider?.type === "ses") {
@@ -171,15 +202,6 @@ export default defineEventHandler(async (event) => {
 					(virusVerdict !== "" && virusVerdict !== "PASS");
 			}
 
-			const authRes = String(headers.get("authentication-results") ?? "");
-			const spfFail = /spf=\s*fail/i.test(authRes);
-			const dkimFail = /dkim=\s*fail/i.test(authRes);
-			const dmarcFail = /dmarc=\s*fail/i.test(authRes);
-			const authSaysJunk = (spfFail && dkimFail && dmarcFail) || dmarcFail;
-
-			console.log("providerSaysSpam", providerSaysSpam);
-			console.log("authSaysJunk", authSaysJunk);
-
 			let targetMailboxId = inbox.id;
 			if (providerSaysSpam && spamMb) {
 				targetMailboxId = spamMb.id;
@@ -187,26 +209,13 @@ export default defineEventHandler(async (event) => {
 
 			await parseAndStoreEmail(rawEmail, {
 				ownerId,
+				workspaceId: provider.workspaceId,
 				mailboxId: targetMailboxId,
 				rawStorageKey: key, // S3 key
 				emlKey: emlId,
 				parsed,
 			});
 
-			const channel = await supabase.channel(`${ownerId}-mailbox`);
-
-			channel.subscribe((status) => {
-				if (status !== "SUBSCRIBED") {
-					return null;
-				}
-				channel.send({
-					type: "broadcast",
-					event: "mail-received",
-					payload: { reload: true },
-				});
-				channel.unsubscribe();
-				return;
-			});
 
 			// Optional: fetch the raw RFC822 now (you can move this to a worker if preferred)
 			// const obj = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));

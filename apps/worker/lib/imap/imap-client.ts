@@ -1,84 +1,24 @@
 import { db, decryptAdminSecrets, identities, smtpAccountSecrets } from "@db";
+import { assertHostAllowed, mailHostPolicy } from "@providers/net-guard";
 import { eq } from "drizzle-orm";
 import { ImapFlow } from "imapflow";
 
-const retryCounts = new Map<string, number>();
-const MAX_RETRIES = 3;
-
-// Clients closed on purpose (shutdown, stop-idle) must not auto-reconnect.
-const intentionallyClosed = new WeakSet<ImapFlow>();
-
 // In-flight connects per instance map + identity, so concurrent callers share
-// one connection instead of each opening (and leaking) their own.
+// one connection instead of each opening one and leaking all but the last
+// (the second imapInstances.set() used to overwrite the first client).
 const pendingConnects = new WeakMap<
 	Map<string, ImapFlow>,
 	Map<string, Promise<ImapFlow | undefined>>
 >();
 
-// Called after safeReconnect() re-established a client for a map (used by
-// the realtime IDLE sync to re-attach its listeners to the new client).
-const reconnectHandlers = new WeakMap<
-	Map<string, ImapFlow>,
-	(identityId: string, client: ImapFlow) => void | Promise<void>
->();
-
-export function onImapReconnect(
-	imapInstances: Map<string, ImapFlow>,
-	handler: (identityId: string, client: ImapFlow) => void | Promise<void>,
-) {
-	reconnectHandlers.set(imapInstances, handler);
-}
-
-/** Logs out a client without triggering the automatic reconnect. */
-export async function closeImapClient(client: ImapFlow) {
-	intentionallyClosed.add(client);
-	await client.logout();
-}
-
-function safeReconnect(
-	identityId: string,
-	imapInstances: Map<string, ImapFlow>,
-) {
-	const currentRetries = retryCounts.get(identityId) ?? 0;
-
-	if (currentRetries >= MAX_RETRIES) {
-		console.error(`[IMAP:${identityId}] Max retries reached. Giving up.`);
-		return;
-	}
-
-	retryCounts.set(identityId, currentRetries + 1);
-
-	const existing = imapInstances.get(identityId);
-	if (existing) {
-		intentionallyClosed.add(existing);
-		existing.logout().catch(() => {});
-		imapInstances.delete(identityId);
-	}
-
-	setTimeout(() => {
-		initSmtpClient(identityId, imapInstances)
-			.then(async (client) => {
-				const handler = reconnectHandlers.get(imapInstances);
-				if (client && handler) await handler(identityId, client);
-			})
-			.catch(console.error);
-	}, 5000);
-}
-
 export const initSmtpClient = async (
 	identityId: string,
 	imapInstances: Map<string, ImapFlow>,
 ): Promise<ImapFlow | undefined> => {
-	// If we already have a working connection, reuse it
-	try {
-		const existing = imapInstances.get(identityId);
-		if (existing && existing.authenticated && existing.usable) {
-			return existing;
-		}
-	} catch (err) {
-		console.error(`[IMAP:${identityId}] Existing instance check failed`, err);
-		safeReconnect(identityId, imapInstances);
-		return;
+	const existing = imapInstances.get(identityId);
+
+	if (existing?.authenticated && existing?.usable) {
+		return existing;
 	}
 
 	let pending = pendingConnects.get(imapInstances);
@@ -100,13 +40,36 @@ async function connectClient(
 	identityId: string,
 	imapInstances: Map<string, ImapFlow>,
 ): Promise<ImapFlow | undefined> {
+	const existing = imapInstances.get(identityId);
+
+	if (existing?.authenticated && existing?.usable) {
+		return existing;
+	}
+	if (existing) {
+		imapInstances.delete(identityId);
+
+		try {
+			existing.removeAllListeners();
+			// Keep a no-op error listener: a late "error" from the closing
+			// socket must not become an uncaught exception.
+			existing.on("error", () => {});
+			existing.close();
+		} catch (err) {
+			console.warn(
+				`[IMAP:${identityId}] Failed to close stale client`,
+				err,
+			);
+		}
+	}
+
 	try {
 		const [identity] = await db
 			.select()
 			.from(identities)
-			.where(eq(identities.id, identityId));
+			.where(eq(identities.id, identityId))
+			.limit(1);
 
-		if (!identity || !identity.smtpAccountId) {
+		if (!identity?.smtpAccountId) {
 			return;
 		}
 
@@ -122,83 +85,102 @@ async function connectClient(
 			? JSON.parse(secrets.vault.decrypted_secret)
 			: {};
 
+		// User supplied host: refuse cloud metadata / link-local (and private
+		// ranges with MAIL_HOST_BLOCK_PRIVATE_NETWORKS=true).
+		await assertHostAllowed(String(credentials.IMAP_HOST ?? ""), mailHostPolicy());
+
 		const client = new ImapFlow({
 			host: credentials.IMAP_HOST,
-			port: credentials.IMAP_PORT,
+			port: Number(credentials.IMAP_PORT),
 			secure:
-				credentials.IMAP_SECURE === "true" || credentials.IMAP_SECURE === true,
+				credentials.IMAP_SECURE === "true" ||
+				credentials.IMAP_SECURE === true,
+
 			auth: {
 				user: credentials.IMAP_USERNAME,
 				pass: credentials.IMAP_PASSWORD,
 			},
+
+			/*
+			 * Keep this unchanged for now.
+			 *
+			 * We'll deal with timeout behavior separately once the
+			 * reconnect ownership issue is fixed.
+			 */
+			socketTimeout: 60_000,
+
 			logger: {
 				error(data: any) {
-					console.error(`[IMAP:${identityId}]`, data.msg ?? data);
+					console.error(
+						`[IMAP:${identityId}]`,
+						data?.msg ?? data,
+					);
 				},
-				warn() {},
+				warn(data: any) {
+					console.warn(
+						`[IMAP:${identityId}]`,
+						data?.msg ?? data,
+					);
+				},
 				info() {},
 				debug() {},
 			},
+
 			logRaw: false,
+		});
+
+		/*
+		 * Register lifecycle handlers before connecting so we don't
+		 * miss an early close/error event.
+		 */
+		client.once("close", () => {
+			/*
+			 * Only remove this client if it is still the active client.
+			 * A newer connection may already have replaced it.
+			 */
+			if (imapInstances.get(identityId) === client) {
+				imapInstances.delete(identityId);
+			}
+
+			console.warn(`[IMAP:${identityId}] Disconnected (close)`);
+		});
+
+		// `on`, not `once`: a second "error" event without a listener would
+		// crash the process.
+		client.on("error", (err) => {
+			console.error(`[IMAP:${identityId}] Error:`, err);
+
+			if (imapInstances.get(identityId) === client) {
+				imapInstances.delete(identityId);
+			}
 		});
 
 		try {
 			await client.connect();
 		} catch (err) {
-			console.error(`[IMAP:${identityId}] connect() failed:`, err);
-			safeReconnect(identityId, imapInstances);
-			return;
-		}
+			console.error(
+				`[IMAP:${identityId}] connect() failed:`,
+				err,
+			);
 
-		// A successful connect resets the retry budget; otherwise an identity
-		// would stop reconnecting for good after three drops over its lifetime.
-		retryCounts.delete(identityId);
-		imapInstances.set(identityId, client);
-
-		const noopInterval = setInterval(
-			async () => {
-				try {
-					if (client.usable) {
-						await client.noop();
-					}
-				} catch (err) {
-					console.error(`[IMAP:${identityId}] NOOP failed:`, err);
-				}
-			},
-			5 * 60 * 1000,
-		);
-
-		let cleanedUp = false;
-		const cleanup = (reason: string) => {
-			// "error" is usually followed by "close": reconnect only once.
-			if (cleanedUp) return;
-			cleanedUp = true;
-			clearInterval(noopInterval);
-			// Only drop the map entry if it still points at this client.
 			if (imapInstances.get(identityId) === client) {
 				imapInstances.delete(identityId);
 			}
 
-			if (intentionallyClosed.has(client)) return;
+			try {
+				client.removeAllListeners();
+				client.on("error", () => {});
+				client.close();
+			} catch {}
 
-			console.warn(
-				`[IMAP:${identityId}] Disconnected (${reason}), reconnecting...`,
-			);
-			safeReconnect(identityId, imapInstances);
-		};
+			throw err;
+		}
 
-		client.once("close", () => cleanup("close"));
-		// `on`, not `once`: a second "error" without a listener would crash the
-		// process.
-		client.on("error", (err) => {
-			console.error(`[IMAP:${identityId}] Error:`, err);
-			cleanup("error");
-		});
+		imapInstances.set(identityId, client);
 
 		return client;
 	} catch (err) {
 		console.error(`[IMAP:${identityId}] init failed`, err);
-		safeReconnect(identityId, imapInstances);
-		return;
+		throw err;
 	}
 }

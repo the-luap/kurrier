@@ -14,9 +14,8 @@ import {
 	bigint,
 	numeric,
 	primaryKey,
+	pgSchema
 } from "drizzle-orm/pg-core";
-import { users } from "./supabase-schema";
-import { authenticatedRole, authUid } from "drizzle-orm/supabase";
 import { sql } from "drizzle-orm";
 import {
     AddressObjectJSON,
@@ -39,10 +38,28 @@ import {
     messageStatesList,
     providersList,
     webHookList,
+	jmapPresetList,
 } from "@schema";
 import { DnsRecord } from "@providers";
 import { nanoid } from "nanoid";
+import {
+	identitySelectCondition,
+	identitySelectConditionForIdentities,
+	workspaceCrudPolicies,
+	workspaceMutationPolicies,
+	workspaceTablePolicies
+} from "./helpers";
 
+export const authUid = sql`
+  nullif(current_setting('request.jwt.claim.sub', true), '')::uuid
+`;
+
+export const authWorkspaceId = sql`
+  nullif(current_setting('request.jwt.claim.workspace_id', true), '')::uuid
+`;
+
+export const DavAccountTypeEnum = pgEnum("dav_account_type", ["user", "workspace"]);
+export const WorkspaceRoleEnum = pgEnum("workspace_role", ["owner", "admin", "member"]);
 export const ProviderKindEnum = pgEnum("provider_kind", providersList);
 
 export const IdentityKindEnum = pgEnum("identity_kind", identityTypesList);
@@ -95,62 +112,52 @@ export const DraftMessageStatusEnum = pgEnum(
 
 export const MailSubscriptionStatusEnum = pgEnum("mail_subscription_status", mailSubscriptionStatusList);
 export const MailRuleActionTypeEnum = pgEnum("mail_rule_action_type", mailRulesActionsList);
+export const googleAccountStatusEnum = pgEnum("google_account_status", [
+	"connected",
+	"revoked",
+	"error",
+]);
+export const SecretManagedByEnum = pgEnum("secret_managed_by", [
+	"system",
+	"user",
+]);
+export const JmapPresetEnum = pgEnum(
+	"jmap_preset",
+	jmapPresetList,
+);
 
-export const secretsMeta = pgTable(
-	"secrets_meta",
+
+export const workspaces = pgTable(
+	"workspaces",
 	{
 		id: uuid("id").defaultRandom().primaryKey(),
+
 		ownerId: uuid("owner_id")
 			.references(() => users.id)
 			.notNull()
-			.default(sql`auth.uid()`),
-		name: text("name").notNull(),
-		description: text("description"),
-		vaultSecret: uuid("vault_secret").notNull(),
-	},
-	(t) => [
-		pgPolicy("select_own", {
-			for: "select",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("insert_own", {
-			for: "insert",
-			to: authenticatedRole,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("update_own", {
-			for: "update",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("delete_own", {
-			for: "delete",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
-	],
-).enableRLS();
+			.default(authUid),
 
-export const userAiSettings = pgTable(
-	"user_ai_settings",
-	{
-		id: uuid("id").defaultRandom().primaryKey(),
-		ownerId: uuid("owner_id")
-			.references(() => users.id, { onDelete: "cascade" })
+		publicId: text("public_id")
 			.notNull()
-			.default(sql`auth.uid()`),
-		provider: text("provider").notNull().default("ollama"),
-		baseUrl: text("base_url").notNull().default("http://localhost:11434"),
-		model: text("model").notNull().default("gemma3:12b"),
-		apiKey: text("api_key"),
-		systemPrompt: text("system_prompt"),
-		temperature: numeric("temperature", { precision: 4, scale: 2 })
+			.$defaultFn(() => nanoid(10)),
+
+		name: text("name").notNull(),
+
+		metaData: jsonb("meta").$type<Record<string, any> | null>().default(sql`null`),
+
+		defaultIdentityId: uuid("default_identity_id")
+			.references(() => identities.id, { onDelete: "set null" })
+			.default(sql`null`),
+
+		storageBytesUsed: bigint("storage_bytes_used", { mode: "number" }).notNull().default(0),
+		isStorageOverLimit: boolean("is_storage_over_limit")
 			.notNull()
-			.default("0.4"),
-		maxTokens: integer("max_tokens").notNull().default(700),
-		enabled: boolean("enabled").notNull().default(false),
+			.default(false),
+
+		theme: text("theme").notNull().default("indigo"),
+		customColor: text("custom_color"),
+		logoKey: text("logo_key"),
+
 		createdAt: timestamp("created_at", { withTimezone: true })
 			.defaultNow()
 			.notNull(),
@@ -159,28 +166,174 @@ export const userAiSettings = pgTable(
 			.notNull(),
 	},
 	(t) => [
-		uniqueIndex("uniq_user_ai_settings_owner_provider").on(t.ownerId, t.provider),
-		pgPolicy("user_ai_settings_select_own", {
+		uniqueIndex("uniq_workspace_public_id").on(t.publicId),
+		index("idx_workspace_owner").on(t.ownerId),
+		index("ix_workspaces_default_identity").on(t.defaultIdentityId),
+
+		...workspaceTablePolicies(t)
+	],
+).enableRLS();
+
+export const workspaceMembers = pgTable(
+	"workspace_members",
+	{
+		id: uuid("id").defaultRandom().primaryKey(),
+
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id, { onDelete: "cascade" })
+			.notNull(),
+
+		userId: uuid("user_id")
+			.references(() => users.id, { onDelete: "cascade" })
+			.notNull(),
+
+		role: WorkspaceRoleEnum("role").notNull().default("member"),
+
+		metaData: jsonb("meta").$type<Record<string, any> | null>().default(sql`null`),
+
+		createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+		updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+	},
+	(t) => [
+		uniqueIndex("uniq_workspace_member").on(t.workspaceId, t.userId),
+		index("idx_workspace_members_workspace").on(t.workspaceId),
+		index("idx_workspace_members_user").on(t.userId),
+		...workspaceCrudPolicies(t, "workspace_members"),
+	],
+).enableRLS();
+
+
+export const authSchema = pgSchema('auth');
+
+export const users = authSchema.table(
+	"users",
+	{
+		id: uuid("id").defaultRandom().primaryKey(),
+		email: text("email").notNull(),
+		passwordHash: text("password_hash").notNull(),
+
+		createdAt: timestamp("created_at", { withTimezone: true })
+			.defaultNow()
+			.notNull(),
+	},
+	(t) => {
+
+		return [
+			uniqueIndex("ux_users_email").on(t.email),
+			pgPolicy("users_select_self", {
+				for: "select",
+				to: "kurrier",
+				using: sql`${t.id} = ${authUid}`,
+			}),
+			pgPolicy("users_update_self", {
+				for: "update",
+				to: "kurrier",
+				using: sql`${t.id} = ${authUid}`,
+				withCheck: sql`${t.id} = ${authUid}`,
+			}),
+		]
+	},
+).enableRLS();
+
+
+export const workspaceIdentityMembers = pgTable(
+	"workspace_identity_members",
+	{
+		id: uuid("id").defaultRandom().primaryKey(),
+
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
+
+		identityId: uuid("identity_id")
+			.references(() => identities.id, { onDelete: "cascade" })
+			.notNull(),
+
+		userId: uuid("user_id")
+			.references(() => users.id)
+			.notNull()
+			.default(authUid),
+
+		metaData: jsonb("meta")
+			.$type<Record<string, any> | null>()
+			.default(sql`null`),
+
+		createdAt: timestamp("created_at", { withTimezone: true })
+			.defaultNow()
+			.notNull(),
+		updatedAt: timestamp("updated_at", { withTimezone: true })
+			.defaultNow()
+			.notNull(),
+	},
+	(t) => [
+		uniqueIndex("ux_identity_member_unique").on(
+			t.workspaceId,
+			t.identityId,
+			t.userId,
+		),
+
+		index("ix_identity_members_workspace").on(t.workspaceId),
+		index("ix_identity_members_identity").on(t.identityId),
+		index("ix_identity_members_user").on(t.userId),
+
+		index("ix_wim_user_identity").on(t.userId, t.identityId),
+
+		pgPolicy("workspace_identity_members_select", {
 			for: "select",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
+			to: "kurrier",
+			using: sql`
+            ${t.workspaceId} = ${authWorkspaceId}
+            AND ${t.userId} = ${authUid}
+          `,
 		}),
-		pgPolicy("user_ai_settings_insert_own", {
-			for: "insert",
-			to: authenticatedRole,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("user_ai_settings_update_own", {
-			for: "update",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("user_ai_settings_delete_own", {
-			for: "delete",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
+		...workspaceMutationPolicies(t, "workspace_identity_members"),
+
+	],
+).enableRLS();
+
+
+
+
+export const secretsMeta = pgTable(
+	"secrets_meta",
+	{
+		id: uuid("id").defaultRandom().primaryKey(),
+		ownerId: uuid("owner_id")
+			.references(() => users.id)
+			.notNull()
+			.default(authUid),
+		name: text("name").notNull(),
+		description: text("description"),
+		// vaultSecret: uuid("vault_secret").notNull(),
+
+		encryptedValue: text("encrypted_value").notNull(),
+		iv: text("iv").notNull(),
+		authTag: text("auth_tag").notNull(),
+
+		managedBy: SecretManagedByEnum("managed_by")
+			.notNull()
+			.default("system"),
+
+		keyVersion: integer("key_version").notNull().default(1),
+
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
+	},
+	(t) => [
+		index("ix_secrets_meta_workspace").on(t.workspaceId),
+		index("ix_secrets_meta_owner").on(t.ownerId),
+		index("ix_secrets_meta_managed_by").on(
+			t.workspaceId,
+			t.managedBy,
+		),
+		uniqueIndex("ux_secrets_meta_workspace_name").on(
+			t.workspaceId,
+			t.name
+		),
+		...workspaceCrudPolicies(t, "secrets_meta"),
 	],
 ).enableRLS();
 
@@ -191,9 +344,14 @@ export const providers = pgTable(
 		ownerId: uuid("owner_id")
 			.references(() => users.id)
 			.notNull()
-			.default(sql`auth.uid()`),
+			.default(authUid),
 		type: ProviderKindEnum("type").notNull(),
 		metaData: jsonb("meta").$type<Record<string, any> | null>().default(null),
+
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
 
 		createdAt: timestamp("created_at", { withTimezone: true })
 			.defaultNow()
@@ -203,28 +361,9 @@ export const providers = pgTable(
 			.notNull(),
 	},
 	(t) => [
-		uniqueIndex("uniq_provider_per_user").on(t.ownerId, t.type),
-		pgPolicy("providers_select_own", {
-			for: "select",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("providers_insert_own", {
-			for: "insert",
-			to: authenticatedRole,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("providers_update_own", {
-			for: "update",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("providers_delete_own", {
-			for: "delete",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
+		index("ix_providers_workspace").on(t.workspaceId),
+		uniqueIndex("ux_providers_owner_type_workspace").on(t.ownerId, t.type, t.workspaceId),
+		...workspaceCrudPolicies(t, "providers"),
 	],
 ).enableRLS();
 
@@ -238,6 +377,10 @@ export const providerSecrets = pgTable(
 		secretId: uuid("secret_id")
 			.references(() => secretsMeta.id, { onDelete: "cascade" })
 			.notNull(),
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
 		createdAt: timestamp("created_at", { withTimezone: true })
 			.defaultNow()
 			.notNull(),
@@ -246,67 +389,11 @@ export const providerSecrets = pgTable(
 			.notNull(),
 	},
 	(t) => [
-		pgPolicy("provsec_select_own", {
-			for: "select",
-			to: authenticatedRole,
-			using: sql`
-        exists (
-          select 1 from ${providers} p
-          where p.id = ${t.providerId}
-            and p.owner_id = ${authUid}
-        )
-      `,
-		}),
-		pgPolicy("provsec_insert_own", {
-			for: "insert",
-			to: authenticatedRole,
-			withCheck: sql`
-        exists (
-          select 1 from ${providers} p
-          where p.id = ${t.providerId}
-            and p.owner_id = ${authUid}
-        )
-        and exists (
-          select 1 from ${secretsMeta} s
-          where s.id = ${t.secretId}
-            and s.owner_id = ${authUid}
-        )
-      `,
-		}),
-		pgPolicy("provsec_update_own", {
-			for: "update",
-			to: authenticatedRole,
-			using: sql`
-        exists (
-          select 1 from ${providers} p
-          where p.id = ${t.providerId}
-            and p.owner_id = ${authUid}
-        )
-      `,
-			withCheck: sql`
-        exists (
-          select 1 from ${providers} p
-          where p.id = ${t.providerId}
-            and p.owner_id = ${authUid}
-        )
-        and exists (
-          select 1 from ${secretsMeta} s
-          where s.id = ${t.secretId}
-            and s.owner_id = ${authUid}
-        )
-      `,
-		}),
-		pgPolicy("provsec_delete_own", {
-			for: "delete",
-			to: authenticatedRole,
-			using: sql`
-        exists (
-          select 1 from ${providers} p
-          where p.id = ${t.providerId}
-            and p.owner_id = ${authUid}
-        )
-      `,
-		}),
+		uniqueIndex("ux_provider_secret").on(t.providerId, t.secretId),
+		index("ix_provider_secret_provider").on(t.providerId),
+		index("ix_provider_secret_secret").on(t.secretId),
+		index("ix_provider_secret_secret_provider").on(t.secretId, t.providerId),
+		...workspaceCrudPolicies(t, "provider_secrets"),
 	],
 ).enableRLS();
 
@@ -317,7 +404,11 @@ export const smtpAccounts = pgTable(
 		ownerId: uuid("owner_id")
 			.references(() => users.id)
 			.notNull()
-			.default(sql`auth.uid()`),
+			.default(authUid),
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
 		createdAt: timestamp("created_at", { withTimezone: true })
 			.defaultNow()
 			.notNull(),
@@ -326,27 +417,8 @@ export const smtpAccounts = pgTable(
 			.notNull(),
 	},
 	(t) => [
-		pgPolicy("smtp_select_own", {
-			for: "select",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("smtp_insert_own", {
-			for: "insert",
-			to: authenticatedRole,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("smtp_update_own", {
-			for: "update",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("smtp_delete_own", {
-			for: "delete",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
+		index("ix_smtp_accounts_workspace").on(t.workspaceId),
+		...workspaceCrudPolicies(t, "smtp_accounts"),
 	],
 ).enableRLS();
 
@@ -360,6 +432,10 @@ export const smtpAccountSecrets = pgTable(
 		secretId: uuid("secret_id")
 			.references(() => secretsMeta.id, { onDelete: "cascade" })
 			.notNull(),
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
 		createdAt: timestamp("created_at", { withTimezone: true })
 			.defaultNow()
 			.notNull(),
@@ -368,53 +444,9 @@ export const smtpAccountSecrets = pgTable(
 			.notNull(),
 	},
 	(t) => [
-		pgPolicy("smtpsec_select_own", {
-			for: "select",
-			to: authenticatedRole,
-			using: sql`
-        exists (select 1 from ${smtpAccounts} a
-                where a.id = ${t.accountId}
-                  and a.owner_id = ${authUid})
-      `,
-		}),
-		pgPolicy("smtpsec_insert_own", {
-			for: "insert",
-			to: authenticatedRole,
-			withCheck: sql`
-        exists (select 1 from ${smtpAccounts} a
-                where a.id = ${t.accountId}
-                  and a.owner_id = ${authUid})
-        and exists (select 1 from ${secretsMeta} s
-                    where s.id = ${t.secretId}
-                      and s.owner_id = ${authUid})
-      `,
-		}),
-		pgPolicy("smtpsec_update_own", {
-			for: "update",
-			to: authenticatedRole,
-			using: sql`
-        exists (select 1 from ${smtpAccounts} a
-                where a.id = ${t.accountId}
-                  and a.owner_id = ${authUid})
-      `,
-			withCheck: sql`
-        exists (select 1 from ${smtpAccounts} a
-                where a.id = ${t.accountId}
-                  and a.owner_id = ${authUid})
-        and exists (select 1 from ${secretsMeta} s
-                    where s.id = ${t.secretId}
-                      and s.owner_id = ${authUid})
-      `,
-		}),
-		pgPolicy("smtpsec_delete_own", {
-			for: "delete",
-			to: authenticatedRole,
-			using: sql`
-        exists (select 1 from ${smtpAccounts} a
-                where a.id = ${t.accountId}
-                  and a.owner_id = ${authUid})
-      `,
-		}),
+		uniqueIndex("ux_smtp_account_secret").on(t.accountId, t.secretId),
+		index("ix_smtp_account_secret_secret").on(t.secretId),
+		...workspaceCrudPolicies(t, "smtp_account_secrets"),
 	],
 ).enableRLS();
 
@@ -426,7 +458,7 @@ export const identities = pgTable(
 		ownerId: uuid("owner_id")
 			.references(() => users.id)
 			.notNull()
-			.default(sql`auth.uid()`),
+			.default(authUid),
 
 		kind: IdentityKindEnum("kind").notNull(),
 		publicId: text("public_id")
@@ -435,8 +467,9 @@ export const identities = pgTable(
 
 		value: text("value").notNull(), // domain or email address
 		displayName: text("display_name"),
-		signatureHtml: text("signature_html"),
 		incomingDomain: boolean("incoming_domain").default(false),
+
+		sharedWithWorkspace: boolean("shared_with_workspace").notNull().default(false),
 
 		domainIdentityId: uuid("domain_identity_id")
 			.references(() => identities.id, { onDelete: "set null" })
@@ -448,6 +481,10 @@ export const identities = pgTable(
 		smtpAccountId: uuid("smtp_account_id").references(() => smtpAccounts.id), // Custom SMTP
 
 		status: IdentityStatusEnum("status").notNull().default("unverified"),
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
 		createdAt: timestamp("created_at", { withTimezone: true })
 			.defaultNow()
 			.notNull(),
@@ -456,30 +493,18 @@ export const identities = pgTable(
 			.notNull(),
 	},
 	(t) => [
-		uniqueIndex("uniq_identity_per_user").on(t.ownerId, t.kind, t.value),
+		index("ix_identities_workspace").on(t.workspaceId),
+		uniqueIndex("uniq_identity_per_workspace").on(t.workspaceId, t.kind, t.value),
 		uniqueIndex("uniq_identity_public_id").on(t.publicId),
-
-		pgPolicy("identities_select_own", {
+		index("ix_identities_domain_identity").on(t.domainIdentityId),
+		index("ix_identities_provider").on(t.providerId),
+		index("ix_identities_smtp_account").on(t.smtpAccountId),
+		pgPolicy("identities_select", {
 			for: "select",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
+			to: "kurrier",
+			using: identitySelectConditionForIdentities(t),
 		}),
-		pgPolicy("identities_insert_own", {
-			for: "insert",
-			to: authenticatedRole,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("identities_update_own", {
-			for: "update",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("identities_delete_own", {
-			for: "delete",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
+		...workspaceMutationPolicies(t, "identities"),
 	],
 ).enableRLS();
 
@@ -490,7 +515,7 @@ export const mailboxes = pgTable(
 		ownerId: uuid("owner_id")
 			.references(() => users.id)
 			.notNull()
-			.default(sql`auth.uid()`),
+			.default(authUid),
 		identityId: uuid("identity_id")
 			.references(() => identities.id, { onDelete: "cascade" })
 			.notNull(),
@@ -505,6 +530,10 @@ export const mailboxes = pgTable(
 		slug: text("slug"),
 		isDefault: boolean("is_default").notNull().default(false),
 		metaData: jsonb("meta").$type<Record<string, any> | null>().default(null),
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
 		createdAt: timestamp("created_at", { withTimezone: true })
 			.defaultNow()
 			.notNull(),
@@ -513,6 +542,7 @@ export const mailboxes = pgTable(
 			.notNull(),
 	},
 	(t) => [
+		index("ix_mailboxes_workspace").on(t.workspaceId),
 		uniqueIndex("uniq_mailbox_public_id").on(t.publicId),
 		uniqueIndex("uniq_default_mailbox_per_kind")
 			.on(t.identityId, t.kind)
@@ -522,28 +552,7 @@ export const mailboxes = pgTable(
 			.where(sql`${t.slug} IS NOT NULL`),
 
 		index("idx_mailbox_parent").on(t.parentId),
-
-		pgPolicy("mailboxes_select_own", {
-			for: "select",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("mailboxes_insert_own", {
-			for: "insert",
-			to: authenticatedRole,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("mailboxes_update_own", {
-			for: "update",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("mailboxes_delete_own", {
-			for: "delete",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
+		...workspaceCrudPolicies(t, "mailboxes"),
 	],
 ).enableRLS();
 
@@ -595,13 +604,13 @@ export const messageAttachments = pgTable(
 		ownerId: uuid("owner_id")
 			.references(() => users.id)
 			.notNull()
-			.default(sql`auth.uid()`),
+			.default(authUid),
 
 		messageId: uuid("message_id")
 			.references(() => messages.id, { onDelete: "cascade" })
 			.notNull(),
 
-		bucketId: text("bucket_id").notNull().default("attachments"),
+		bucketId: text("bucket_id").notNull().default(process.env.S3_BUCKET || "kurrier-store"),
 		path: text("path").notNull(), // e.g. "private/<userId>/<messageId>/<uuid>.<ext>"
 
 		filenameOriginal: text("filename_original"),
@@ -612,6 +621,11 @@ export const messageAttachments = pgTable(
 		isInline: boolean("is_inline").notNull().default(false),
 		checksum: text("checksum"),
 
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
+
 		createdAt: timestamp("created_at", { withTimezone: true })
 			.defaultNow()
 			.notNull(),
@@ -620,31 +634,11 @@ export const messageAttachments = pgTable(
 			.notNull(),
 	},
 	(t) => [
+		index("ix_message_attachments_workspace").on(t.workspaceId),
 		index("idx_msg_attachments_message").on(t.messageId),
 		uniqueIndex("uniq_bucket_path").on(t.bucketId, t.path),
 		index("idx_msg_attachments_cid").on(t.cid),
-
-		pgPolicy("message_attachments_select_own", {
-			for: "select",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("message_attachments_insert_own", {
-			for: "insert",
-			to: authenticatedRole,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("message_attachments_update_own", {
-			for: "update",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("message_attachments_delete_own", {
-			for: "delete",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
+		...workspaceCrudPolicies(t, "message_attachments"),
 	],
 ).enableRLS();
 
@@ -655,7 +649,7 @@ export const messages = pgTable(
 		ownerId: uuid("owner_id")
 			.references(() => users.id)
 			.notNull()
-			.default(sql`auth.uid()`),
+			.default(authUid),
 		mailboxId: uuid("mailbox_id")
 			.references(() => mailboxes.id, { onDelete: "cascade" })
 			.notNull(),
@@ -704,6 +698,11 @@ export const messages = pgTable(
 
 		metaData: jsonb("meta").$type<Record<string, any> | null>().default(null),
 
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
+
 		createdAt: timestamp("created_at", { withTimezone: true })
 			.defaultNow()
 			.notNull(),
@@ -714,6 +713,16 @@ export const messages = pgTable(
 	(t) => [
 		uniqueIndex("uniq_message_public_id").on(t.publicId),
 		index("idx_messages_priority").on(t.priority),
+		index("ix_messages_workspace").on(t.workspaceId),
+		// fork (db/init/migrations/fork_004_indexes.sql): dashboard counts per workspace
+		index("ix_messages_workspace_created").on(t.workspaceId, t.createdAt),
+		// fork (fork_006_message_lookup_indexes.sql): IMAP sync lookups
+		index("ix_messages_owner_message_id").on(t.ownerId, t.messageId),
+		index("ix_messages_mailbox_imap_uid").on(
+			t.mailboxId,
+			sql`((${t.metaData} -> 'imap' ->> 'uid')::bigint)`,
+		),
+
 
 		uniqueIndex("uniq_mailbox_message_id").on(t.mailboxId, t.messageId),
 		index("idx_messages_in_reply_to").on(t.inReplyTo),
@@ -722,30 +731,8 @@ export const messages = pgTable(
 
 		index("idx_messages_mailbox_date").on(t.mailboxId, t.date),
 		index("idx_messages_mailbox_seen_date").on(t.mailboxId, t.seen, t.date),
-		// RLS adds owner_id = auth.uid() to every query (dashboard counts).
-		index("idx_messages_owner_created").on(t.ownerId, t.createdAt),
-
-		pgPolicy("messages_select_own", {
-			for: "select",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("messages_insert_own", {
-			for: "insert",
-			to: authenticatedRole,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("messages_update_own", {
-			for: "update",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("messages_delete_own", {
-			for: "delete",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
+		index("ix_messages_thread").on(t.threadId),
+		...workspaceCrudPolicies(t, "messages"),
 	],
 ).enableRLS();
 
@@ -757,7 +744,7 @@ export const threads = pgTable(
 		ownerId: uuid("owner_id")
 			.references(() => users.id)
 			.notNull()
-			.default(sql`auth.uid()`),
+			.default(authUid),
 
 		lastMessageDate: timestamp("last_message_date", { withTimezone: true }), // nullable until first msg written
 		lastMessageId: uuid("last_message_id")
@@ -765,6 +752,11 @@ export const threads = pgTable(
 			.default(null),
 
 		messageCount: integer("message_count").notNull().default(0),
+
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
 
 		createdAt: timestamp("created_at", { withTimezone: true })
 			.defaultNow()
@@ -774,30 +766,8 @@ export const threads = pgTable(
 			.notNull(),
 	},
 	(t) => [
-		index("idx_threads_owner_lastdate").on(t.ownerId, t.lastMessageDate, t.id),
-		index("idx_threads_owner_id").on(t.ownerId, t.id),
-
-		pgPolicy("threads_select_own", {
-			for: "select",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("threads_insert_own", {
-			for: "insert",
-			to: authenticatedRole,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("threads_update_own", {
-			for: "update",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("threads_delete_own", {
-			for: "delete",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
+		index("ix_threads_workspace").on(t.workspaceId),
+		...workspaceCrudPolicies(t, "threads"),
 	],
 ).enableRLS();
 
@@ -815,7 +785,7 @@ export const mailboxThreads = pgTable(
 		ownerId: uuid("owner_id")
 			.references(() => users.id)
 			.notNull()
-			.default(sql`auth.uid()`),
+			.default(authUid),
 
 		identityId: uuid("identity_id")
 			.references(() => identities.id, { onDelete: "cascade" })
@@ -852,6 +822,11 @@ export const mailboxThreads = pgTable(
 			null,
 		),
 
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
+
 		createdAt: timestamp("created_at", { withTimezone: true })
 			.notNull()
 			.defaultNow(),
@@ -861,6 +836,8 @@ export const mailboxThreads = pgTable(
 	},
 
 	(t) => [
+		index("ix_mailbox_threads_workspace").on(t.workspaceId),
+		index("ix_mailbox_threads_identity").on(t.identityId),
 		primaryKey({
 			name: "pk_mailbox_threads",
 			columns: [t.threadId, t.mailboxId],
@@ -887,35 +864,17 @@ export const mailboxThreads = pgTable(
 		index("ix_mbth_mailbox_starred").on(t.mailboxId, t.starred),
 
 		index("ix_mbth_mailbox_snoozed_until").on(t.mailboxId, t.snoozedUntil),
-		index("ix_mbth_mailbox_unsnoozed_at").on(t.mailboxId, t.unsnoozedAt),
-		// Account-wide snoozed list / sidebar counts.
-		index("ix_mbth_owner_snoozed_until")
-			.on(t.ownerId, t.snoozedUntil)
+		// fork (fork_004_indexes.sql): account-wide snoozed view
+		index("ix_mbth_workspace_snoozed_until")
+			.on(t.workspaceId, t.snoozedUntil)
 			.where(sql`${t.snoozedUntil} IS NOT NULL`),
-
-		uniqueIndex("ux_mbth_thread_mailbox").on(t.threadId, t.mailboxId),
-
-		pgPolicy("mbth_select_own", {
+		index("ix_mbth_mailbox_unsnoozed_at").on(t.mailboxId, t.unsnoozedAt),
+		pgPolicy("mailbox_threads_select", {
 			for: "select",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
+			to: "kurrier",
+			using: identitySelectCondition(t, t.identityId),
 		}),
-		pgPolicy("mbth_insert_own", {
-			for: "insert",
-			to: authenticatedRole,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("mbth_update_own", {
-			for: "update",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("mbth_delete_own", {
-			for: "delete",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
+		...workspaceMutationPolicies(t, "mailbox_threads"),
 	],
 ).enableRLS();
 
@@ -927,7 +886,7 @@ export const apiKeys = pgTable(
 		ownerId: uuid("owner_id")
 			.references(() => users.id)
 			.notNull()
-			.default(sql`auth.uid()`),
+			.default(authUid),
 
 		name: text("name").notNull(),
 
@@ -947,6 +906,11 @@ export const apiKeys = pgTable(
 
 		metaData: jsonb("meta").$type<Record<string, any> | null>().default(null),
 
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
+
 		createdAt: timestamp("created_at", { withTimezone: true })
 			.defaultNow()
 			.notNull(),
@@ -955,34 +919,13 @@ export const apiKeys = pgTable(
 			.$onUpdateFn(() => sql`now()`),
 	},
 	(t) => [
-		uniqueIndex("ux_api_keys_owner_name").on(t.ownerId, t.name),
-		uniqueIndex("ux_api_keys_owner_prefix").on(t.ownerId, t.keyPrefix),
-
-		index("ix_api_keys_owner").on(t.ownerId),
+		index("ix_api_keys_workspace").on(t.workspaceId),
+		uniqueIndex("ux_api_keys_workspace_name").on(t.workspaceId, t.name),
+		uniqueIndex("ux_api_keys_workspace_prefix").on(t.workspaceId, t.keyPrefix),
+		index("ix_api_keys_workspace_owner").on(t.workspaceId, t.ownerId),
 		index("ix_api_keys_expires").on(t.expiresAt),
 		index("ix_api_keys_revoked").on(t.revokedAt),
-
-		pgPolicy("apikeys_select_own", {
-			for: "select",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("apikeys_insert_own", {
-			for: "insert",
-			to: authenticatedRole,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("apikeys_update_own", {
-			for: "update",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("apikeys_delete_own", {
-			for: "delete",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
+		...workspaceCrudPolicies(t, "api_keys"),
 	],
 ).enableRLS();
 
@@ -993,7 +936,7 @@ export const webhooks = pgTable(
 		ownerId: uuid("owner_id")
 			.references(() => users.id)
 			.notNull()
-			.default(sql`auth.uid()`),
+			.default(authUid),
 
 		identityId: uuid("identity_id")
 			.references(() => identities.id, { onDelete: "set null" })
@@ -1008,6 +951,11 @@ export const webhooks = pgTable(
 
 		metaData: jsonb("meta").$type<Record<string, any> | null>().default(null),
 
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
+
 		createdAt: timestamp("created_at", { withTimezone: true })
 			.defaultNow()
 			.notNull(),
@@ -1016,31 +964,10 @@ export const webhooks = pgTable(
 			.notNull(),
 	},
 	(t) => [
-		index("ix_webhooks_owner").on(t.ownerId),
+		index("ix_webhooks_workspace").on(t.workspaceId),
 		index("ix_webhooks_identity").on(t.identityId),
-		index("ix_webhooks_enabled").on(t.enabled),
-
-		pgPolicy("webhooks_select_own", {
-			for: "select",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("webhooks_insert_own", {
-			for: "insert",
-			to: authenticatedRole,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("webhooks_update_own", {
-			for: "update",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("webhooks_delete_own", {
-			for: "delete",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
+		index("ix_webhooks_enabled").on(t.workspaceId, t.enabled),
+		...workspaceCrudPolicies(t, "webhooks"),
 	],
 ).enableRLS();
 
@@ -1052,7 +979,7 @@ export const labels = pgTable(
 		ownerId: uuid("owner_id")
 			.references(() => users.id)
 			.notNull()
-			.default(sql`auth.uid()`),
+			.default(authUid),
 
 		publicId: text("public_id")
 			.notNull()
@@ -1065,6 +992,10 @@ export const labels = pgTable(
 			.references(() => labels.id, { onDelete: "cascade" })
 			.default(null),
 
+		identityId: uuid("identity_id")
+			.references(() => identities.id, { onDelete: "cascade" })
+			.default(null),
+
 		colorBg: text("color_bg"),
 		colorText: text("color_text"),
 
@@ -1074,6 +1005,11 @@ export const labels = pgTable(
 
 		scope: LabelScopeEnum("scope").notNull().default("thread"),
 
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
+
 		createdAt: timestamp("created_at", { withTimezone: true })
 			.defaultNow()
 			.notNull(),
@@ -1082,29 +1018,21 @@ export const labels = pgTable(
 			.notNull(),
 	},
 	(t) => [
-		uniqueIndex("uniq_label_owner_scope_slug").on(t.ownerId, t.scope, t.slug),
-
-		pgPolicy("labels_select_own", {
+		uniqueIndex("uniq_label_workspace_scope_slug").on(t.workspaceId, t.scope, t.slug),
+		index("ix_labels_identity").on(t.identityId),
+		index("ix_labels_workspace_identity").on(t.workspaceId, t.identityId),
+		pgPolicy("labels_select", {
 			for: "select",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
+			to: "kurrier",
+			using: sql`
+				${t.workspaceId} = ${authWorkspaceId}
+				AND (
+				${t.identityId} IS NULL
+				OR ${identitySelectCondition(t, t.identityId)}
+				)
+			`,
 		}),
-		pgPolicy("labels_insert_own", {
-			for: "insert",
-			to: authenticatedRole,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("labels_update_own", {
-			for: "update",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("labels_delete_own", {
-			for: "delete",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
+		...workspaceMutationPolicies(t, "labels")
 	],
 ).enableRLS();
 
@@ -1126,7 +1054,12 @@ export const mailboxThreadLabels = pgTable(
 		ownerId: uuid("owner_id")
 			.references(() => users.id)
 			.notNull()
-			.default(sql`auth.uid()`),
+			.default(authUid),
+
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
 
 		createdAt: timestamp("created_at", { withTimezone: true })
 			.defaultNow()
@@ -1137,31 +1070,9 @@ export const mailboxThreadLabels = pgTable(
 			name: "pk_mailbox_thread_labels",
 			columns: [t.threadId, t.mailboxId, t.labelId],
 		}),
-
 		index("ix_mbtlabel_mailbox_label").on(t.mailboxId, t.labelId),
 		index("ix_mbtlabel_label").on(t.labelId),
-
-		pgPolicy("mbtlabel_select_own", {
-			for: "select",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("mbtlabel_insert_own", {
-			for: "insert",
-			to: authenticatedRole,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("mbtlabel_update_own", {
-			for: "update",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("mbtlabel_delete_own", {
-			for: "delete",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
+		...workspaceCrudPolicies(t, "mailbox_thread_labels"),
 	],
 ).enableRLS();
 
@@ -1172,7 +1083,7 @@ export const contacts = pgTable(
 		ownerId: uuid("owner_id")
 			.references(() => users.id)
 			.notNull()
-			.default(sql`auth.uid()`),
+			.default(authUid),
 		publicId: text("public_id")
 			.notNull()
 			.$defaultFn(() => nanoid(10)),
@@ -1206,14 +1117,19 @@ export const contacts = pgTable(
 			.default([]),
 		dob: text("dob"),
 		notes: text("notes"),
-		addressBookId: uuid("address_book_id").references(() => addressBooks.id, {
-			onDelete: "set null",
-		}),
 
 		davEtag: text("dav_etag"),
 		davUri: text("dav_uri"),
 
+		addressBookId: uuid("address_book_id")
+			.references(() => addressBooks.id, { onDelete: "cascade" })
+			.notNull(),
+
 		metaData: jsonb("meta").$type<Record<string, any> | null>().default(null),
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
 		createdAt: timestamp("created_at", { withTimezone: true })
 			.defaultNow()
 			.notNull(),
@@ -1222,34 +1138,26 @@ export const contacts = pgTable(
 			.notNull(),
 	},
 	(t) => [
-		uniqueIndex("ux_contacts_owner_public_id").on(t.ownerId, t.publicId),
-		index("ix_contacts_owner").on(t.ownerId),
-		index("ix_contacts_name").on(t.ownerId, t.lastName, t.firstName),
-		uniqueIndex("ux_contacts_owner_dav_uri")
-			.on(t.ownerId, t.davUri)
-			.where(sql`${t.davUri} IS NOT NULL`),
-
-		pgPolicy("contacts_select_own", {
+		uniqueIndex("ux_contacts_workspace_public_id").on(t.workspaceId, t.publicId),
+		index("ix_contacts_workspace").on(t.workspaceId),
+		index("ix_contacts_workspace_name").on(t.workspaceId, t.lastName, t.firstName),
+		index("ix_contacts_address_book").on(t.addressBookId),
+		pgPolicy("contacts_select", {
 			for: "select",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
+			to: "kurrier",
+			using: sql`
+				${t.workspaceId} = ${authWorkspaceId}
+				AND EXISTS (
+				SELECT 1
+				FROM address_books ab
+				WHERE
+				ab.id = ${t.addressBookId}
+				AND ab.workspace_id = ${authWorkspaceId}
+				AND ab.owner_id = ${authUid}
+				)
+			`
 		}),
-		pgPolicy("contacts_insert_own", {
-			for: "insert",
-			to: authenticatedRole,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("contacts_update_own", {
-			for: "update",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("contacts_delete_own", {
-			for: "delete",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
+		...workspaceMutationPolicies(t, "contacts"),
 	],
 ).enableRLS();
 
@@ -1267,7 +1175,12 @@ export const contactLabels = pgTable(
 		ownerId: uuid("owner_id")
 			.references(() => users.id)
 			.notNull()
-			.default(sql`auth.uid()`),
+			.default(authUid),
+
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
 
 		createdAt: timestamp("created_at", { withTimezone: true })
 			.defaultNow()
@@ -1278,24 +1191,20 @@ export const contactLabels = pgTable(
 			name: "pk_contact_labels",
 			columns: [t.contactId, t.labelId],
 		}),
-
 		index("ix_contact_labels_label").on(t.labelId),
-
-		pgPolicy("contact_labels_select_own", {
+		pgPolicy("contact_labels_select", {
 			for: "select",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
+			to: "kurrier",
+			using: sql`
+				${t.workspaceId} = ${authWorkspaceId}
+				AND EXISTS (
+				SELECT 1
+				FROM contacts c
+				WHERE c.id = ${t.contactId}
+				)
+			`,
 		}),
-		pgPolicy("contact_labels_insert_own", {
-			for: "insert",
-			to: authenticatedRole,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("contact_labels_delete_own", {
-			for: "delete",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
+		...workspaceMutationPolicies(t, "contact_labels"),
 	],
 ).enableRLS();
 
@@ -1303,10 +1212,6 @@ export const appMigrations = pgTable(
 	"app_migrations",
 	{
 		id: uuid("id").defaultRandom().primaryKey(),
-		ownerId: uuid("owner_id")
-			.references(() => users.id)
-			.notNull()
-			.default(sql`auth.uid()`),
 		version: text("version").notNull(),
 		scope: text("scope").notNull().default("default"),
 		createdAt: timestamp("created_at", { withTimezone: true })
@@ -1314,30 +1219,9 @@ export const appMigrations = pgTable(
 			.notNull(),
 	},
 	(t) => [
-		uniqueIndex("ux_app_migrations_owner_version").on(t.ownerId, t.version),
-		pgPolicy("app_migrations_select_own", {
-			for: "select",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("app_migrations_insert_own", {
-			for: "insert",
-			to: authenticatedRole,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("app_migrations_update_own", {
-			for: "update",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("app_migrations_delete_own", {
-			for: "delete",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
+		uniqueIndex("ux_app_migrations_scope_version").on(t.scope, t.version),
 	],
-).enableRLS();
+)
 
 export const davAccounts = pgTable(
 	"dav_accounts",
@@ -1346,12 +1230,19 @@ export const davAccounts = pgTable(
 		ownerId: uuid("owner_id")
 			.references(() => users.id)
 			.notNull()
-			.default(sql`auth.uid()`),
+			.default(authUid),
+		type: DavAccountTypeEnum("type")
+			.notNull()
+			.default("user"),
 		username: text("username").notNull(),
 		secretId: uuid("secret_id")
 			.references(() => secretsMeta.id, { onDelete: "cascade" })
 			.notNull(),
 		basePath: text("base_path").notNull().default("/"),
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
 		createdAt: timestamp("created_at", { withTimezone: true })
 			.defaultNow()
 			.notNull(),
@@ -1360,28 +1251,25 @@ export const davAccounts = pgTable(
 			.notNull(),
 	},
 	(t) => [
-		uniqueIndex("ux_dav_accounts_owner_username").on(t.ownerId, t.username),
-		pgPolicy("dav_accounts_select_own", {
+		uniqueIndex("ux_dav_workspace_account")
+			.on(t.workspaceId)
+			.where(sql`${t.type} = 'workspace'`),
+		uniqueIndex("ux_dav_username").on(t.username),
+		pgPolicy("dav_accounts_select", {
 			for: "select",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
+			to: "kurrier",
+			using: sql`
+				${t.workspaceId} = ${authWorkspaceId}
+				AND (
+				(
+				${t.type} = 'user'
+				AND ${t.ownerId} = ${authUid}
+				)
+				OR ${t.type} = 'workspace'
+				)
+			`,
 		}),
-		pgPolicy("dav_accounts_insert_own", {
-			for: "insert",
-			to: authenticatedRole,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("dav_accounts_update_own", {
-			for: "update",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("dav_accounts_delete_own", {
-			for: "delete",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
+		...workspaceMutationPolicies(t, "dav_accounts"),
 	],
 ).enableRLS();
 
@@ -1392,7 +1280,7 @@ export const addressBooks = pgTable(
 		ownerId: uuid("owner_id")
 			.references(() => users.id)
 			.notNull()
-			.default(sql`auth.uid()`),
+			.default(authUid),
 		davAccountId: uuid("dav_account_id")
 			.references(() => davAccounts.id, { onDelete: "cascade" })
 			.notNull(),
@@ -1400,8 +1288,10 @@ export const addressBooks = pgTable(
 		davAddressBookId: integer("dav_address_book_id"),
 		name: text("name").notNull(),
 		slug: text("slug").notNull(),
-		remotePath: text("remote_path").notNull(),
-		isDefault: boolean("is_default").notNull().default(true),
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
 		createdAt: timestamp("created_at", { withTimezone: true })
 			.defaultNow()
 			.notNull(),
@@ -1410,32 +1300,16 @@ export const addressBooks = pgTable(
 			.notNull(),
 	},
 	(t) => [
-		uniqueIndex("ux_address_books_owner_slug").on(t.ownerId, t.slug),
+		index("ix_address_books_dav_id").on(t.davAddressBookId),
+		uniqueIndex("ux_address_books_workspace_owner").on(t.workspaceId, t.ownerId),
 		index("ix_address_books_owner").on(t.ownerId),
 		index("ix_address_books_dav_account").on(t.davAccountId),
-		index("ix_address_books_default").on(t.ownerId, t.isDefault),
-
-		pgPolicy("address_books_select_own", {
+		pgPolicy("address_books_select", {
 			for: "select",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
+			to: "kurrier",
+			using: sql`${t.ownerId} = ${authUid} AND ${t.workspaceId} = ${authWorkspaceId}`,
 		}),
-		pgPolicy("address_books_insert_own", {
-			for: "insert",
-			to: authenticatedRole,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("address_books_update_own", {
-			for: "update",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("address_books_delete_own", {
-			for: "delete",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
+		...workspaceMutationPolicies(t, "address_books"),
 	],
 ).enableRLS();
 
@@ -1448,7 +1322,7 @@ export const calendars = pgTable(
 		ownerId: uuid("owner_id")
 			.references(() => users.id)
 			.notNull()
-			.default(sql`auth.uid()`),
+			.default(authUid),
 		publicId: text("public_id")
 			.notNull()
 			.$defaultFn(() => nanoid(10)),
@@ -1458,14 +1332,18 @@ export const calendars = pgTable(
 			.notNull(),
 		davSyncToken: text("dav_sync_token"),
 		davCalendarId: integer("dav_calendar_id"),
-		remotePath: text("remote_path").notNull(),
+
+		identityId: uuid("identity_id").references(() => identities.id, { onDelete: "cascade" }).default(null),
 
 		name: text("name").notNull(),
 		slug: text("slug").notNull(),
 		color: text("color"),
 		timezone: text("timezone").notNull().default("UTC"),
-		isDefault: boolean("is_default").notNull().default(false),
 
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
 		createdAt: timestamp("created_at", { withTimezone: true })
 			.defaultNow()
 			.notNull(),
@@ -1474,32 +1352,18 @@ export const calendars = pgTable(
 			.notNull(),
 	},
 	(t) => [
-		uniqueIndex("ux_calendars_owner_slug").on(t.ownerId, t.slug),
+		uniqueIndex("ux_calendars_workspace_slug").on(t.workspaceId, t.slug),
+		uniqueIndex("ux_calendar_workspace_identity").on(t.workspaceId, t.identityId),
 		index("ix_calendars_owner").on(t.ownerId),
 		index("ix_calendars_dav_account").on(t.davAccountId),
-		index("ix_calendars_default").on(t.ownerId, t.isDefault),
-
-		pgPolicy("calendars_select_own", {
+		index("ix_calendars_identity").on(t.identityId),
+		index("ix_calendars_workspace_identity").on(t.workspaceId, t.identityId),
+		pgPolicy("calendars_select", {
 			for: "select",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
+			to: "kurrier",
+			using: identitySelectCondition(t, t.identityId),
 		}),
-		pgPolicy("calendars_insert_own", {
-			for: "insert",
-			to: authenticatedRole,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("calendars_update_own", {
-			for: "update",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("calendars_delete_own", {
-			for: "delete",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
+		...workspaceMutationPolicies(t, "calendars"),
 	],
 ).enableRLS();
 
@@ -1510,7 +1374,7 @@ export const calendarEvents = pgTable(
 		ownerId: uuid("owner_id")
 			.references(() => users.id)
 			.notNull()
-			.default(sql`auth.uid()`),
+			.default(authUid),
 
 		calendarId: uuid("calendar_id")
 			.references(() => calendars.id, { onDelete: "cascade" })
@@ -1550,6 +1414,11 @@ export const calendarEvents = pgTable(
 			.notNull()
 			.default(sql`'{}'::timestamptz[]`),
 
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
+
 		createdAt: timestamp("created_at", { withTimezone: true })
 			.defaultNow()
 			.notNull(),
@@ -1561,35 +1430,16 @@ export const calendarEvents = pgTable(
 		index("ix_calendar_events_owner").on(t.ownerId),
 		index("ix_calendar_events_calendar").on(t.calendarId),
 		index("ix_calendar_events_calendar_start").on(t.calendarId, t.startsAt),
-		// Invitation preview looks events up by iCal UID.
-		index("ix_calendar_events_owner_ical_uid")
-			.on(t.ownerId, t.icalUid)
+		index("ix_calendar_events_calendar_dav_uri").on(t.calendarId, t.davUri),
+		index("ix_calendar_events_organizer_identity").on(t.organizerIdentityId),
+		uniqueIndex("ux_calendar_events_calendar_ical_uid")
+			.on(t.calendarId, t.icalUid)
 			.where(sql`${t.icalUid} IS NOT NULL`),
-		uniqueIndex("ix_calendar_events_owner_dav_uri")
-			.on(t.ownerId, t.davUri)
-			.where(sql`${t.davUri} IS NOT NULL`),
-
-		pgPolicy("calendar_events_select_own", {
-			for: "select",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("calendar_events_insert_own", {
-			for: "insert",
-			to: authenticatedRole,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("calendar_events_update_own", {
-			for: "update",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("calendar_events_delete_own", {
-			for: "delete",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
+		// fork (fork_004_indexes.sql): invitation lookup by iCal UID across calendars
+		index("ix_calendar_events_workspace_ical_uid")
+			.on(t.workspaceId, t.icalUid)
+			.where(sql`${t.icalUid} IS NOT NULL`),
+		...workspaceCrudPolicies(t, "calendar_events"),
 	],
 ).enableRLS();
 
@@ -1601,15 +1451,11 @@ export const calendarEventAttendees = pgTable(
 		ownerId: uuid("owner_id")
 			.references(() => users.id)
 			.notNull()
-			.default(sql`auth.uid()`),
+			.default(authUid),
 
 		eventId: uuid("event_id")
 			.references(() => calendarEvents.id, { onDelete: "cascade" })
 			.notNull(),
-
-		contactId: uuid("contact_id")
-			.references(() => contacts.id, { onDelete: "set null" })
-			.default(null),
 
 		email: text("email").notNull(),
 		name: text("name"),
@@ -1624,6 +1470,11 @@ export const calendarEventAttendees = pgTable(
 		isOrganizer: boolean("is_organizer").notNull().default(false),
 		metaData: jsonb("meta").$type<Record<string, any> | null>().default(null),
 
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
+
 		createdAt: timestamp("created_at", { withTimezone: true })
 			.defaultNow()
 			.notNull(),
@@ -1636,28 +1487,7 @@ export const calendarEventAttendees = pgTable(
 		index("ix_event_attendees_event").on(t.eventId),
 		index("ix_event_attendees_email").on(t.email),
 		uniqueIndex("ux_event_attendees_event_email").on(t.eventId, t.email),
-
-		pgPolicy("event_attendees_select_own", {
-			for: "select",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("event_attendees_insert_own", {
-			for: "insert",
-			to: authenticatedRole,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("event_attendees_update_own", {
-			for: "update",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("event_attendees_delete_own", {
-			for: "delete",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
+		...workspaceCrudPolicies(t, "calendar_event_attendees"),
 	],
 ).enableRLS();
 
@@ -1668,7 +1498,7 @@ export const driveVolumes = pgTable(
 		ownerId: uuid("owner_id")
 			.references(() => users.id)
 			.notNull()
-			.default(sql`auth.uid()`),
+			.default(authUid),
 
 		publicId: text("public_id")
 			.notNull()
@@ -1687,6 +1517,11 @@ export const driveVolumes = pgTable(
 
 		metaData: jsonb("meta").$type<Record<string, any> | null>().default(null),
 
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
+
 		createdAt: timestamp("created_at", { withTimezone: true })
 			.defaultNow()
 			.notNull(),
@@ -1695,33 +1530,11 @@ export const driveVolumes = pgTable(
 			.notNull(),
 	},
 	(t) => [
-		uniqueIndex("ux_drive_volumes_owner_code").on(t.ownerId, t.code),
+		uniqueIndex("ux_drive_volumes_workspace_code").on(t.workspaceId, t.code),
 		uniqueIndex("ux_drive_volumes_public_id").on(t.publicId),
-
 		index("ix_drive_volumes_owner").on(t.ownerId),
 		index("ix_drive_volumes_provider").on(t.providerId),
-
-		pgPolicy("drive_volumes_select_own", {
-			for: "select",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("drive_volumes_insert_own", {
-			for: "insert",
-			to: authenticatedRole,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("drive_volumes_update_own", {
-			for: "update",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("drive_volumes_delete_own", {
-			for: "delete",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
+		...workspaceCrudPolicies(t, "drive_volumes"),
 	],
 ).enableRLS();
 
@@ -1733,7 +1546,7 @@ export const driveEntries = pgTable(
 		ownerId: uuid("owner_id")
 			.references(() => users.id)
 			.notNull()
-			.default(sql`auth.uid()`),
+			.default(authUid),
 
 		volumeId: uuid("volume_id")
 			.references(() => driveVolumes.id, { onDelete: "cascade" })
@@ -1751,6 +1564,11 @@ export const driveEntries = pgTable(
 
 		metaData: jsonb("meta").$type<Record<string, any> | null>().default(null),
 
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
+
 		createdAt: timestamp("created_at", { withTimezone: true })
 			.defaultNow()
 			.notNull(),
@@ -1764,31 +1582,9 @@ export const driveEntries = pgTable(
 			t.volumeId,
 			t.path,
 		),
-
 		index("ix_drive_entries_owner").on(t.ownerId),
 		index("ix_drive_entries_volume").on(t.volumeId),
-
-		pgPolicy("drive_entries_select_own", {
-			for: "select",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("drive_entries_insert_own", {
-			for: "insert",
-			to: authenticatedRole,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("drive_entries_update_own", {
-			for: "update",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("drive_entries_delete_own", {
-			for: "delete",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
+		...workspaceCrudPolicies(t, "drive_entries"),
 	],
 ).enableRLS();
 
@@ -1800,7 +1596,7 @@ export const driveUploadIntents = pgTable(
 		ownerId: uuid("owner_id")
 			.references(() => users.id)
 			.notNull()
-			.default(sql`auth.uid()`),
+			.default(authUid),
 
 		volumeId: uuid("volume_id")
 			.references(() => driveVolumes.id, { onDelete: "cascade" })
@@ -1811,6 +1607,12 @@ export const driveUploadIntents = pgTable(
 		singleUse: boolean("single_use").notNull().default(true),
 		usedAt: timestamp("used_at", { withTimezone: true }),
 		expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
+
 		createdAt: timestamp("created_at", { withTimezone: true })
 			.defaultNow()
 			.notNull(),
@@ -1821,32 +1623,10 @@ export const driveUploadIntents = pgTable(
 	},
 	(t) => [
 		uniqueIndex("ux_drive_upload_intents_token").on(t.token),
-
 		index("ix_drive_upload_intents_owner").on(t.ownerId),
 		index("ix_drive_upload_intents_volume").on(t.volumeId),
 		index("ix_drive_upload_intents_expires").on(t.expiresAt),
-
-		pgPolicy("drive_upload_intents_select_own", {
-			for: "select",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("drive_upload_intents_insert_own", {
-			for: "insert",
-			to: authenticatedRole,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("drive_upload_intents_update_own", {
-			for: "update",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("drive_upload_intents_delete_own", {
-			for: "delete",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
+		...workspaceCrudPolicies(t, "drive_upload_intents"),
 	],
 ).enableRLS();
 
@@ -1857,7 +1637,7 @@ export const draftMessages = pgTable(
 		ownerId: uuid("owner_id")
 			.references(() => users.id)
 			.notNull()
-			.default(sql`auth.uid()`),
+			.default(authUid),
 		mailboxId: uuid("mailbox_id")
 			.references(() => mailboxes.id, { onDelete: "cascade" })
 			.notNull(),
@@ -1869,6 +1649,11 @@ export const draftMessages = pgTable(
 			null,
 		),
 		payload: jsonb("payload").$type<Record<string, any>>().notNull(),
+
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
 
 		createdAt: timestamp("created_at", { withTimezone: true })
 			.defaultNow()
@@ -1884,28 +1669,15 @@ export const draftMessages = pgTable(
 		index("ix_draft_messages_status").on(t.status),
 		index("ix_draft_messages_scheduled_at").on(t.scheduledAt),
 		index("ix_draft_messages_updated_at").on(t.updatedAt),
-
-		pgPolicy("draft_messages_select_own", {
-			for: "select",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("draft_messages_insert_own", {
-			for: "insert",
-			to: authenticatedRole,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("draft_messages_update_own", {
-			for: "update",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-			withCheck: sql`${t.ownerId} = ${authUid}`,
-		}),
-		pgPolicy("draft_messages_delete_own", {
-			for: "delete",
-			to: authenticatedRole,
-			using: sql`${t.ownerId} = ${authUid}`,
-		}),
+		// fork (fork_005_draft_messages_indexes.sql): draft lists and counts
+		index("ix_draft_messages_owner_status_updated").on(
+			t.ownerId,
+			t.status,
+			t.updatedAt,
+		),
+		index("ix_draft_messages_workspace_status").on(t.workspaceId, t.status),
+		index("ix_draft_messages_identity_status").on(t.identityId, t.status),
+		...workspaceCrudPolicies(t, "draft_messages"),
 	],
 ).enableRLS();
 
@@ -1918,7 +1690,7 @@ export const mailSubscriptions = pgTable(
         ownerId: uuid("owner_id")
             .references(() => users.id)
             .notNull()
-            .default(sql`auth.uid()`),
+            .default(authUid),
 
         subscriptionKey: text("subscription_key").notNull(),
 
@@ -1934,35 +1706,19 @@ export const mailSubscriptions = pgTable(
         lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
         unsubscribedAt: timestamp("unsubscribed_at", { withTimezone: true }),
 
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
+
         createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
         updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
     },
     (t) => [
-        uniqueIndex("uniq_mail_subscriptions_owner_key").on(t.ownerId, t.subscriptionKey),
-        index("idx_mail_subscriptions_status").on(t.ownerId, t.status),
-        index("idx_mail_subscriptions_last_seen").on(t.ownerId, t.lastSeenAt),
-
-        pgPolicy("mail_subscriptions_select_own", {
-            for: "select",
-            to: authenticatedRole,
-            using: sql`${t.ownerId} = ${authUid}`,
-        }),
-        pgPolicy("mail_subscriptions_insert_own", {
-            for: "insert",
-            to: authenticatedRole,
-            withCheck: sql`${t.ownerId} = ${authUid}`,
-        }),
-        pgPolicy("mail_subscriptions_update_own", {
-            for: "update",
-            to: authenticatedRole,
-            using: sql`${t.ownerId} = ${authUid}`,
-            withCheck: sql`${t.ownerId} = ${authUid}`,
-        }),
-        pgPolicy("mail_subscriptions_delete_own", {
-            for: "delete",
-            to: authenticatedRole,
-            using: sql`${t.ownerId} = ${authUid}`,
-        }),
+		uniqueIndex("uniq_mail_subscriptions_workspace_key").on(t.workspaceId, t.subscriptionKey),
+		index("idx_mail_subscriptions_status").on(t.ownerId, t.status),
+		index("idx_mail_subscriptions_last_seen").on(t.ownerId, t.lastSeenAt),
+		...workspaceCrudPolicies(t, "mail_subscriptions"),
     ],
 ).enableRLS();
 
@@ -1977,7 +1733,7 @@ export const mailRules = pgTable(
         ownerId: uuid("owner_id")
             .references(() => users.id)
             .notNull()
-            .default(sql`auth.uid()`),
+            .default(authUid),
 
         identityId: uuid("identity_id")
             .references(() => identities.id, { onDelete: "cascade" })
@@ -1991,34 +1747,23 @@ export const mailRules = pgTable(
 
         match: jsonb("match").$type<MailRuleMatchV1>().notNull(),
 
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
+
         createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
         updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
     },
     (t) => [
-        index("idx_mail_rules_owner_identity").on(t.ownerId, t.identityId),
-        index("idx_mail_rules_owner_enabled_priority").on(t.ownerId, t.enabled, t.priority),
-
-        pgPolicy("mail_rules_select_own", {
-            for: "select",
-            to: authenticatedRole,
-            using: sql`${t.ownerId} = ${authUid}`,
-        }),
-        pgPolicy("mail_rules_insert_own", {
-            for: "insert",
-            to: authenticatedRole,
-            withCheck: sql`${t.ownerId} = ${authUid}`,
-        }),
-        pgPolicy("mail_rules_update_own", {
-            for: "update",
-            to: authenticatedRole,
-            using: sql`${t.ownerId} = ${authUid}`,
-            withCheck: sql`${t.ownerId} = ${authUid}`,
-        }),
-        pgPolicy("mail_rules_delete_own", {
-            for: "delete",
-            to: authenticatedRole,
-            using: sql`${t.ownerId} = ${authUid}`,
-        }),
+		index("idx_mail_rules_owner_identity").on(t.ownerId, t.identityId),
+		index("ix_mail_rules_identity").on(t.identityId),
+		index("idx_mail_rules_owner_enabled_priority").on(
+			t.ownerId,
+			t.enabled,
+			t.priority,
+		),
+		...workspaceCrudPolicies(t, "mail_rules"),
     ],
 ).enableRLS();
 
@@ -2029,7 +1774,7 @@ export const mailRuleActions = pgTable(
         ownerId: uuid("owner_id")
             .references(() => users.id)
             .notNull()
-            .default(sql`auth.uid()`),
+            .default(authUid),
         ruleId: uuid("rule_id")
             .references(() => mailRules.id, { onDelete: "cascade" })
             .notNull(),
@@ -2038,33 +1783,655 @@ export const mailRuleActions = pgTable(
         params: jsonb("params")
             .$type<{ labelId?: string; mailboxId?: string } | null>()
             .default(sql`null`),
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
         createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
         updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
     },
     (t) => [
-        uniqueIndex("uniq_mail_rule_actions_rule_order").on(t.ruleId, t.order),
-        index("idx_mail_rule_actions_rule").on(t.ruleId),
-
-        pgPolicy("mail_rule_actions_select_own", {
-            for: "select",
-            to: authenticatedRole,
-            using: sql`${t.ownerId} = ${authUid}`,
-        }),
-        pgPolicy("mail_rule_actions_insert_own", {
-            for: "insert",
-            to: authenticatedRole,
-            withCheck: sql`${t.ownerId} = ${authUid}`,
-        }),
-        pgPolicy("mail_rule_actions_update_own", {
-            for: "update",
-            to: authenticatedRole,
-            using: sql`${t.ownerId} = ${authUid}`,
-            withCheck: sql`${t.ownerId} = ${authUid}`,
-        }),
-        pgPolicy("mail_rule_actions_delete_own", {
-            for: "delete",
-            to: authenticatedRole,
-            using: sql`${t.ownerId} = ${authUid}`,
-        }),
+		uniqueIndex("uniq_mail_rule_actions_rule_order").on(t.ruleId, t.order),
+		index("idx_mail_rule_actions_rule").on(t.ruleId),
+		...workspaceCrudPolicies(t, "mail_rule_actions"),
     ],
+).enableRLS();
+
+export const authProviders = pgTable(
+	"auth_providers",
+	{
+		id: uuid("id").defaultRandom().primaryKey(),
+
+		ownerId: uuid("owner_id")
+			.references(() => users.id)
+			.notNull()
+			.default(authUid),
+
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
+
+		type: text("type").notNull().default("oidc"),
+
+		name: text("name").notNull(),
+
+		issuerUrl: text("issuer_url").notNull(),
+		clientId: text("client_id").notNull(),
+
+		clientSecretId: uuid("client_secret_id")
+			.references(() => secretsMeta.id, { onDelete: "set null" }),
+
+		scopes: text("scopes").notNull().default("openid email profile"),
+
+		enabled: boolean("enabled").notNull().default(true),
+
+		metaData: jsonb("meta").$type<Record<string, any> | null>().default(null),
+
+		createdAt: timestamp("created_at", { withTimezone: true })
+			.defaultNow()
+			.notNull(),
+
+		updatedAt: timestamp("updated_at", { withTimezone: true })
+			.defaultNow()
+			.notNull(),
+	},
+	(t) => [
+		index("ix_auth_providers_workspace").on(t.workspaceId),
+		uniqueIndex("ux_auth_provider_workspace_name").on(t.workspaceId, t.name),
+		...workspaceCrudPolicies(t, "auth_providers"),
+	],
+).enableRLS();
+
+export const authAccounts = pgTable(
+	"auth_accounts",
+	{
+		id: uuid("id").defaultRandom().primaryKey(),
+
+		userId: uuid("user_id")
+			.references(() => users.id, { onDelete: "cascade" })
+			.notNull(),
+
+		providerId: uuid("provider_id")
+			.references(() => authProviders.id, { onDelete: "cascade" })
+			.notNull(),
+
+		providerUserId: text("provider_user_id").notNull(),
+
+		email: text("email").notNull(),
+
+		emailVerified: boolean("email_verified").notNull().default(false),
+
+		rawProfile: jsonb("raw_profile").$type<Record<string, any> | null>().default(null),
+
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
+
+		createdAt: timestamp("created_at", { withTimezone: true })
+			.defaultNow()
+			.notNull(),
+
+		updatedAt: timestamp("updated_at", { withTimezone: true })
+			.defaultNow()
+			.notNull(),
+	},
+	(t) => [
+		index("ix_auth_accounts_workspace").on(t.workspaceId),
+		index("ix_auth_accounts_user").on(t.userId),
+		index("ix_auth_accounts_provider").on(t.providerId),
+
+		uniqueIndex("ux_auth_account_provider_subject").on(
+			t.providerId,
+			t.providerUserId,
+		),
+
+		uniqueIndex("ux_auth_account_workspace_email_provider").on(
+			t.workspaceId,
+			t.email,
+			t.providerId,
+		),
+
+		...workspaceCrudPolicies(t, "auth_accounts"),
+	],
+).enableRLS();
+
+
+export const googleAccounts = pgTable(
+	"google_accounts",
+	{
+		id: uuid("id").defaultRandom().primaryKey(),
+
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id, { onDelete: "cascade" })
+			.notNull()
+			.default(authWorkspaceId),
+
+		ownerId: uuid("owner_id")
+			.references(() => users.id, { onDelete: "cascade" })
+			.notNull()
+			.default(authUid),
+
+		identityId: uuid("identity_id")
+			.references(() => identities.id, { onDelete: "set null" })
+			.default(sql`null`),
+
+		googleSub: text("google_sub").notNull(),
+
+		email: text("email").notNull(),
+
+		name: text("name").default(sql`null`),
+
+		pictureUrl: text("picture_url").default(sql`null`),
+
+		accessTokenSecretId: uuid("access_token_secret_id")
+			.references(() => secretsMeta.id, { onDelete: "set null" })
+			.default(sql`null`),
+
+		refreshTokenSecretId: uuid("refresh_token_secret_id")
+			.references(() => secretsMeta.id, { onDelete: "set null" })
+			.default(sql`null`),
+
+		scopes: text("scopes").array().notNull().default(sql`'{}'::text[]`),
+
+		expiresAt: timestamp("expires_at", { withTimezone: true }).default(sql`null`),
+
+		status: googleAccountStatusEnum("status")
+			.notNull()
+			.default("connected"),
+
+		lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }).default(sql`null`),
+
+		lastError: text("last_error").default(sql`null`),
+
+		metaData: jsonb("meta")
+			.$type<Record<string, any> | null>()
+			.default(sql`null`),
+
+		createdAt: timestamp("created_at", { withTimezone: true })
+			.defaultNow()
+			.notNull(),
+
+		updatedAt: timestamp("updated_at", { withTimezone: true })
+			.defaultNow()
+			.notNull(),
+	},
+	(t) => [
+		uniqueIndex("ux_google_accounts_workspace_sub").on(
+			t.workspaceId,
+			t.googleSub,
+		),
+
+		uniqueIndex("ux_google_accounts_workspace_email").on(
+			t.workspaceId,
+			t.email,
+		),
+
+		index("ix_google_accounts_workspace").on(t.workspaceId),
+		index("ix_google_accounts_owner").on(t.ownerId),
+		index("ix_google_accounts_identity").on(t.identityId),
+		index("ix_google_accounts_status").on(t.workspaceId, t.status),
+
+		...workspaceCrudPolicies(t, "google_accounts"),
+	],
+).enableRLS();
+
+
+export const jmapAccounts = pgTable(
+	"jmap_accounts",
+	{
+		id: uuid("id").defaultRandom().primaryKey(),
+
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id, { onDelete: "cascade" })
+			.notNull()
+			.default(authWorkspaceId),
+
+		ownerId: uuid("owner_id")
+			.references(() => users.id, { onDelete: "cascade" })
+			.notNull()
+			.default(authUid),
+
+		providerId: uuid("provider_id")
+			.references(() => providers.id, { onDelete: "cascade" })
+			.notNull(),
+
+		identityId: uuid("identity_id")
+			.references(() => identities.id, { onDelete: "set null" })
+			.default(sql`null`),
+
+		accountId: text("account_id").notNull(),
+		username: text("username").notNull(),
+
+		sessionUrl: text("session_url").notNull(),
+
+		preset: JmapPresetEnum("preset"),
+
+		syncState: jsonb("sync_state")
+			.$type<{
+				email?: string;
+				mailbox?: string;
+				thread?: string;
+				submission?: string;
+			}>()
+			.default(sql`'{}'::jsonb`)
+			.notNull(),
+		tokenSecretId: uuid("token_secret_id")
+			.references(() => secretsMeta.id, { onDelete: "cascade" })
+			.notNull(),
+
+		metaData: jsonb("meta")
+			.$type<Record<string, any> | null>()
+			.default(sql`null`),
+
+		createdAt: timestamp("created_at", { withTimezone: true })
+			.defaultNow()
+			.notNull(),
+
+		updatedAt: timestamp("updated_at", { withTimezone: true })
+			.defaultNow()
+			.notNull(),
+	},
+	(t) => [
+		uniqueIndex("ux_jmap_accounts_provider_account").on(
+
+			t.providerId,
+			t.accountId,
+		),
+		uniqueIndex("ux_jmap_accounts_identity")
+			.on(t.identityId)
+			.where(sql`${t.identityId} IS NOT NULL`),
+		index("ix_jmap_accounts_workspace").on(t.workspaceId),
+		index("ix_jmap_accounts_owner").on(t.ownerId),
+		index("ix_jmap_accounts_provider").on(t.providerId),
+		pgPolicy("jmap_accounts_select", {
+			for: "select",
+			to: "kurrier",
+			using: identitySelectCondition(t, t.identityId),
+		}),
+		...workspaceMutationPolicies(t, "jmap_accounts"),
+	],
+).enableRLS();
+
+export const emailAssets = pgTable(
+	"email_assets",
+	{
+		id: uuid("id")
+			.defaultRandom()
+			.primaryKey(),
+
+		publicId: uuid("public_id")
+			.defaultRandom()
+			.notNull(),
+
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id, {
+				onDelete: "cascade",
+			})
+			.notNull()
+			.default(authWorkspaceId),
+
+		ownerId: uuid("owner_id")
+			.references(() => users.id, {
+				onDelete: "set null",
+			})
+			.default(authUid),
+
+		bucketId: text("bucket_id")
+			.notNull(),
+
+		path: text("path")
+			.notNull(),
+
+		filenameOriginal: text(
+			"filename_original",
+		).default(sql`null`),
+
+		contentType: text("content_type")
+			.notNull(),
+
+		sizeBytes: integer("size_bytes")
+			.notNull(),
+
+		revokedAt: timestamp("revoked_at", {
+			withTimezone: true,
+		}).default(sql`null`),
+
+		metaData: jsonb("meta")
+			.$type<Record<string, any> | null>()
+			.default(sql`null`),
+
+		createdAt: timestamp("created_at", {
+			withTimezone: true,
+		})
+			.defaultNow()
+			.notNull(),
+
+		updatedAt: timestamp("updated_at", {
+			withTimezone: true,
+		})
+			.defaultNow()
+			.notNull(),
+	},
+	(t) => [
+		uniqueIndex("ux_email_assets_public_id").on(
+			t.publicId,
+		),
+
+		uniqueIndex("ux_email_assets_bucket_path").on(
+			t.bucketId,
+			t.path,
+		),
+
+		index("ix_email_assets_workspace").on(
+			t.workspaceId,
+		),
+
+		index("ix_email_assets_owner").on(
+			t.ownerId,
+		),
+
+		...workspaceCrudPolicies(t, "email_assets"),
+	],
+).enableRLS();
+
+
+export const emailTemplates = pgTable(
+	"email_templates",
+	{
+		id: uuid("id")
+			.defaultRandom()
+			.primaryKey(),
+
+		publicId: uuid("public_id")
+			.defaultRandom()
+			.notNull(),
+
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id, {
+				onDelete: "cascade",
+			})
+			.notNull()
+			.default(authWorkspaceId),
+
+		ownerId: uuid("owner_id")
+			.references(() => users.id, {
+				onDelete: "set null",
+			})
+			.default(authUid),
+
+		name: text("name").notNull(),
+
+		subject: text("subject")
+			.notNull()
+			.default(""),
+
+		previewText: text("preview_text")
+			.notNull()
+			.default(""),
+
+		document: jsonb("document")
+			.$type<Record<string, unknown>>()
+			.notNull(),
+
+		metaData: jsonb("meta")
+			.$type<Record<string, unknown> | null>()
+			.default(sql`null`),
+
+		createdAt: timestamp("created_at", {
+			withTimezone: true,
+		})
+			.defaultNow()
+			.notNull(),
+
+		updatedAt: timestamp("updated_at", {
+			withTimezone: true,
+		})
+			.defaultNow()
+			.notNull(),
+	},
+	(t) => [
+		uniqueIndex("ux_email_templates_public_id").on(
+			t.publicId,
+		),
+
+		index("ix_email_templates_workspace").on(
+			t.workspaceId,
+		),
+
+		index("ix_email_templates_owner").on(
+			t.ownerId,
+		),
+
+		index("ix_email_templates_workspace_updated").on(
+			t.workspaceId,
+			t.updatedAt,
+		),
+
+		...workspaceCrudPolicies(
+			t,
+			"email_templates",
+		),
+	],
+).enableRLS();
+
+
+export const emailSignatures = pgTable(
+	"email_signatures",
+	{
+		id: uuid("id")
+			.defaultRandom()
+			.primaryKey(),
+
+		publicId: uuid("public_id")
+			.defaultRandom()
+			.notNull(),
+
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id, {
+				onDelete: "cascade",
+			})
+			.notNull()
+			.default(authWorkspaceId),
+
+		ownerId: uuid("owner_id")
+			.references(() => users.id, {
+				onDelete: "set null",
+			})
+			.default(authUid),
+
+		identityId: uuid("identity_id")
+			.references(() => identities.id, {
+				onDelete: "cascade",
+			})
+			.notNull(),
+
+		name: text("name")
+			.notNull(),
+
+		document: jsonb("document")
+			.$type<Record<string, unknown>>()
+			.notNull(),
+
+		isDefaultForNew: boolean(
+			"is_default_for_new",
+		)
+			.notNull()
+			.default(false),
+
+		isDefaultForReplyForward: boolean(
+			"is_default_for_reply_forward",
+		)
+			.notNull()
+			.default(false),
+
+		metaData: jsonb("meta")
+			.$type<Record<string, unknown> | null>()
+			.default(sql`null`),
+
+		createdAt: timestamp("created_at", {
+			withTimezone: true,
+		})
+			.defaultNow()
+			.notNull(),
+
+		updatedAt: timestamp("updated_at", {
+			withTimezone: true,
+		})
+			.defaultNow()
+			.notNull(),
+	},
+	(t) => [
+		uniqueIndex(
+			"ux_email_signatures_public_id",
+		).on(t.publicId),
+
+		uniqueIndex("ux_email_signatures_identity_name",).on(t.identityId, t.name,),
+		uniqueIndex("ux_email_signatures_default_new",).on(t.identityId).where(
+				sql`${t.isDefaultForNew} = true`,
+			),
+		uniqueIndex("ux_email_signatures_default_reply_forward",).on(t.identityId).where(
+				sql`${t.isDefaultForReplyForward} = true`,
+			),
+		index("ix_email_signatures_workspace",).on(t.workspaceId),
+		index("ix_email_signatures_owner",).on(t.ownerId),
+		index("ix_email_signatures_identity",).on(t.identityId),
+		index("ix_email_signatures_identity_updated",).on(
+			t.identityId,
+			t.updatedAt,
+		),
+		...workspaceCrudPolicies(
+			t,
+			"email_signatures",
+		),
+	],
+).enableRLS();
+
+export const driveShareLinks = pgTable(
+	"drive_share_links",
+	{
+		id: uuid("id").defaultRandom().primaryKey(),
+
+		ownerId: uuid("owner_id")
+			.references(() => users.id)
+			.notNull()
+			.default(authUid),
+
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id)
+			.notNull()
+			.default(authWorkspaceId),
+
+		entryId: uuid("entry_id")
+			.references(() => driveEntries.id, { onDelete: "cascade" })
+			.notNull(),
+
+		tokenHash: text("token_hash").notNull(),
+
+		expiresAt: timestamp("expires_at", {
+			withTimezone: true,
+		}).notNull(),
+
+		revokedAt: timestamp("revoked_at", {
+			withTimezone: true,
+		}),
+
+		createdAt: timestamp("created_at", {
+			withTimezone: true,
+		})
+			.defaultNow()
+			.notNull(),
+	},
+	(t) => [
+		uniqueIndex("ux_drive_share_links_token_hash").on(t.tokenHash),
+		index("ix_drive_share_links_entry").on(t.entryId),
+		index("ix_drive_share_links_expires").on(t.expiresAt),
+		...workspaceCrudPolicies(t, "drive_share_links"),
+	],
+).enableRLS();
+
+// ---------------------------------------------------------------------------
+// Fork: per-user AI provider settings (Ollama / LM Studio).
+// Migration: db/init/migrations/fork_001_user_ai_settings.sql (see db/FORK_MIGRATIONS.md).
+// Rows are private to (workspace, user): unlike workspaceCrudPolicies, every
+// policy also requires owner_id = current user.
+// The API key belongs in the vault (secrets_meta, via createSecret with
+// managedBy "system"); apiKeySecretId references it. apiKey is the legacy
+// plaintext column carried over from the v3 fork: move it into the vault on
+// the next save and set it to null.
+// ---------------------------------------------------------------------------
+const userAiSettingsOwnRow = (t: { workspaceId: any; ownerId: any }) =>
+	sql`${t.workspaceId} = ${authWorkspaceId} AND ${t.ownerId} = ${authUid}`;
+
+export const userAiSettings = pgTable(
+	"user_ai_settings",
+	{
+		id: uuid("id").defaultRandom().primaryKey(),
+
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id, { onDelete: "cascade" })
+			.notNull()
+			.default(authWorkspaceId),
+
+		ownerId: uuid("owner_id")
+			.references(() => users.id, { onDelete: "cascade" })
+			.notNull()
+			.default(authUid),
+
+		provider: text("provider").notNull().default("ollama"),
+		baseUrl: text("base_url").notNull().default("http://localhost:11434"),
+		model: text("model").notNull().default("gemma3:12b"),
+
+		/** @deprecated legacy plaintext key from the v3 fork; use apiKeySecretId */
+		apiKey: text("api_key"),
+		apiKeySecretId: uuid("api_key_secret_id").references(
+			() => secretsMeta.id,
+			{ onDelete: "set null" },
+		),
+
+		systemPrompt: text("system_prompt"),
+		temperature: numeric("temperature", { precision: 4, scale: 2 })
+			.notNull()
+			.default("0.4"),
+		maxTokens: integer("max_tokens").notNull().default(700),
+		enabled: boolean("enabled").notNull().default(false),
+
+		createdAt: timestamp("created_at", { withTimezone: true })
+			.defaultNow()
+			.notNull(),
+		updatedAt: timestamp("updated_at", { withTimezone: true })
+			.defaultNow()
+			.notNull(),
+	},
+	(t) => [
+		uniqueIndex("ux_user_ai_settings_workspace_owner_provider").on(
+			t.workspaceId,
+			t.ownerId,
+			t.provider,
+		),
+		index("ix_user_ai_settings_owner").on(t.ownerId),
+		index("ix_user_ai_settings_api_key_secret").on(t.apiKeySecretId),
+		pgPolicy("user_ai_settings_select_own", {
+			for: "select",
+			to: "kurrier",
+			using: userAiSettingsOwnRow(t),
+		}),
+		pgPolicy("user_ai_settings_insert_own", {
+			for: "insert",
+			to: "kurrier",
+			withCheck: userAiSettingsOwnRow(t),
+		}),
+		pgPolicy("user_ai_settings_update_own", {
+			for: "update",
+			to: "kurrier",
+			using: userAiSettingsOwnRow(t),
+			withCheck: userAiSettingsOwnRow(t),
+		}),
+		pgPolicy("user_ai_settings_delete_own", {
+			for: "delete",
+			to: "kurrier",
+			using: userAiSettingsOwnRow(t),
+		}),
+	],
 ).enableRLS();

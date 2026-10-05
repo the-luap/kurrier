@@ -1,18 +1,15 @@
 "use client";
 
-import { Divider } from "@mantine/core";
-import { useMediaQuery } from "@mantine/hooks";
-import type { PublicConfig } from "@schema";
-import type { UserResponse } from "@supabase/supabase-js";
 import { IconFrame } from "@tabler/icons-react";
-import { Calendar, Contact, HardDrive, Inbox, MailOpen } from "lucide-react";
+import {Calendar, Contact, HardDrive, Inbox, Mail, Settings2, X} from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import * as React from "react";
-import KurrierLogo from "@/components/common/kurrier-logo";
-import ThemeColorPicker from "@/components/common/theme-color-picker";
 import ThemeSwitch from "@/components/common/theme-switch";
-import { NavUser } from "@/components/ui/dashboards/workspace/nav-user";
+import { useOptionalDictionary } from "@/components/providers/dictionary-provider";
+import { useSiteFeatures } from "@/components/providers/site-features-provider";
+import { Button } from "@/components/ui/button";
+import { Separator } from "@/components/ui/separator";
 import {
 	Sidebar,
 	SidebarContent,
@@ -25,113 +22,115 @@ import {
 	SidebarMenuItem,
 	useSidebar,
 } from "@/components/ui/sidebar";
-import type { FetchIdentityMailboxListResult } from "@/lib/actions/mailbox";
-import { cn } from "@/lib/utils";
 
 type UnifiedSidebarProps = React.ComponentProps<typeof Sidebar> & {
-	/** @deprecated unused by the sidebar; kept optional for compatibility */
-	publicConfig?: PublicConfig;
-	user: UserResponse["data"]["user"];
-	/** @deprecated unused by the sidebar; kept optional for compatibility */
-	identityMailboxes?: FetchIdentityMailboxListResult;
+	navUserContent: React.ReactNode;
 	sidebarSectionContent?: React.ReactNode;
 	sidebarTopContent?: React.ReactNode;
+	workspacePublicId?: string;
 };
-
-type NavItem = {
-	title: string;
-	url: string;
-	icon: React.ComponentType<{ className?: string }>;
-	/** pathname fragment that marks this section as active */
-	match: string;
-};
-
-// Static: defined once at module level so it is not recreated per render.
-const NAV_MAIN: NavItem[] = [
-	{ title: "All Mail", url: "/dashboard/mail", icon: Inbox, match: "/mail" },
-	{
-		title: "Contacts",
-		url: "/dashboard/contacts",
-		icon: Contact,
-		match: "/contacts",
-	},
-	{
-		title: "Calendar",
-		url: "/dashboard/calendar",
-		icon: Calendar,
-		match: "/calendar",
-	},
-	{ title: "Drive", url: "/dashboard/drive", icon: HardDrive, match: "/drive" },
-	{
-		title: "Platform",
-		url: "/dashboard/platform/overview",
-		icon: IconFrame,
-		match: "/platform",
-	},
-];
-
-function sectionTitleForPath(pathName: string | null): string {
-	// Order matters: platform wins over the others (e.g. /platform/contacts).
-	for (const match of ["/platform", "/contacts", "/calendar", "/drive"]) {
-		if (pathName?.includes(match)) {
-			return NAV_MAIN.find((i) => i.match === match)?.title ?? "All Mail";
-		}
-	}
-	return "All Mail";
-}
 
 export function AppSidebar({ ...props }: UnifiedSidebarProps) {
+	const { drive } = useSiteFeatures();
 	const {
-		publicConfig: _publicConfig,
-		user,
-		identityMailboxes: _identityMailboxes,
 		sidebarSectionContent,
 		sidebarTopContent,
+		workspacePublicId,
+		navUserContent,
 		...restProps
 	} = props;
+	const { setOpen, setOpenMobile } = useSidebar();
+	const dict = useOptionalDictionary();
 
-	const isMobile = useMediaQuery("(max-width: 768px)");
+	const data = {
+		navMain: [
+			{
+				title: dict?.dashboard?.navMail ?? "All Mail",
+				url: `/w/${workspacePublicId}/dashboard/mail`,
+				icon: Inbox,
+				isActive: true,
+			},
+			{
+				title: dict?.dashboard?.navContacts ?? "Contacts",
+				url: `/w/${workspacePublicId}/dashboard/contacts`,
+				icon: Contact,
+				isActive: true,
+			},
+			{
+				title: dict?.dashboard?.navCalendar ?? "Calendar",
+				url: `/w/${workspacePublicId}/dashboard/calendar`,
+				icon: Calendar,
+				isActive: true,
+			},
+			...(drive
+				? [
+						{
+							title: dict?.dashboard?.navDrive ?? "Drive",
+							url: `/w/${workspacePublicId}/dashboard/drive`,
+							icon: HardDrive,
+							isActive: true,
+						},
+					]
+				: []),
+			{
+				title: dict?.dashboard?.navPlatform ?? "Platform",
+				url: `/w/${workspacePublicId}/dashboard/platform/overview`,
+				icon: IconFrame,
+				isActive: false,
+			},
+		],
+	};
+
 	const pathName = usePathname();
+	const isOnPlatform = pathName?.includes("/platform");
+	const isOnContacts = pathName?.includes("/contacts");
+	const isOnCalendar = pathName?.includes("/calendar");
+	const isOnDrive = pathName?.includes("/drive");
 
-	// Active item is derived from the URL. A click highlights the target
-	// immediately (optimistic) until the navigation changes the pathname.
-	const [pendingNav, setPendingNav] = React.useState<{
-		title: string;
-		fromPath: string | null;
-	} | null>(null);
-	const activeTitle =
-		pendingNav && pendingNav.fromPath === pathName
-			? pendingNav.title
-			: sectionTitleForPath(pathName);
+	type SidebarSection = "mail" | "contacts" | "platform" | "calendar" | "drive";
 
-	const { setOpen, toggleSidebar } = useSidebar();
+	const section: SidebarSection = isOnPlatform
+		? "platform"
+		: isOnContacts
+			? "contacts"
+			: isOnCalendar
+				? "calendar"
+				: isOnDrive
+					? "drive"
+					: "mail";
+
+	const activeItem =
+		data.navMain.find((item) => item.url.includes(`/${section}`)) ??
+		data.navMain[0];
+
+	React.useEffect(() => {
+		if (pathName) {
+			setOpenMobile(false);
+		}
+	}, [pathName, setOpenMobile]);
 
 	return (
 		<Sidebar
 			collapsible="icon"
-			{...restProps}
-			style={
-				{
-					"--sidebar-width": "18rem",
-					...restProps.style,
-				} as React.CSSProperties
-			}
 			className="overflow-hidden *:data-[sidebar=sidebar]:flex-row"
+			{...restProps}
 		>
 			{/* This is the first sidebar */}
 			{/* We disable collapsible and adjust width to icon. */}
 			{/* This will make the sidebar appear as icons. */}
 			<Sidebar
 				collapsible="none"
-				className="w-[calc(var(--sidebar-width-icon)+1px)]! border-r bg-sidebar"
+				className="w-full! border-r md:w-[calc(var(--sidebar-width-icon)+1px)]!"
 			>
-				<SidebarHeader>
-					<SidebarMenu>
+				<SidebarHeader className="border-b md:border-b-0">
+					<SidebarMenu className="hidden md:flex">
 						<SidebarMenuItem>
 							<SidebarMenuButton size="lg" asChild className="md:h-8 md:p-0">
-								<Link href={"/dashboard/platform/overview"}>
-									<div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-sm dark:bg-primary dark:text-primary-foreground">
-										<MailOpen className="size-4" />
+								<Link
+									href={`/w/${workspacePublicId}/dashboard/platform/overview`}
+								>
+									<div className="bg-sidebar-primary text-sidebar-primary-foreground flex aspect-square size-8 items-center justify-center rounded-lg">
+										<Mail className="size-4" />
 									</div>
 									<div className="grid flex-1 text-left text-sm leading-tight">
 										<span className="truncate font-medium">Kurrier</span>
@@ -142,90 +141,67 @@ export function AppSidebar({ ...props }: UnifiedSidebarProps) {
 					</SidebarMenu>
 				</SidebarHeader>
 				<SidebarContent className={"relative"}>
-					<SidebarGroup className={"mt-8"}>
+					<SidebarGroup className="mt-2">
 						<SidebarGroupContent className="px-1.5 md:px-0">
 							<SidebarMenu>
-								{NAV_MAIN.map((item) => {
-									const isActive = activeTitle === item.title;
-									return (
-										<SidebarMenuItem
-											key={item.title}
-											onClick={() => {
-												if (isMobile) {
-													toggleSidebar();
-												}
+								{data.navMain.map((item) => (
+									<SidebarMenuItem key={item.title}>
+										<SidebarMenuButton
+											asChild
+											tooltip={{
+												children: item.title,
+												hidden: false,
 											}}
+											isActive={activeItem?.title === item.title}
+											className={"px-2.5 md:px-2"}
 										>
-											<SidebarMenuButton
-												asChild
-												tooltip={{
-													children: item.title,
-													hidden: false,
+											<Link
+												href={item.url}
+												onClick={() => {
+													setOpen(true);
+													setOpenMobile(false);
 												}}
-												isActive={isActive}
-												className={cn(
-													"relative px-2.5 transition-colors md:px-2",
-													isActive &&
-														"bg-primary/10 text-sidebar-accent-foreground dark:bg-primary/20",
-												)}
 											>
-												<Link
-													href={item.url}
-													onClick={() => {
-														setPendingNav({
-															title: item.title,
-															fromPath: pathName,
-														});
-														setOpen(true);
-													}}
-												>
-													{isActive ? (
-														<span className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-primary" />
-													) : null}
-													<item.icon
-														className={
-															isActive ? "text-primary dark:text-primary" : ""
-														}
-													/>
-													<span>{item.title}</span>
-												</Link>
-											</SidebarMenuButton>
-										</SidebarMenuItem>
-									);
-								})}
+												<item.icon
+													className={
+														item.title === activeItem?.title
+															? "text-brand dark:text-white"
+															: ""
+													}
+												/>
+												<span>{item.title}</span>
+											</Link>
+										</SidebarMenuButton>
+									</SidebarMenuItem>
+								))}
 
-								{isMobile ? (
-									<>
-										<Divider variant={"dashed"} my={"xl"} />
-										{sidebarSectionContent}
-									</>
-								) : (
-									<hr className="my-2 border-border" />
-								)}
+								<Separator className="my-2 hidden md:block" />
 							</SidebarMenu>
+							<div className="mt-2 md:hidden">
+								<Separator className="my-4" />
+								{sidebarSectionContent}
+							</div>
 						</SidebarGroupContent>
 					</SidebarGroup>
-					<div
-						className={
-							isMobile
-								? "absolute top-0 mx-4 flex gap-2 justify-center items-center"
-								: "absolute bottom-28 rotate-90 flex justify-start items-center w-full gap-2"
-						}
-					>
-						<ThemeColorPicker
-							onComplete={() => {
-								isMobile && toggleSidebar();
-							}}
-						/>
-						<ThemeSwitch
-							onComplete={() => {
-								isMobile && toggleSidebar();
-							}}
-						/>
+					<div className="mt-auto flex items-center justify-center gap-3 border-t px-4 py-3 md:absolute md:bottom-2 md:left-0 md:w-full md:flex-col md:gap-0 md:border-t-0 md:px-0">
+						<Button variant="ghost" size="icon" asChild>
+							<Link
+								href={`/w/${workspacePublicId}/dashboard/platform/workspace`}
+								aria-label="Workspace settings"
+								title="Workspace settings"
+								onClick={() => setOpenMobile(false)}
+							>
+								<Settings2 className="size-5" />
+							</Link>
+						</Button>
+
+						<div className="flex size-12 items-center justify-center md:rotate-90">
+							<ThemeSwitch onComplete={() => setOpenMobile(false)} />
+						</div>
 					</div>
 				</SidebarContent>
-				<SidebarFooter>
-					<NavUser user={user} />
+				<SidebarFooter className="border-t md:border-t-0">
+					{navUserContent}
 				</SidebarFooter>
 			</Sidebar>
 
@@ -234,15 +210,17 @@ export function AppSidebar({ ...props }: UnifiedSidebarProps) {
 
 			<Sidebar collapsible="none" className="hidden min-w-0 flex-1 md:flex">
 				<SidebarHeader className="gap-3.5 border-b p-4">
-					<div className="text-left font-sans flex items-center gap-1">
-						<KurrierLogo size={36} />
-						<span className="text-lg font-semibold">kurrier</span>
-					</div>
+					{/*<div className="text-left font-sans flex items-center gap-1">*/}
+					{/*	<KurrierLogo size={36} />*/}
+					{/*	<span className="text-lg font-semibold">kurrier</span>*/}
+					{/*</div>*/}
 					{sidebarTopContent}
 				</SidebarHeader>
-				<SidebarContent>
+				<SidebarContent className="min-w-0">
 					<SidebarGroup className="px-0">
-						<SidebarGroupContent>{sidebarSectionContent}</SidebarGroupContent>
+						<SidebarGroupContent className="min-w-0">
+							{sidebarSectionContent}
+						</SidebarGroupContent>
 					</SidebarGroup>
 				</SidebarContent>
 			</Sidebar>

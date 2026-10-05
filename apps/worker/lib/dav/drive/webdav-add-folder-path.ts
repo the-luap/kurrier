@@ -1,5 +1,6 @@
 import { db, driveEntries, driveVolumes } from "@db";
 import { and, eq } from "drizzle-orm";
+import { safePathSegments } from "./safe-local-path";
 
 const trimSlashes = (s: string) => s.replace(/^\/+|\/+$/g, "");
 const ensureTrailingSlash = (p: string) => (p.endsWith("/") ? p : `${p}/`);
@@ -85,6 +86,14 @@ export const addFolderPath = async (opts: {
 		.split("/")
 		.filter(Boolean)
 		.map(trimSlashes);
+
+	// Reject "..", "%2e%2e", "%2F", ... so the MKCOL stays inside the home.
+	try {
+		safePathSegments(within.join("/"));
+		if (safePathSegments(folderName).length !== 1) throw new Error();
+	} catch {
+		throw new Error("addFolderPath: invalid path");
+	}
 
 	const volume = await ensureHomeVolume(ownerId);
 

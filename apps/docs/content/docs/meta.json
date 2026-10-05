@@ -2,14 +2,22 @@
 	"pages": [
 		"index",
 		"installation",
+		"oidc",
 		"contacts",
 		"calendars",
 		"getting-started",
+		"message-inspector",
+		"rules-signatures",
+		"drive",
+		"workspace-branding",
+		"localization",
 		"providers",
+		"extensions",
 		"api",
 		"upgrading",
 		"contributing",
 		"consulting",
+		"faster",
 		"support"
 	]
 }

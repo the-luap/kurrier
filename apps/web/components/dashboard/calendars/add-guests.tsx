@@ -1,3 +1,5 @@
+"use client";
+
 import React, { useEffect, useMemo, useState } from "react";
 import { ComboboxItem } from "@mantine/core";
 import { Users } from "lucide-react";
@@ -8,6 +10,7 @@ import GuestList, {
 	UiGuest,
 	UiGuestStatus,
 } from "@/components/dashboard/calendars/guest-list";
+import { useOptionalI18n } from "@/components/providers/dictionary-provider";
 
 type SearchableContactsOption = ComboboxItem & {
 	row?: {
@@ -25,24 +28,46 @@ function AddGuests({
 	name: string;
 	onChange?: (value: string[]) => void;
 }) {
+	const i18n = useOptionalI18n();
+	const dict = i18n?.dict;
+	const format = i18n?.format;
 	const { state } = useDynamicContext<CalendarState>();
 	const editEvent = state.activePopoverEditEvent;
 	const editEventId = editEvent?.id || "";
 
+	const attendeeContacts = state.attendeeContacts ?? [];
+
+	const contactsByEmail = useMemo(() => {
+		const map = new Map<string, any>();
+		attendeeContacts.forEach((c: any) => {
+			if (c.email) {
+				map.set(String(c.email).trim().toLowerCase(), c);
+			}
+		});
+		return map;
+	}, [attendeeContacts]);
+
+
+
 	const persistedAttendees = state.calendarEventAttendees?.[editEventId] || [];
+
 
 	const initialGuests = useMemo<UiGuest[]>(
 		() =>
-			persistedAttendees.map((a) => ({
-				email: a.email,
-				name: a.name ?? null,
-				avatar: (a as any).avatar ?? null,
-				contactId: (a as any).contactId ?? null,
-				isOrganizer: a.isOrganizer ?? false,
-				isPersisted: true,
-				partstat: ((a as any).partstat ?? "needs_action") as UiGuestStatus,
-			})),
-		[persistedAttendees],
+			persistedAttendees.map((a) => {
+				const email = a.email?.toLowerCase() ?? "";
+				const contact = contactsByEmail.get(email);
+
+				return {
+					email: a.email,
+					name: contact?.name ?? a.name ?? null,
+					avatar: contact?.avatar ?? null,
+					isOrganizer: a.isOrganizer ?? false,
+					isPersisted: true,
+					partstat: (a.partstat ?? "needs_action") as UiGuestStatus,
+				};
+			}),
+		[persistedAttendees, contactsByEmail],
 	);
 
 	const [newGuests, setNewGuests] = useState<UiGuest[]>([]);
@@ -104,7 +129,7 @@ function AddGuests({
 
 	return (
 		<>
-			<div className="text-sm my-1.5 font-medium">Add guests</div>
+			<div className="text-sm my-1.5 font-medium">{dict?.calendar?.addGuests ?? "Add guests"}</div>
 
 			<SearchableContacts onChange={handleAddGuest} />
 
@@ -120,7 +145,7 @@ function AddGuests({
 			<div className="mt-2 flex items-center gap-1.5 text-[11px] text-muted-foreground">
 				<Users size={14} className="shrink-0" />
 				<span className="font-medium">
-					{guestCount === 1 ? "1 guest" : `${guestCount} guests`}
+					{format?.message(guestCount, dict?.calendar?.guestsCount ?? { other: "{count} guests" }) ?? `${guestCount} guests`}
 				</span>
 			</div>
 		</>

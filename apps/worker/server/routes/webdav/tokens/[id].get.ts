@@ -9,6 +9,8 @@ import { db, driveEntries, driveUploadIntents, driveVolumes } from "@db";
 import { and, eq, isNull } from "drizzle-orm";
 import fs from "node:fs";
 import path from "node:path";
+import { UUID_RE } from "../../../../lib/api-helpers";
+import { resolveLocalDrivePath } from "../../../../lib/dav/drive/safe-local-path";
 
 const LOCAL_ROOT =
 	process.env.NODE_ENV === "production"
@@ -27,11 +29,16 @@ const dispatchFilePath = async (
 	}
 
 	const stat = fs.statSync(filePath);
+	if (!stat.isFile()) {
+		setResponseStatus(event, 404);
+		return "Not Found";
+	}
 	const total = stat.size;
 	const range = event.node.req.headers.range;
 
 	setHeader(event, "Accept-Ranges", "bytes");
 	setHeader(event, "Content-Type", contentType || "application/octet-stream");
+	setHeader(event, "X-Content-Type-Options", "nosniff");
 	setHeader(
 		event,
 		"Content-Disposition",
@@ -39,14 +46,20 @@ const dispatchFilePath = async (
 	);
 
 	if (range) {
-		const match = /bytes=(\d+)-(\d*)/.exec(range);
-		if (!match) {
+		const match = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
+		let start = match?.[1] ? Number(match[1]) : Number.NaN;
+		let end = match?.[2] ? Number(match[2]) : total - 1;
+		if (match && !match[1] && match[2]) {
+			// Suffix range: the last N bytes.
+			start = Math.max(total - Number(match[2]), 0);
+			end = total - 1;
+		}
+		end = Math.min(end, total - 1);
+		if (!match || !Number.isSafeInteger(start) || start > end || start >= total) {
 			setResponseStatus(event, 416);
+			setHeader(event, "Content-Range", `bytes */${total}`);
 			return "Invalid Range";
 		}
-
-		const start = Number(match[1]);
-		const end = match[2] ? Number(match[2]) : total - 1;
 
 		setResponseStatus(event, 206);
 		setHeader(event, "Content-Length", end - start + 1);
@@ -60,21 +73,6 @@ const dispatchFilePath = async (
 	return fs.createReadStream(filePath);
 };
 
-function normalizeTargetPath(p: string) {
-	const raw = String(p || "").trim();
-	const parts = raw
-		.split("/")
-		.filter(Boolean)
-		.map((seg) => decodeURIComponent(seg));
-
-	for (const seg of parts) {
-		if (seg === "." || seg === ".." || seg.includes("\0"))
-			throw new Error("Invalid path");
-	}
-
-	return "/" + parts.join("/");
-}
-
 export default defineEventHandler(async (event) => {
 	const params = getRouterParams(event);
 	const tokenId = String(params.id || "");
@@ -82,6 +80,11 @@ export default defineEventHandler(async (event) => {
 	if (!tokenId) {
 		setResponseStatus(event, 400);
 		return "Missing token id";
+	}
+
+	if (!UUID_RE.test(tokenId)) {
+		setResponseStatus(event, 404);
+		return "Invalid token";
 	}
 
 	const now = new Date();
@@ -177,21 +180,17 @@ export default defineEventHandler(async (event) => {
 		return "Volume missing basePath";
 	}
 
-	let normalizedTargetPath: string;
+	let absolutePath: string;
 	try {
-		normalizedTargetPath = normalizeTargetPath(resolved.entry.path);
+		absolutePath = resolveLocalDrivePath(
+			LOCAL_ROOT,
+			String(resolved.volumeBasePath),
+			resolved.entry.path,
+		);
 	} catch {
 		setResponseStatus(event, 400);
 		return "Invalid targetPath";
 	}
-
-	const relativeTargetPath = normalizedTargetPath.replace(/^\/+/, "");
-
-	const absolutePath = path.join(
-		LOCAL_ROOT,
-		String(resolved.volumeBasePath),
-		relativeTargetPath,
-	);
 
 	return dispatchFilePath(
 		absolutePath,

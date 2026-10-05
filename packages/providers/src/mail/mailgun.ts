@@ -1,15 +1,14 @@
 // @ts-nocheck
-
-import { sanitizeFilename } from "@common/mail-client";
-import type sgClient from "@sendgrid/client";
-import Mailgun from "mailgun.js";
 import {
-	type DomainIdentity,
-	type Mailer,
-	type MailgunConfig,
+	DomainIdentity,
+	Mailer,
+	MailgunConfig,
 	RawMailgunConfigSchema,
-	type VerifyResult,
+	VerifyResult,
 } from "../core";
+import sgClient from "@sendgrid/client";
+import { sanitizeFilename } from "@common/mail-client";
+import Mailgun from "mailgun.js";
 
 export class MailgunMailer implements Mailer {
 	private client: sgClient.Client;
@@ -67,7 +66,7 @@ export class MailgunMailer implements Mailer {
 			});
 
 			return true;
-		} catch {
+		} catch (err) {
 			return false;
 		}
 	}
@@ -307,13 +306,11 @@ export class MailgunMailer implements Mailer {
 			text: string;
 			html: string;
 			from: string;
-			cc?: string[];
-			bcc?: string[];
 			inReplyTo: string;
 			references: string[];
 			attachments?: { name: string; content: Blob; contentType: string }[];
 		},
-	): Promise<{ success: boolean; MessageId?: string; error?: string }> {
+	): Promise<{ success: boolean; MessageId?: string }> {
 		try {
 			const domain = String(opts.from.split("@")[1] || "").trim();
 
@@ -337,13 +334,12 @@ export class MailgunMailer implements Mailer {
 			// Mailgun accepts string or array for "to"
 			const payload: any = {
 				from: opts.from,
-				to, // array is fine
-				...(opts.cc?.length ? { cc: opts.cc } : {}),
-				...(opts.bcc?.length ? { bcc: opts.bcc } : {}),
+				to,
+				cc: opts.cc?.length ? opts.cc : undefined,
+				bcc: opts.bcc?.length ? opts.bcc : undefined,
 				subject: opts.subject,
 				text: opts.text || undefined,
 				html: opts.html || undefined,
-				// headers
 				...headers,
 			};
 

@@ -1,44 +1,27 @@
-import { addNewVolume, type SyncProvidersRow } from "@/lib/actions/dashboard";
-import { ReusableForm } from "@/components/common/reusable-form";
-import React from "react";
-import { FieldConfig } from "@schema";
-import { Select } from "@mantine/core";
+"use client";
 
-function AddVolumeForm({
-	providerSelectOptions,
-	onCompleted,
-}: {
-	userProviders: SyncProvidersRow[];
-	providerSelectOptions: { label: string; value: string }[];
-	onCompleted?: () => void;
-}) {
+import type { FieldConfig } from "@schema";
+import { ReusableForm } from "@/components/common/reusable-form";
+import { useOptionalDictionary } from "@/components/providers/dictionary-provider";
+import { addNewVolume } from "@/lib/actions/dashboard";
+
+function AddVolumeForm({ onCompleted }: { onCompleted?: () => void }) {
+	const dict = useOptionalDictionary();
 	const fields: FieldConfig[] = [
 		{
-			name: "provider",
-			label: "Choose a verified provider",
-			kind: "custom",
-			component: Select,
-			wrapperClasses: "col-span-12",
-			props: {
-				defaultValue: providerSelectOptions[0]?.value || null,
-				className: "w-full",
-				required: true,
-				data: providerSelectOptions,
-				allowDeselect: false,
-			},
-		},
-		{
-			name: "bucketName",
-			label: "Bucket Name",
+			name: "volumeName",
+			label: dict?.platform?.volumeName ?? "Volume name",
 			wrapperClasses: "col-span-12",
 			bottomStartPrefix: (
-				<span className={"text-xs"}>
-					Kurrier will create this bucket in your storage provider.
+				<span className="text-xs leading-5 text-muted-foreground">
+					{dict?.platform?.volumeNameHelp ??
+						"This name identifies the storage root that appears in Drive."}
 				</span>
 			),
 			props: {
 				autoComplete: "off",
 				required: true,
+				placeholder: dict?.platform?.volumeNamePlaceholder ?? "Team files",
 			},
 		},
 	];
@@ -54,7 +37,7 @@ function AddVolumeForm({
 				onSuccess={finalizeVolume}
 				fields={fields}
 				submitButtonProps={{
-					submitLabel: "Create Bucket",
+					submitLabel: dict?.platform?.createVolume ?? "Create volume",
 					wrapperClasses: "justify-center mt-6 flex",
 					buttonProps: {
 						fullWidth: true,

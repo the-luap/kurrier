@@ -1,145 +1,257 @@
 "use server";
 
 import * as crypto from "node:crypto";
-import { APP_VERSION } from "@common";
-import { decode } from "@db";
-import { type FormState, getPublicEnv } from "@schema";
-import type { AuthSession } from "@supabase/supabase-js";
+import { db, identities, users } from "@db";
+import { type FormState, getPublicEnv, handleAction } from "@schema";
+import argon2 from "argon2";
+import bcrypt from "bcryptjs";
+import { decode } from "decode-formdata";
+import { eq, sql } from "drizzle-orm";
+import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { cache } from "react";
-import { addJobAndWait } from "@/lib/actions/get-redis";
-import { createClient } from "@/lib/supabase/server";
-import { formDataToJson } from "@/lib/utils";
+import { DISTRIBUTION_CONFIG } from "@distribution/config";
+import {
+	createUserWithWorkspace,
+	findLandingWorkspace,
+	normalizeEmail,
+	SESSION_COOKIE,
+	signInUserAndRedirect,
+	type TokenClaims as SessionTokenClaims,
+	verifyAndDecode,
+} from "@/lib/auth-session";
 
-const initProviders = async (userId: string) => {
-	await addJobAndWait("common-worker", "sync-providers", { userId });
+// Every export of this "use server" module is a public endpoint. Session,
+// account and redirect primitives that take user ids live in
+// lib/auth-session.ts (server-only) and must not be re-exported here.
+
+/**
+ * Users imported from the old Supabase-based fork have no argon2 hash yet,
+ * only GoTrue's bcrypt hash in auth.users.encrypted_password. Verify that
+ * once and store an argon2 hash, so the next login takes the normal path.
+ */
+async function verifyLegacySupabasePassword(userId: string, password: string) {
+	let encryptedPassword: string | null | undefined;
+	try {
+		const rows = (await db.execute(sql`
+			select encrypted_password
+			from auth.users
+			where id = ${userId} and encrypted_password is not null
+			limit 1
+		`)) as unknown as Array<{ encrypted_password: string | null }>;
+		encryptedPassword = rows[0]?.encrypted_password;
+	} catch (error) {
+		// Installations that never ran on Supabase have no such column.
+		if (
+			error instanceof Error &&
+			/encrypted_password.*does not exist/i.test(
+				`${error.message} ${String((error as { cause?: unknown }).cause ?? "")}`,
+			)
+		) {
+			return false;
+		}
+		throw error;
+	}
+
+	if (!encryptedPassword) return false;
+	if (!(await bcrypt.compare(password, encryptedPassword))) return false;
+
+	await db
+		.update(users)
+		.set({ passwordHash: await argon2.hash(password) })
+		.where(eq(users.id, userId));
+	return true;
+}
+
+let dummyHash: Promise<string> | null = null;
+const getDummyHash = () => {
+	dummyHash ??= argon2.hash(crypto.randomUUID());
+	return dummyHash;
 };
 
 export async function login(
 	_prev: FormState,
 	formData: FormData,
 ): Promise<FormState> {
-	const values = formDataToJson(formData);
-	const supabase = await createClient();
-	const { data, error } = await supabase.auth.signInWithPassword({
-		email: values.email,
-		password: values.password,
-	});
-
-	if (error) {
+	if (!DISTRIBUTION_CONFIG.features.localLogin) {
 		return {
 			success: false,
-			error: error.message,
+			error: "auth.localLoginDisabled",
 		};
 	}
 
-	if (data) {
-		redirect("/dashboard/platform/overview");
+	const { email: rawEmail, password, locale } = decode(formData) as {
+		email: string;
+		password: string;
+		locale?: string;
+	};
+	const email = normalizeEmail(rawEmail);
+
+	if (!email || !password) {
+		return { error: "auth.missingCredentials" };
 	}
 
-	return { success: true, message: "Logged in!" };
-}
+	// Exact match first (index), then a case-insensitive match for accounts
+	// created before emails were normalized.
+	let [user] = await db.select().from(users).where(eq(users.email, email));
+	if (!user) {
+		[user] = await db
+			.select()
+			.from(users)
+			.where(sql`lower(${users.email}) = ${email}`)
+			.limit(1);
+	}
 
-const applyPendingMigrations = async (userId: string) => {
-	await addJobAndWait(
-		"migration-worker",
-		"migration:run-for-user-after-signup",
-		{ userId },
-		{
-			attempts: 3,
-			backoff: {
-				type: "exponential",
-				delay: 3000,
-			},
-			removeOnComplete: { age: 60 },
-			removeOnFail: false,
-			jobId: `migration:${userId}:${APP_VERSION}`,
-		},
-	);
-};
+	if (!user) {
+		// Same work as a real check, so response timing does not reveal
+		// which emails have an account.
+		await argon2.verify(await getDummyHash(), password).catch(() => false);
+		return { error: "auth.invalidCredentials" };
+	}
+
+	const valid = user.passwordHash
+		? await argon2.verify(user.passwordHash, password)
+		: await verifyLegacySupabasePassword(user.id, password);
+
+	if (!valid) {
+		return { error: "auth.invalidCredentials" };
+	}
+
+	await signInUserAndRedirect(user, locale);
+
+	return { success: true, message: "auth.loggedIn" };
+}
 
 export async function signup(
 	_prev: FormState,
 	formData: FormData,
 ): Promise<FormState> {
-	// Check if signup is disabled
-	const { DISABLE_SIGNUP } = getPublicEnv();
-	if (DISABLE_SIGNUP) {
-		return {
-			success: false,
-			error: "Signup is currently disabled. Please contact your administrator.",
+	return handleAction(async () => {
+		const { DISABLE_SIGNUP } = getPublicEnv();
+
+		if (DISABLE_SIGNUP) {
+			return {
+				success: false,
+				error: "auth.signupDisabled",
+			};
+		}
+
+		const { workspaceName, email, password, locale } = decode(formData) as {
+			email: string;
+			password: string;
+			workspaceName: string;
+			locale?: string;
 		};
-	}
 
-	const values = formDataToJson(formData);
-	const supabase = await createClient();
-	const { data, error } = await supabase.auth.signUp({
-		email: values.email,
-		password: values.password,
-	});
+		if (!email || !password) {
+			return { error: "auth.missingCredentials" };
+		}
 
-	if (error) {
-		return {
-			success: false,
-			error: error.message,
-		};
-	}
+		const passwordHash = await argon2.hash(password);
 
-	const userId = String(data?.user?.id);
-	await initProviders(userId);
-	await applyPendingMigrations(userId);
+		const user = await createUserWithWorkspace({
+			email,
+			passwordHash,
+			workspaceName,
+		});
 
-	if (data) {
-		redirect("/dashboard/platform/overview");
-	}
+		if ("error" in user) {
+			return { error: user.error };
+		}
 
-	return { success: true, message: "Welcome!", data };
+		await signInUserAndRedirect(user, locale);
+
+		return { success: true, message: "auth.welcome" };
+
+	})
+
 }
 
-export const isSignedIn = cache(async () => {
-	const client = await createClient();
-	try {
-		const {
-			data: { user },
-		} = await client.auth.getUser();
-		return user;
-	} catch (error) {
-		console.warn("Unable to load authenticated user", error);
+export type TokenClaims = SessionTokenClaims;
+
+// Deduplicated per request: every rlsClient() call used to verify the JWT
+// and select the user again.
+const isSignedInCached = cache(async () => {
+	const cookieStore = await cookies();
+	const token = cookieStore.get(SESSION_COOKIE)?.value;
+
+	if (!token) {
 		return null;
 	}
-});
 
-export const currentSession = cache(async (): Promise<AuthSession | null> => {
-	const client = await createClient();
-	try {
-		const {
-			data: { session },
-		} = await client.auth.getSession();
-		if (!session?.access_token) return null;
+	const claims = await verifyAndDecode(token);
 
-		// getSession() only reads the cookie and does not verify the JWT
-		// signature. The token's claims are used for RLS, so make sure the
-		// auth server accepts it (getUser is cached per request) and that it
-		// belongs to that user.
-		const user = await isSignedIn();
-		const claims = decode(session.access_token);
-		if (!user || claims.sub !== user.id) return null;
-
-		return session as AuthSession | null;
-	} catch (error) {
-		console.warn("Unable to load auth session", error);
+	if (!claims?.sub) {
 		return null;
 	}
+
+	const [user] = await db
+		.select({ id: users.id, email: users.email })
+		.from(users)
+		.where(eq(users.id, claims.sub));
+
+	if (!user) {
+		return null;
+	}
+
+	return user;
 });
+
+export async function isSignedIn() {
+	return isSignedInCached();
+}
+
+export type FetchIsSignedInResult = Awaited<ReturnType<typeof isSignedIn>>;
 
 export const signOut = async (redirectUrl?: string) => {
-	const client = await createClient();
-	await client.auth.signOut();
-	redirect(redirectUrl ? redirectUrl : "/auth/login");
+	const cookieStore = await cookies();
+	cookieStore.delete(SESSION_COOKIE);
+	// Same-origin paths only: the argument is caller controlled.
+	const target =
+		typeof redirectUrl === "string" &&
+		redirectUrl.startsWith("/") &&
+		!redirectUrl.startsWith("//") &&
+		!redirectUrl.startsWith("/\\")
+			? redirectUrl
+			: "/auth/login";
+	redirect(target);
 };
 
 export const getGravatarUrl = async (email: string, size = 80) => {
-	const trimmedEmail = email.trim().toLowerCase();
+	const trimmedEmail = String(email ?? "").trim().toLowerCase();
 	const hash = crypto.createHash("sha256").update(trimmedEmail).digest("hex");
-	return `https://www.gravatar.com/avatar/${hash}?s=${size}&d=identicon`;
+	const px = Math.min(512, Math.max(1, Math.floor(Number(size) || 80)));
+	return `https://www.gravatar.com/avatar/${hash}?s=${px}&d=identicon`;
 };
+
+/**
+ * Read-only counterpart to getWorkspaceRedirectUrl: same target resolution,
+ * but never writes the workspace-context cookies (that's only legal from a
+ * Server Action or Route Handler). Safe to call from a plain page/layout
+ * render to figure out where to redirect an already-signed-in user.
+ */
+export async function getDefaultWorkspacePath(user: { id: string }) {
+	// Public endpoint: only ever resolve the signed-in user's own workspace.
+	const me = await isSignedIn();
+	if (!me?.id || String(user?.id) !== me.id) {
+		return "/auth/login";
+	}
+	const workspace = await findLandingWorkspace(me.id);
+
+	if (!workspace) {
+		return "/auth/login";
+	}
+
+	if (workspace.defaultIdentityId) {
+		const [defaultIdentity] = await db
+			.select()
+			.from(identities)
+			.where(eq(identities.id, workspace.defaultIdentityId));
+
+		if (defaultIdentity) {
+			return `/w/${workspace.publicId}/dashboard/mail/${defaultIdentity.publicId}/inbox`;
+		}
+	}
+
+	return `/w/${workspace.publicId}/dashboard/platform/overview`;
+}

@@ -1,7 +1,6 @@
-import type { AuthSession } from "@supabase/supabase-js";
+import { PgDatabase } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
-import type { PgDatabase } from "drizzle-orm/pg-core";
-import { type JwtPayload, jwtDecode } from "jwt-decode";
+import { jwtDecode, JwtPayload } from "jwt-decode";
 import { db, db_rls } from "./init-db";
 
 export function decode(accessToken: string) {
@@ -12,45 +11,46 @@ export function decode(accessToken: string) {
 	}
 }
 
-type SupabaseToken = {
-	iss?: string;
+type Token = {
 	sub?: string;
-	aud?: string[] | string;
-	exp?: number;
-	nbf?: number;
 	iat?: number;
-	jti?: string;
-	role?: string;
+	workspace_id?: string;
 };
 
 export function createDrizzle<Database extends PgDatabase<any, any, any>>(
-	token: SupabaseToken,
+	token: Token,
+	ctx: { workspaceId?: string },
 	{ admin, client }: { admin: Database; client: Database },
 ) {
 	return {
 		admin,
 		rls: (async (transaction, ...rest) => {
-			return client.transaction(
-				async (tx) => {
-					// 1) set JWT claims + local role in a single round trip.
-					//    set_config('role', ..., true) is equivalent to SET LOCAL ROLE
-					//    and lets the role be passed as a parameter.
-					await tx.execute(
-						sql`select set_config('request.jwt.claims', ${JSON.stringify(token)}, true), set_config('request.jwt.claim.sub', ${token.sub ?? ""}, true), set_config('role', ${token.role ?? "anon"}, true)`,
-					);
+			return client.transaction(async (tx) => {
+				const claims: Token = {
+					...token,
+					workspace_id: ctx.workspaceId ?? token.workspace_id,
+				};
 
-					// 2) run caller work
-					return transaction(tx);
-					// 3) no finally/cleanup needed: LOCAL settings auto-reset at commit/rollback
-				},
-				...rest,
-			);
+				// One round trip for both claims. An unset claim is written as
+				// '' (policies read it through nullif(..., '')), which also
+				// clears any value left on a pooled connection.
+				if (claims.sub || claims.workspace_id) {
+					await tx.execute(
+						sql`select set_config('request.jwt.claim.sub', ${claims.sub ?? ""}, true), set_config('request.jwt.claim.workspace_id', ${claims.workspace_id ?? ""}, true)`,
+					);
+				}
+
+				return transaction(tx);
+			}, ...rest);
 		}) as typeof client.transaction,
 	};
 }
 
-export async function createDrizzleSupabaseClient(session: AuthSession) {
-	return createDrizzle(decode(session?.access_token ?? ""), {
+export async function createDrizzleClientInstance(
+	session: string,
+	ctx: { workspaceId?: string },
+) {
+	return createDrizzle(decode(session ?? ""), ctx, {
 		admin: db,
 		client: db_rls,
 	});

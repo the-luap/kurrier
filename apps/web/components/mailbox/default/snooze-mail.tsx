@@ -3,7 +3,10 @@
 import { Tooltip } from "@mantine/core";
 import { Clock4 } from "lucide-react";
 import dynamic from "next/dynamic";
+import type { FormState } from "@schema";
 import { useState } from "react";
+import { toast } from "sonner";
+import { useOptionalI18n } from "@/components/providers/dictionary-provider";
 import { snoozeThread } from "@/lib/actions/mailbox";
 
 // Loaded on first open: keeps @vvo/tzdb, @mantine/dates and two Modals out
@@ -12,14 +15,6 @@ const SnoozeMailDialog = dynamic(
 	() => import("@/components/mailbox/default/snooze-mail-dialog"),
 	{ ssr: false },
 );
-
-function formatWhen(d: Date) {
-	const pad = (n: number) => String(n).padStart(2, "0");
-	const h24 = d.getHours();
-	const h12 = ((h24 + 11) % 12) + 1;
-	const ampm = h24 >= 12 ? "PM" : "AM";
-	return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${h12}:${pad(d.getMinutes())} ${ampm}`;
-}
 
 type Props = {
 	mailboxThreadId: string;
@@ -32,6 +27,9 @@ export default function SnoozeMail({
 	activeMailboxId,
 	initialSnoozedUntil = null,
 }: Props) {
+	const i18n = useOptionalI18n();
+	const dict = i18n?.dict;
+	const format = i18n?.format;
 	const [snoozedUntil, setSnoozedUntil] = useState<Date | null>(
 		initialSnoozedUntil,
 	);
@@ -43,22 +41,36 @@ export default function SnoozeMail({
 
 	const snoozed = !!snoozedUntil;
 	const label = snoozedUntil
-		? `Snoozed • ${formatWhen(snoozedUntil)}`
-		: "Snooze";
+		? `${dict?.mailbox?.snoozedBullet ?? "Snoozed • "}${
+				format?.date(snoozedUntil, {
+					dateStyle: "medium",
+					timeStyle: "short",
+				}) ?? snoozedUntil.toLocaleString()
+			}`
+		: (dict?.mailbox?.snooze ?? "Snooze");
 
 	async function commit(next: Date | null) {
 		if (saving) return;
 
 		setSaving(true);
 		try {
-			await snoozeThread({
+			// handleAction reports failures in the result instead of throwing.
+			const result: FormState = await snoozeThread({
 				mailboxThreadId,
 				activeMailboxId,
 				snoozedUntil: next ? next.toISOString() : null,
 			});
+			if (!result?.success) {
+				throw new Error(result?.error);
+			}
 
 			setSnoozedUntil(next);
 			setDialogOpen(false);
+		} catch (error) {
+			toast.error(dict?.mailbox?.actionFailed ?? "Action failed", {
+				description: error instanceof Error ? error.message : undefined,
+				position: "bottom-left",
+			});
 		} finally {
 			setSaving(false);
 		}

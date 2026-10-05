@@ -1,11 +1,12 @@
 "use client";
 
+import dayjs from "dayjs";
+import { Clock, Paperclip, Trash } from "lucide-react";
 import * as React from "react";
 import { useMemo } from "react";
-import { Clock, Paperclip, Trash } from "lucide-react";
-import dayjs from "dayjs";
 import { ReusableFormButton } from "@/components/common/reusable-form-button";
 import { useIsClient } from "@/components/mailbox/default/thread-list-utils";
+import { useOptionalDictionary } from "@/components/providers/dictionary-provider";
 import { deleteScheduledDraft } from "@/lib/actions/mailbox";
 
 type DraftMessageRow = {
@@ -30,7 +31,10 @@ type ScheduledListProps = {
 	onCancel?: (draft: DraftMessageRow) => void;
 };
 
-function formatDateLabel(input?: string | number | Date) {
+function formatDateLabel(
+	input: string | number | Date | undefined,
+	locale?: string,
+) {
 	if (!input) return "";
 
 	const d = dayjs(input);
@@ -39,14 +43,16 @@ function formatDateLabel(input?: string | number | Date) {
 	const now = dayjs();
 
 	if (d.isSame(now, "day")) {
-		return d.format("h:mm A");
+		return new Intl.DateTimeFormat(locale ?? "en", {
+			hour: "2-digit",
+			minute: "2-digit",
+		}).format(d.toDate());
 	}
 
-	if (d.isSame(now, "year")) {
-		return d.format("MMM D, h:mm A");
-	}
-
-	return d.format("MMM D, YYYY, h:mm A");
+	return new Intl.DateTimeFormat(locale ?? "en", {
+		dateStyle: d.isSame(now, "year") ? "medium" : "long",
+		timeStyle: "short",
+	}).format(d.toDate());
 }
 
 function getToLabel(payload: Record<string, any>) {
@@ -84,12 +90,13 @@ function hasAttachments(payload: Record<string, any>) {
 }
 
 function ScheduledListItem({ draft }: { draft: DraftMessageRow }) {
-	// Local-timezone label: client only, so SSR (server timezone) and
-	// hydration never disagree.
+	const dict = useOptionalDictionary();
+	// Viewer-timezone label on the client only, so SSR and hydration agree.
 	const isClient = useIsClient();
 	const scheduledLabel = isClient
 		? formatDateLabel(
-				draft.scheduledAt ?? draft.updatedAt ?? draft.createdAt ?? Date.now(),
+				draft.scheduledAt ?? draft.updatedAt ?? draft.createdAt ?? undefined,
+				dict?.locale,
 			)
 		: "";
 	const toLabel = getToLabel(draft.payload);
@@ -117,7 +124,8 @@ function ScheduledListItem({ draft }: { draft: DraftMessageRow }) {
 					<div className="mt-1 flex items-center gap-1 text-xs text-muted-foreground">
 						<Clock className="h-3.5 w-3.5" />
 						<span className="whitespace-nowrap">
-							Scheduled for {scheduledLabel}
+							{dict?.mailbox?.scheduledBullet ?? "Scheduled • "}
+							{scheduledLabel}
 						</span>
 					</div>
 				</div>
@@ -145,12 +153,13 @@ export default function ScheduledList({
 	title,
 	onCancel,
 }: ScheduledListProps) {
+	const dict = useOptionalDictionary();
 	const scheduledDrafts = useMemo(() => {
 		return drafts
 			.filter((d) => String(d.status) === "scheduled")
 			.sort((a, b) => {
-				const aa = a.scheduledAt ? new Date(a.scheduledAt).getTime() : 0;
-				const bb = b.scheduledAt ? new Date(b.scheduledAt).getTime() : 0;
+				const aa = a.scheduledAt ? dayjs(a.scheduledAt).valueOf() : 0;
+				const bb = b.scheduledAt ? dayjs(b.scheduledAt).valueOf() : 0;
 				return aa - bb;
 			});
 	}, [drafts]);
@@ -158,7 +167,7 @@ export default function ScheduledList({
 	if (scheduledDrafts.length === 0) {
 		return (
 			<div className="p-4 text-center text-base text-muted-foreground">
-				No scheduled messages
+				{dict?.mailbox?.noScheduledMessages ?? "No scheduled messages"}
 			</div>
 		);
 	}

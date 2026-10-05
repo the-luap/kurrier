@@ -1,63 +1,103 @@
 import { useSyncExternalStore } from "react";
 import type { FetchMailboxThreadsResult } from "@/lib/actions/mailbox";
+import type { Dictionary } from "@/lib/dictionaries";
 
-// Shared helpers for the desktop and mobile thread list rows. Formatters are
-// created once per module instead of once per row/render (the previous
-// implementation pulled in the Temporal polyfill and resolved the timezone
-// for every row).
+// Shared helpers for the thread list rows. Formatters are created once per
+// locale instead of once per row/render (the previous implementation pulled
+// in the Temporal polyfill and resolved the timezone for every row).
 
 type ThreadItem = FetchMailboxThreadsResult[number];
 type DateInput = string | number | Date | null | undefined;
+type MailboxDict = Dictionary["mailbox"] | null | undefined;
 
-const timeFormatter = new Intl.DateTimeFormat(undefined, {
-	hour: "numeric",
-	minute: "2-digit",
-});
-const dayMonthFormatter = new Intl.DateTimeFormat(undefined, {
-	month: "short",
-	day: "numeric",
-});
-const fullDateFormatter = new Intl.DateTimeFormat(undefined, {
-	month: "short",
-	day: "numeric",
-	year: "numeric",
-});
+type Formatters = {
+	time: Intl.DateTimeFormat;
+	dayMonth: Intl.DateTimeFormat;
+	fullDate: Intl.DateTimeFormat;
+	dateTime: Intl.DateTimeFormat;
+};
 
-function toDate(input: DateInput): Date | null {
+const formatterCache = new Map<string, Formatters>();
+
+function getFormatters(locale: string | undefined): Formatters {
+	const key = locale ?? "";
+	let formatters = formatterCache.get(key);
+	if (!formatters) {
+		formatters = {
+			time: new Intl.DateTimeFormat(locale, {
+				hour: "numeric",
+				minute: "2-digit",
+			}),
+			dayMonth: new Intl.DateTimeFormat(locale, {
+				month: "short",
+				day: "numeric",
+			}),
+			fullDate: new Intl.DateTimeFormat(locale, {
+				month: "short",
+				day: "numeric",
+				year: "numeric",
+			}),
+			dateTime: new Intl.DateTimeFormat(locale, {
+				dateStyle: "medium",
+				timeStyle: "short",
+			}),
+		};
+		formatterCache.set(key, formatters);
+	}
+	return formatters;
+}
+
+export function toDate(input: DateInput): Date | null {
 	if (input === null || input === undefined || input === "") return null;
 	const date = input instanceof Date ? input : new Date(input);
 	return Number.isNaN(date.getTime()) ? null : date;
 }
 
+/** Short date/time in the viewer's timezone ("Mar 4, 2025, 3:04 PM"). */
+export function formatDateTime(input: DateInput, locale?: string): string {
+	const date = toDate(input);
+	return date ? getFormatters(locale).dateTime.format(date) : "";
+}
+
 /** "3:04 PM" for today, "Mar 4" for this year, "Mar 4, 2023" otherwise. */
-export function formatThreadDate(input: DateInput, now = new Date()): string {
+export function formatThreadDate(
+	input: DateInput,
+	locale?: string,
+	now = new Date(),
+): string {
 	const date = toDate(input);
 	if (!date) return "";
+	const formatters = getFormatters(locale);
 	if (
 		date.getFullYear() === now.getFullYear() &&
 		date.getMonth() === now.getMonth() &&
 		date.getDate() === now.getDate()
 	) {
-		return timeFormatter.format(date);
+		return formatters.time.format(date);
 	}
 	if (date.getFullYear() === now.getFullYear()) {
-		return dayMonthFormatter.format(date);
+		return formatters.dayMonth.format(date);
 	}
-	return fullDateFormatter.format(date);
+	return formatters.fullDate.format(date);
 }
 
-/** "5d ago", "3h ago", "12m ago" or "just now". */
-export function formatRelative(input: DateInput, now = Date.now()): string {
+/** "5d ago", "3h ago", "12m ago" or "just now" (translated). */
+export function formatRelative(
+	input: DateInput,
+	dict: MailboxDict,
+	now = Date.now(),
+): string {
 	const date = toDate(input);
 	if (!date) return "";
 	const diffMinutes = Math.floor(Math.abs(now - date.getTime()) / 60_000);
 	const days = Math.floor(diffMinutes / (60 * 24));
 	const hours = Math.floor(diffMinutes / 60) % 24;
 	const minutes = diffMinutes % 60;
-	if (days >= 1) return `${days}d ago`;
-	if (hours >= 1) return `${hours}h ago`;
-	if (minutes >= 1) return `${minutes}m ago`;
-	return "just now";
+	const prefix = dict?.agoPrefix ?? "";
+	if (days >= 1) return `${prefix}${days}${dict?.daysAbbr ?? "d ago"}`;
+	if (hours >= 1) return `${prefix}${hours}${dict?.hoursAbbr ?? "h ago"}`;
+	if (minutes >= 1) return `${prefix}${minutes}${dict?.minutesAbbr ?? "m ago"}`;
+	return dict?.justNow ?? "just now";
 }
 
 export type ThreadTimeLabel = {
@@ -70,15 +110,17 @@ const SNOOZE_BACK_WINDOW_MS = 60 * 60 * 1000;
 
 export function getThreadTimeLabel(
 	item: Pick<ThreadItem, "snoozedUntil" | "unsnoozedAt" | "lastActivityAt">,
+	dict: MailboxDict,
+	locale?: string,
 ): ThreadTimeLabel {
 	const now = Date.now();
 
 	const snoozedUntil = toDate(item.snoozedUntil);
 	if (snoozedUntil && snoozedUntil.getTime() > now) {
 		return {
-			text: "Snoozed",
+			text: dict?.snoozed ?? "Snoozed",
 			className: "text-sm text-orange-400",
-			title: `Snoozed until ${snoozedUntil.toLocaleString()}`,
+			title: `${dict?.snoozedUntilPrefix ?? "Snoozed until "}${formatDateTime(snoozedUntil, locale)}`,
 		};
 	}
 
@@ -87,17 +129,17 @@ export function getThreadTimeLabel(
 		const ageMs = now - unsnoozedAt.getTime();
 		if (ageMs >= 0 && ageMs <= SNOOZE_BACK_WINDOW_MS) {
 			return {
-				text: `Snoozed back ${formatRelative(unsnoozedAt, now)}`,
+				text: `${dict?.snoozedBackPrefix ?? "Snoozed back "}${formatRelative(unsnoozedAt, dict, now)}`,
 				className: "text-sm text-orange-400",
-				title: `Returned from snooze ${unsnoozedAt.toLocaleString()}`,
+				title: `${dict?.returnedFromSnoozePrefix ?? "Returned from snooze "}${formatDateTime(unsnoozedAt, locale)}`,
 			};
 		}
 	}
 
 	return {
-		text: formatThreadDate(item.lastActivityAt || now, new Date(now)),
+		text: formatThreadDate(item.lastActivityAt || now, locale, new Date(now)),
 		className: "text-sm text-foreground",
-		title: "",
+		title: formatDateTime(item.lastActivityAt || now, locale),
 	};
 }
 
@@ -125,22 +167,10 @@ export function getParticipantNames(
 	return names.slice(0, 3).join(", ") + (names.length > 3 ? "…" : "");
 }
 
-/** Base URL ("…/threads/") for opening a thread from the list. */
-export function getThreadBaseHref(
-	pathname: string,
-	identityPublicId: string,
-	mailboxSlug: string | null | undefined,
-): string {
-	const prefix = pathname.match("/dashboard/mail")
-		? "/dashboard/mail"
-		: "/mail";
-	return `${prefix}/${identityPublicId}/${mailboxSlug}/threads/`;
-}
-
 const subscribeNoop = () => () => {};
 
 /**
- * false during SSR and hydration, true afterwards. Lets rows render
+ * false during SSR and hydration, true afterwards. Lets components render
  * timezone-dependent labels on the client only, without a per-row
  * useEffect + setState (which costs an extra render for every row).
  */

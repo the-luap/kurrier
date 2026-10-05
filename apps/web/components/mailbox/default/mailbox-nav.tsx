@@ -12,116 +12,103 @@ import {
 	Ban,
 	Trash2,
 	Folder,
+	Plus,
 } from "lucide-react";
-import type { MailboxEntity } from "@db";
-import type React from "react";
+import { MailboxEntity } from "@db";
 
-type Mailbox = MailboxEntity & {
+type Mailbox = {
+	slug: string | null;
+	kind:
+		| "inbox"
+		| "sent"
+		| "drafts"
+		| "archive"
+		| "spam"
+		| "trash"
+		| "outbox"
+		| "custom";
+	name?: string | null;
 	unreadCount?: number | null;
-	unreadThreads?: number | null;
 };
-
-const systemOrder: Mailbox["kind"][] = [
-	"inbox",
-	"drafts",
-	"sent",
-	"archive",
-	"spam",
-	"trash",
-	"outbox",
-];
-
-const orderIndex = (kind: Mailbox["kind"]) => {
-	const index = systemOrder.indexOf(kind);
-	return index === -1 ? Number.MAX_SAFE_INTEGER : index;
-};
-
-const iconFor: Record<Mailbox["kind"], React.ElementType> = {
-	inbox: Inbox,
-	sent: Send,
-	drafts: FileText,
-	archive: Archive,
-	spam: Ban,
-	trash: Trash2,
-	outbox: Send,
-	custom: Folder,
-};
-
-// Module scope: defining the item inside MailboxNav created a new component
-// type on every render, remounting every link on each navigation.
-function MailboxNavItem({
-	mailbox,
-	identityPublicId,
-	pathname,
-	activeSlugParam,
-}: {
-	mailbox: Mailbox;
-	identityPublicId: string;
-	pathname: string;
-	activeSlugParam?: string;
-}) {
-	const Icon = iconFor[mailbox.kind] ?? Folder;
-	const slug = mailbox.slug ?? "inbox";
-	const href = `/dashboard/mail/${identityPublicId}/${slug}`;
-	const unreadCount = Number(mailbox.unreadCount ?? 0);
-
-	const isActive =
-		pathname === href || (activeSlugParam == null && slug === "inbox");
-
-	return (
-		<Link
-			href={href}
-			prefetch={false}
-			className={cn(
-				"group flex items-center gap-2 rounded-md px-2 py-1.5 text-sm",
-				"hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
-				isActive && "bg-sidebar-accent text-sidebar-accent-foreground",
-			)}
-		>
-			<Icon className="h-4 w-4 shrink-0" />
-			<span className="min-w-0 truncate">
-				{mailbox.kind === "custom"
-					? (mailbox.name ?? "Folder")
-					: titleFor(mailbox.kind)}
-			</span>
-			{unreadCount > 0 ? (
-				<Badge variant={isActive ? "secondary" : "outline"} className="ml-auto">
-					{unreadCount}
-				</Badge>
-			) : null}
-		</Link>
-	);
-}
 
 export function MailboxNav({
 	mailboxes,
 	identityPublicId,
+	onCreateLabel,
 }: {
-	mailboxes: Mailbox[];
+	mailboxes: MailboxEntity[];
 	identityPublicId: string;
 	onCreateLabel?: () => void;
 }) {
 	const pathname = usePathname();
 	const params = useParams() as { mailboxSlug?: string };
 
-	const sortedMailboxes = [...mailboxes].sort((a, b) => {
-		const ai = orderIndex(a.kind);
-		const bi = orderIndex(b.kind);
-		if (ai !== bi) return ai - bi;
-		return (a.name ?? a.slug ?? "").localeCompare(b.name ?? b.slug ?? "");
-	});
+	const systemOrder: Mailbox["kind"][] = [
+		"inbox",
+		"starred" as any, // if you add later
+		"drafts",
+		"sent",
+		"archive",
+		"spam",
+		"trash",
+	].filter(Boolean) as Mailbox["kind"][];
+
+	const iconFor: Record<Mailbox["kind"], React.ElementType> = {
+		inbox: Inbox,
+		sent: Send,
+		drafts: FileText,
+		archive: Archive,
+		spam: Ban,
+		trash: Trash2,
+		outbox: Send,
+		custom: Folder,
+	};
+
+	const system = mailboxes
+		.filter((m) => m.kind !== "custom")
+		.filter((m) => m.kind !== "drafts")
+		.sort((a, b) => systemOrder.indexOf(a.kind) - systemOrder.indexOf(b.kind));
+
+	const custom = mailboxes.filter((m) => m.kind === "custom");
+
+	const Item = ({ m }: { m: Mailbox }) => {
+		const Icon = iconFor[m.kind] ?? Folder;
+		const slug = m.slug ?? "inbox";
+		const href = `/mail/${identityPublicId}/${slug}`;
+
+		const isActive =
+			pathname === href || (params.mailboxSlug == null && slug === "inbox");
+
+		return (
+			<Link
+				href={href}
+				className={cn(
+					"group flex items-center gap-2 rounded-md px-2 py-1.5 text-sm",
+					"hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+					isActive && "bg-sidebar-accent text-sidebar-accent-foreground",
+				)}
+			>
+				<Icon className="h-4 w-4 shrink-0" />
+				<span className="min-w-0 truncate">
+					{m.kind === "custom" ? (m.name ?? "Label") : titleFor(m.kind)}
+				</span>
+				{m.unreadCount ? (
+					<Badge
+						variant={isActive ? "secondary" : "outline"}
+						className="ml-auto"
+					>
+						{m.unreadCount}
+					</Badge>
+				) : null}
+			</Link>
+		);
+	};
 
 	return (
 		<div className="space-y-4 px-2">
 			<div className="space-y-1">
-				{sortedMailboxes.map((mailbox) => (
-					<MailboxNavItem
-						key={mailbox.id}
-						mailbox={mailbox}
-						identityPublicId={identityPublicId}
-						pathname={pathname}
-						activeSlugParam={params.mailboxSlug}
-					/>
+				{system.map((m) => (
+					<Item key={m.slug ?? m.kind} m={m} />
 				))}
 			</div>
 		</div>

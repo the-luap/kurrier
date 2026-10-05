@@ -2,8 +2,19 @@
 import type { MailboxEntity, MailboxSyncEntity } from "@db";
 import { IconStar, IconStarFilled } from "@tabler/icons-react";
 import { Mail, MailOpen, Paperclip, Trash2 } from "lucide-react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
-import React from "react";
+import { memo, useState } from "react";
+import { toast } from "sonner";
+import LabelRowTag from "@/components/dashboard/labels/label-row-tag";
+import ThreadLabelHoverButtons from "@/components/dashboard/labels/thread-label-hover-buttons";
+import SnoozeMail from "@/components/mailbox/default/snooze-mail";
+import {
+	getParticipantNames,
+	getThreadTimeLabel,
+	useIsClient,
+} from "@/components/mailbox/default/thread-list-utils";
+import { useOptionalDictionary } from "@/components/providers/dictionary-provider";
 import type {
 	FetchLabelsResult,
 	FetchMailboxThreadLabelsResult,
@@ -16,42 +27,33 @@ import {
 	toggleStar,
 } from "@/lib/actions/mailbox";
 
-import { toast } from "sonner";
-import LabelRowTag from "@/components/dashboard/labels/label-row-tag";
-import ThreadLabelHoverButtons from "@/components/dashboard/labels/thread-label-hover-buttons";
-import SnoozeMail from "@/components/mailbox/default/snooze-mail";
-import {
-	getParticipantNames,
-	getThreadTimeLabel,
-	useIsClient,
-} from "@/components/mailbox/default/thread-list-utils";
+type ThreadRow = FetchMailboxThreadsResult[number];
 
 type Props = {
-	mailboxThreadItem: FetchMailboxThreadsResult[number];
+	mailboxThreadItem: ThreadRow;
 	activeMailbox: MailboxEntity;
 	mailboxSync: MailboxSyncEntity | undefined;
 	globalLabels: FetchLabelsResult;
 	labelsByThreadId: FetchMailboxThreadLabelsResult;
-	/** e.g. "/dashboard/mail/<identity>/<mailbox>/threads/" */
+	/** e.g. "/w/<ws>/dashboard/mail/<identity>/<mailbox>/threads/" */
 	threadBaseHref: string;
 	isOnSnoozedPage: boolean;
 	selected: boolean;
 	onToggleSelect: (threadId: string, checked: boolean) => void;
 };
 
-const ACTIONS_W = "96px";
-
-function ThreadTime({ item }: { item: FetchMailboxThreadsResult[number] }) {
+function ThreadTime({ item }: { item: ThreadRow }) {
+	const dict = useOptionalDictionary();
 	// Timezone dependent: rendered on the client only (empty during SSR and
-	// hydration, as before).
+	// hydration) so server and browser timezones never disagree.
 	const isClient = useIsClient();
 	const timeLabel = isClient
-		? getThreadTimeLabel(item)
+		? getThreadTimeLabel(item, dict?.mailbox, dict?.locale)
 		: { text: "", className: "text-sm text-foreground", title: "" };
 	return (
 		<time
 			className={["whitespace-nowrap", timeLabel.className].join(" ")}
-			title={timeLabel.title}
+			title={timeLabel.title || undefined}
 			suppressHydrationWarning
 		>
 			{timeLabel.text}
@@ -59,9 +61,9 @@ function ThreadTime({ item }: { item: FetchMailboxThreadsResult[number] }) {
 	);
 }
 
-// Memoized: selecting a row or toggling the list only re-renders the rows
-// whose props changed instead of every row in the list.
-const WebmailListItem = React.memo(function WebmailListItem({
+// Memoized: selecting a row only re-renders the rows whose props changed
+// instead of every row in the list.
+const WebmailListItem = memo(function WebmailListItem({
 	mailboxThreadItem,
 	activeMailbox,
 	mailboxSync,
@@ -72,57 +74,83 @@ const WebmailListItem = React.memo(function WebmailListItem({
 	selected,
 	onToggleSelect,
 }: Props) {
+	const dict = useOptionalDictionary();
 	const router = useRouter();
-	const [isDeleting, setIsDeleting] = React.useState(false);
+	const [isDeleting, setIsDeleting] = useState(false);
+	const [busy, setBusy] = useState(false);
 
-	const threadHref = `${threadBaseHref}${mailboxThreadItem.threadId}`;
-	const openThread = () => {
-		const url = threadHref;
-
-		// TODO: Fix full page reload on snoozed page, hoist @thread layout to higher level
-		if (isOnSnoozedPage) {
-			window.location.href = url;
-			return;
-		}
-		router.push(url);
-	};
-
+	const threadUrl = `${threadBaseHref}${mailboxThreadItem.threadId}`;
 	const allNames = getParticipantNames(mailboxThreadItem.participants);
-
-	const canMarkAsRead = mailboxThreadItem.unreadCount > 0;
-	const canMarkAsUnread =
-		mailboxThreadItem.messageCount > 0 && mailboxThreadItem.unreadCount === 0;
 
 	const unreadCount = Number(mailboxThreadItem.unreadCount ?? 0);
 	const isUnread = unreadCount > 0;
-	const isRead = unreadCount === 0;
+	const isRead = !isUnread;
+	const canMarkAsRead = isUnread;
+	const canMarkAsUnread = mailboxThreadItem.messageCount > 0 && isRead;
+
+	const runAction = async (action: () => Promise<unknown>) => {
+		if (busy) return;
+		setBusy(true);
+		try {
+			await action();
+		} catch (error) {
+			toast.error(dict?.mailbox?.actionFailed ?? "Action failed", {
+				description: error instanceof Error ? error.message : undefined,
+				position: "bottom-left",
+			});
+		} finally {
+			setBusy(false);
+		}
+	};
+
+	// Hide the row right away and roll back if the server action fails.
+	const deleteThread = async (e: React.MouseEvent) => {
+		e.preventDefault();
+		e.stopPropagation();
+		setIsDeleting(true);
+		try {
+			await moveToTrash(
+				mailboxThreadItem.threadId,
+				activeMailbox.id,
+				!!mailboxSync,
+				true,
+			);
+			toast.success(dict?.mailbox?.movedToTrash ?? "Messages moved to Trash", {
+				position: "bottom-left",
+			});
+			router.refresh();
+		} catch (error) {
+			setIsDeleting(false);
+			toast.error(dict?.mailbox?.deleteFailed ?? "Delete failed", {
+				description: error instanceof Error ? error.message : undefined,
+				position: "bottom-left",
+			});
+		}
+	};
 
 	if (isDeleting) return null;
-
-	// The sender/subject cells are real links: keyboard focusable, and
-	// cmd/ctrl/middle-click opens the thread in a new tab natively.
-	const onLinkClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
-		if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0)
-			return;
-		e.preventDefault();
-		openThread();
-	};
 
 	return (
 		<li
 			className={[
-				"relative group grid cursor-pointer has-[:focus-visible]:bg-muted/50",
-				// "grid-cols-[auto_auto_minmax(16rem,1fr)_minmax(10rem,2fr)_auto]",
-				"grid-cols-[auto_auto_20rem_minmax(10rem,2fr)_auto]",
-				// "grid-cols-[auto_auto_minmax(8rem,12rem)_minmax(10rem,2fr)_auto]",
-				"items-center gap-3 px-3 py-2 transition-colors hover:bg-muted/50",
+				"group relative grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-2 gap-y-1 px-3 py-3 transition-colors hover:bg-muted/50 has-[:focus-visible]:bg-muted/50 xl:grid-cols-[auto_minmax(10rem,20rem)_minmax(10rem,1fr)_auto] xl:items-center xl:gap-3 xl:py-2 xl:pr-28",
 				isRead
-					? "bg-muted/40 text-muted-foreground"
+					? "bg-muted/50 text-muted-foreground"
 					: "bg-background font-semibold text-foreground",
-				`pr-[${ACTIONS_W}]`,
 			].join(" ")}
 		>
-			<div className="flex items-center">
+			{/* Keep the existing full reload for Snoozed until its parallel route is hoisted. */}
+			{isOnSnoozedPage ? (
+				<a href={threadUrl} className="absolute inset-0">
+					<span className="sr-only">{mailboxThreadItem.subject}</span>
+				</a>
+			) : (
+				<Link href={threadUrl} className="absolute inset-0">
+					<span className="sr-only">{mailboxThreadItem.subject}</span>
+				</Link>
+			)}
+
+			<div className="relative z-10 row-span-2 flex items-start gap-2 pt-1 xl:row-span-1 xl:items-center xl:pt-0">
 				{!isOnSnoozedPage && (
 					<input
 						type="checkbox"
@@ -130,94 +158,101 @@ const WebmailListItem = React.memo(function WebmailListItem({
 							onToggleSelect(mailboxThreadItem.threadId, e.target.checked)
 						}
 						checked={selected}
-						aria-label={`Select thread ${mailboxThreadItem.subject}`}
-						className="h-4 w-4 rounded border-muted-foreground/40"
-						onClick={(e) => e.stopPropagation()}
+						aria-label={`${dict?.mailbox?.selectThreadPrefix ?? "Select thread "}${mailboxThreadItem.subject}`}
+						className="size-4 rounded border-muted-foreground/40"
 					/>
 				)}
+
+				<button
+					type="button"
+					aria-label={
+						mailboxThreadItem.starred
+							? (dict?.mailbox?.unstar ?? "Unstar")
+							: (dict?.mailbox?.star ?? "Star")
+					}
+					aria-pressed={mailboxThreadItem.starred}
+					disabled={busy}
+					className="text-muted-foreground hover:text-foreground"
+					onClick={() =>
+						runAction(() =>
+							toggleStar(
+								mailboxThreadItem.threadId,
+								activeMailbox.id,
+								mailboxThreadItem.starred,
+								!!mailboxSync,
+							),
+						)
+					}
+				>
+					{mailboxThreadItem.starred ? (
+						<IconStarFilled className={"text-yellow-400"} size={12} />
+					) : (
+						<IconStar className="size-3" />
+					)}
+				</button>
 			</div>
 
-			<button
-				type="button"
-				aria-label={mailboxThreadItem.starred ? "Unstar" : "Star"}
-				aria-pressed={mailboxThreadItem.starred}
-				className="text-muted-foreground hover:text-foreground"
-				onClick={() =>
-					toggleStar(
-						mailboxThreadItem.threadId,
-						activeMailbox.id,
-						mailboxThreadItem.starred,
-						!!mailboxSync,
-					)
-				}
-			>
-				{mailboxThreadItem.starred ? (
-					<IconStarFilled className={"text-yellow-400"} size={12} />
-				) : (
-					<IconStar className="h-3 w-3" />
+			<div className="pointer-events-none flex min-w-0 items-center gap-2 pr-2">
+				<span
+					className={[
+						"size-2 shrink-0 rounded-full",
+						isUnread ? "bg-primary" : "bg-transparent",
+					].join(" ")}
+					aria-hidden="true"
+				/>
+				{isUnread && (
+					<span className="sr-only">{dict?.mailbox?.unread ?? "Unread"}</span>
 				)}
-			</button>
-
-			<a
-				href={threadHref}
-				onClick={onLinkClick}
-				tabIndex={-1}
-				className="flex min-w-0 items-center gap-2 truncate pr-2"
-			>
-				{isUnread ? (
-					<span
-						className="h-2 w-2 shrink-0 rounded-full bg-primary"
-						title={`${unreadCount} unread`}
-					/>
-				) : (
-					<span className="h-2 w-2 shrink-0 rounded-full bg-transparent" />
-				)}
-				<span className="truncate">{allNames}</span>{" "}
+				<span className="truncate">{allNames}</span>
 				{mailboxThreadItem.messageCount > 1 && (
-					<span className="text-xs text-muted-foreground font-normal">
+					<span className="shrink-0 text-xs text-muted-foreground font-normal">
 						{mailboxThreadItem.messageCount}
 					</span>
 				)}
-			</a>
+			</div>
 
-			<a
-				href={threadHref}
-				onClick={onLinkClick}
-				className="flex min-w-0 items-center gap-1 pr-2 focus-visible:outline-none"
-			>
+			<div className="pointer-events-none col-start-2 flex min-w-0 items-center gap-1 pr-2 text-sm font-normal text-muted-foreground xl:col-start-auto">
 				<LabelRowTag
 					threadId={mailboxThreadItem.threadId}
 					labelsByThreadId={labelsByThreadId}
 					isRead={isRead}
 				/>
-				<span className="truncate">{mailboxThreadItem.subject}</span>
-				<span className="mx-1 text-muted-foreground">–</span>
-				<span className="truncate text-muted-foreground font-normal">
+				<span
+					className={[
+						"truncate text-foreground",
+						isUnread ? "font-semibold" : "",
+					].join(" ")}
+				>
+					{mailboxThreadItem.subject}
+				</span>
+				<span className="mx-1 hidden text-muted-foreground sm:inline">–</span>
+				<span className="hidden truncate text-muted-foreground sm:inline">
 					{mailboxThreadItem.previewText}
 				</span>
 				{mailboxThreadItem.hasAttachments && (
-					<Paperclip className="ml-1 hidden h-4 w-4 text-muted-foreground md:inline" />
+					<Paperclip className="ml-1 hidden size-4 shrink-0 text-muted-foreground sm:inline" />
 				)}
-			</a>
-
-			<div className="ml-auto flex items-center gap-2 pl-2">
-				{mailboxThreadItem.unreadCount > 0 ? (
-					<Mail className="h-4 w-4 text-primary md:hidden" />
-				) : (
-					<MailOpen className="h-4 w-4 text-muted-foreground md:hidden" />
-				)}
-				<ThreadTime item={mailboxThreadItem} />
 			</div>
 
-			<div
-				className={[
-					"pointer-events-none absolute inset-y-0 right-3 flex items-center justify-end gap-1 bg-muted",
-					`w-[${ACTIONS_W}]`,
-					"opacity-0 transition-opacity duration-100",
-					"group-hover:opacity-100 group-hover:pointer-events-auto px-3 rounded-l-4xl",
-				].join(" ")}
-				onClick={(e) => e.stopPropagation()}
-			>
+			<div className="pointer-events-none col-start-3 row-span-2 row-start-1 ml-auto flex flex-col items-end gap-1 pl-2 xl:col-start-auto xl:row-span-1 xl:flex-row xl:items-center xl:gap-2">
+				<div className="flex items-center gap-2">
+					{isUnread ? (
+						<Mail className="size-4 text-primary xl:hidden" />
+					) : (
+						<MailOpen className="size-4 text-muted-foreground xl:hidden" />
+					)}
+					<ThreadTime item={mailboxThreadItem} />
+				</div>
+				<div className="pointer-events-auto relative z-10 xl:hidden">
+					<ThreadLabelHoverButtons
+						mailboxThreadItem={mailboxThreadItem}
+						labelsByThreadId={labelsByThreadId}
+						allLabels={globalLabels}
+					/>
+				</div>
+			</div>
+
+			<div className="pointer-events-none absolute inset-y-0 right-3 z-20 hidden w-28 items-center justify-end gap-1 rounded-l-4xl bg-muted px-3 opacity-0 transition-opacity duration-100 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 xl:flex">
 				<ThreadLabelHoverButtons
 					mailboxThreadItem={mailboxThreadItem}
 					labelsByThreadId={labelsByThreadId}
@@ -227,36 +262,42 @@ const WebmailListItem = React.memo(function WebmailListItem({
 				{canMarkAsUnread && (
 					<button
 						type="button"
-						aria-label="Mark as unread"
-						onClick={async () => {
-							return await markAsUnread(
-								mailboxThreadItem.threadId,
-								activeMailbox.id,
-								!!mailboxSync,
-								true,
-							);
-						}}
+						disabled={busy}
+						onClick={() =>
+							runAction(() =>
+								markAsUnread(
+									mailboxThreadItem.threadId,
+									activeMailbox.id,
+									!!mailboxSync,
+									true,
+								),
+							)
+						}
 						className="rounded p-1 hover:bg-muted"
-						title="Mark as unread"
+						title={dict?.mailbox?.markAsUnread ?? "Mark as unread"}
+						aria-label={dict?.mailbox?.markAsUnread ?? "Mark as unread"}
 					>
-						<Mail className="h-4 w-4" />
+						<Mail className="size-4" />
 					</button>
 				)}
 				{canMarkAsRead && (
 					<button
 						type="button"
-						aria-label="Mark as read"
+						disabled={busy}
 						onClick={() =>
-							markAsRead(
-								mailboxThreadItem.threadId,
-								activeMailbox.id,
-								!!mailboxSync,
+							runAction(() =>
+								markAsRead(
+									mailboxThreadItem.threadId,
+									activeMailbox.id,
+									!!mailboxSync,
+								),
 							)
 						}
 						className="rounded p-1 hover:bg-muted"
-						title="Mark as read"
+						title={dict?.mailbox?.markAsRead ?? "Mark as read"}
+						aria-label={dict?.mailbox?.markAsRead ?? "Mark as read"}
 					>
-						<MailOpen className="h-4 w-4" />
+						<MailOpen className="size-4" />
 					</button>
 				)}
 
@@ -267,34 +308,12 @@ const WebmailListItem = React.memo(function WebmailListItem({
 
 				<button
 					type="button"
-					aria-label="Delete"
-					onClick={async (e) => {
-						e.preventDefault();
-						e.stopPropagation();
-						setIsDeleting(true);
-						try {
-							await moveToTrash(
-								mailboxThreadItem.threadId,
-								activeMailbox.id,
-								!!mailboxSync,
-								true,
-							);
-							toast.success("Messages moved to Trash", {
-								position: "bottom-left",
-							});
-							router.refresh();
-						} catch (error) {
-							setIsDeleting(false);
-							toast.error(
-								error instanceof Error ? error.message : "Delete failed",
-								{ position: "bottom-left" },
-							);
-						}
-					}}
+					onClick={deleteThread}
 					className="rounded p-1 hover:bg-muted"
-					title="Delete"
+					title={dict?.mailbox?.delete ?? "Delete"}
+					aria-label={dict?.mailbox?.delete ?? "Delete"}
 				>
-					<Trash2 className="h-4 w-4" />
+					<Trash2 className="size-4" />
 				</button>
 			</div>
 		</li>

@@ -1,4 +1,5 @@
 export * from "./types/config";
+export * from "./types/custom-email-providers";
 export * from "./types/themes";
 export * from "./types/form";
 export * from "./types/providers";
@@ -11,3 +12,4 @@ export * from "./types/api";
 export * from "./types/calendar";
 export * from "./types/drive";
 export * from "./types/mail-rules";
+export * from "./types/extensions/hooks";

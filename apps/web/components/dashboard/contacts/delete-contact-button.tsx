@@ -1,21 +1,25 @@
 "use client";
 
-import React from "react";
-import { IconTrash } from "@tabler/icons-react";
+import type { ContactEntity } from "@db";
 import { ActionIcon } from "@mantine/core";
 import { modals } from "@mantine/modals";
-import { ContactEntity } from "@db";
+import { IconTrash } from "@tabler/icons-react";
 import { useRouter } from "next/navigation";
+import { responsiveModalActionsClassName } from "@/components/common/modal-actions";
+import { useOptionalDictionary } from "@/components/providers/dictionary-provider";
 
 type DeleteContactButtonProps = {
 	contact: Pick<ContactEntity, "id" | "firstName" | "lastName">;
+	workspacePublicId: string;
 	onDeleteAction: (id: string) => Promise<{ success: boolean }>;
 };
 
 function DeleteContactButton({
 	contact,
+	workspacePublicId,
 	onDeleteAction,
 }: DeleteContactButtonProps) {
+	const dict = useOptionalDictionary();
 	const router = useRouter();
 	const confirmDeleteContact = () => {
 		if (!contact.id) return;
@@ -23,24 +27,30 @@ function DeleteContactButton({
 		modals.openConfirmModal({
 			title: (
 				<div className="font-semibold text-brand-foreground">
-					Delete Contact
+					{dict?.contacts?.deleteContact ?? "Delete Contact"}
 				</div>
 			),
 			centered: true,
 			children: (
 				<div className="text-sm">
-					Are you sure you want to delete{" "}
+					{dict?.contacts?.confirmDeleteContactPrefix ??
+						"Are you sure you want to delete"}{" "}
 					<b>
 						{contact.firstName} {contact.lastName}
 					</b>
-					? This will remove the contact permanently.
+					{dict?.contacts?.confirmDeleteContactSuffix ??
+						"? This will remove the contact permanently."}
 				</div>
 			),
-			labels: { confirm: "Delete", cancel: "Cancel" },
+			labels: {
+				confirm: dict?.contacts?.delete ?? "Delete",
+				cancel: dict?.contacts?.cancel ?? "Cancel",
+			},
 			confirmProps: { color: "red" },
+			groupProps: { className: responsiveModalActionsClassName },
 			onConfirm: async () => {
 				await onDeleteAction(contact.id);
-				router.push("/dashboard/contacts");
+				router.push(`/w/${workspacePublicId}/dashboard/contacts`);
 			},
 		});
 	};
@@ -48,8 +58,8 @@ function DeleteContactButton({
 	return (
 		<ActionIcon
 			onClick={confirmDeleteContact}
-			aria-label="Delete contact"
-			title="Delete contact"
+			aria-label={dict?.contacts?.deleteContact ?? "Delete Contact"}
+			title={dict?.contacts?.deleteContact ?? "Delete Contact"}
 			size="md"
 			className={"-mt-1"}
 			variant={"subtle"}

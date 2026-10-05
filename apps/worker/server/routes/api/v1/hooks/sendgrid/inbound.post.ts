@@ -2,11 +2,8 @@ import { defineEventHandler, readMultipartFormData } from "h3";
 import {
 	assertInboundWebhookAuthorized,
 	extractEmailAddresses,
-	getToEmails,
 	storeInboundRawEmail,
-} from "../../../../../utils/inbound-email";
-
-export { getToEmails };
+} from "../../../../../../lib/inbound-email";
 
 function getEnvelopeRecipients(envelope: string | undefined): string[] {
 	if (!envelope) return [];
@@ -37,7 +34,13 @@ export default defineEventHandler(async (event) => {
 		);
 
 		const rawMime = Buffer.from(emailPart.data).toString("utf8");
-		return await storeInboundRawEmail(rawMime, envelopeRecipients);
+		// Permanent rejects resolve with { ok: false } and HTTP 200, so
+		// SendGrid does not retry them; unexpected errors return 5xx.
+		return await storeInboundRawEmail(
+			rawMime,
+			envelopeRecipients,
+			"sendgrid",
+		);
 	} catch (err) {
 		console.error("[Webhook] SendGrid inbound error:", err);
 		throw err;

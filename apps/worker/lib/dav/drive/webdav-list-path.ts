@@ -1,6 +1,7 @@
 import { db, driveEntries, driveVolumes } from "@db";
 import { and, eq, inArray } from "drizzle-orm";
 import { XMLParser } from "fast-xml-parser";
+import { safePathSegments } from "./safe-local-path";
 
 const davParser = new XMLParser({
 	ignoreAttributes: false,
@@ -89,6 +90,12 @@ export const webdavListPath = async (opts: {
 }) => {
 	const ownerId = opts.ownerId;
 	const within = (opts.segments ?? []).filter(Boolean).map(trimSlashes);
+	// Reject "..", "%2e%2e", ... so the PROPFIND stays inside the home.
+	try {
+		safePathSegments(within.join("/"));
+	} catch {
+		throw new Error("webdavListPath: invalid path");
+	}
 
 	const volume = await ensureHomeVolume(ownerId);
 	const davBase = ensureTrailingSlash(

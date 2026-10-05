@@ -1,0 +1,145 @@
+import { providerSecrets, smtpAccountSecrets } from "@db";
+import { ProviderLabels } from "@schema";
+import MailIdentities from "@/components/dashboard/identities/mail-identities";
+import { Separator } from "@/components/ui/separator";
+import { SidebarTrigger } from "@/components/ui/sidebar";
+import {
+	fetchDecryptedSecrets,
+	fetchGoogleAccounts,
+	fetchUserIdentities,
+	syncProviders,
+} from "@/lib/actions/dashboard";
+import {
+	fetchWorkspace,
+	fetchWorkspaceMembers,
+	workspaceIdentityAssignments,
+} from "@/lib/actions/workspace";
+import { getDictionary } from "@/lib/dictionaries";
+import { parseSecret } from "@/lib/utils";
+import {getWorkspaceRole} from "@/lib/actions/clients";
+
+async function Page({ params }: { params: Promise<{ locale: string }> }) {
+	const { locale } = await params;
+	// Every lookup is independent (only the member list needs the workspace
+	// id), so run them in parallel instead of one after another.
+	const [
+		dict,
+		userSmtpAccounts,
+		userProviderAccounts,
+		userIdentities,
+		googleAccounts,
+		userProviders,
+		workspace,
+		workspaceUserIdentities,
+		workspaceRole,
+	] = await Promise.all([
+		getDictionary(locale),
+		fetchDecryptedSecrets({
+			linkTable: smtpAccountSecrets,
+			foreignCol: smtpAccountSecrets.accountId,
+			secretIdCol: smtpAccountSecrets.secretId,
+		}),
+		fetchDecryptedSecrets({
+			linkTable: providerSecrets,
+			foreignCol: providerSecrets.providerId,
+			secretIdCol: providerSecrets.secretId,
+		}),
+		fetchUserIdentities(),
+		fetchGoogleAccounts(),
+		// One query for all providers instead of one getProviderById per account.
+		syncProviders(),
+		fetchWorkspace(),
+		workspaceIdentityAssignments(),
+		getWorkspaceRole(),
+	]);
+	const providersById = new Map(userProviders.map((p) => [p.id, p]));
+	const workspaceMembersPromise = fetchWorkspaceMembers(workspace.id);
+
+	const options = [];
+	const emailProviderTypes = ["ses", "mailgun", "postmark"];
+
+	for (const providerAccount of userProviderAccounts) {
+		const secret = parseSecret(providerAccount);
+
+		if (secret.verified) {
+			const provider = providersById.get(
+				String(providerAccount.linkRow.providerId),
+			);
+
+			if (!provider || !emailProviderTypes.includes(provider.type)) {
+				continue;
+			}
+
+			const providerTypeKey = `providerName${provider.type.charAt(0).toUpperCase()}${provider.type.slice(1)}`;
+			const providerName =
+				(dict.platform as Record<string, string>)[providerTypeKey] ||
+				ProviderLabels[provider.type] ||
+				dict.platform.unknownProvider;
+
+			options.push({
+				label: providerName,
+				value: `provider-${String(providerAccount.linkRow.id)}`,
+			});
+		}
+	}
+	for (const smtpAccount of userSmtpAccounts) {
+		const secret = parseSecret(smtpAccount);
+		if (secret.sendVerified || secret.receiveVerified) {
+			options.push({
+				label: `${dict.platform.smtpAccountLabelPrefix}${secret.label})`,
+				value: `smtp-${String(smtpAccount.linkRow.id)}`,
+			});
+		}
+	}
+	for (const googleAccount of googleAccounts) {
+		const canSend = googleAccount.scopes?.includes(
+			"https://www.googleapis.com/auth/gmail.send",
+		);
+
+		const verified =
+			googleAccount.status === "connected" &&
+			canSend &&
+			!googleAccount.lastError;
+
+		if (verified) {
+			options.push({
+				label: `${dict.platform.googleAccountLabelPrefix}${googleAccount.email})`,
+				value: `google-${googleAccount.id}`,
+			});
+		}
+	}
+
+	const workspaceMembers = await workspaceMembersPromise;
+	const canManageIdentityAccess =
+		workspaceRole === "owner" || workspaceRole === "admin";
+
+
+	return (
+		<>
+			<header className="flex h-16 shrink-0 items-center gap-2">
+				<div className="flex items-center gap-2 px-4">
+					<SidebarTrigger className="-ml-1" />
+					<Separator
+						orientation="vertical"
+						className="mr-2 data-[orientation=vertical]:h-4"
+					/>
+				</div>
+			</header>
+			<div className="flex flex-1 flex-col gap-4 p-4 pt-0">
+				<MailIdentities
+					userIdentities={userIdentities}
+					smtpAccounts={userSmtpAccounts}
+					providerAccounts={userProviderAccounts}
+					providerOptions={options}
+					workspace={workspace}
+					workspaceMembers={workspaceMembers}
+					workspaceUserIdentities={workspaceUserIdentities}
+					googleAccounts={googleAccounts}
+					canManageIdentityAccess={canManageIdentityAccess}
+				/>
+			</div>
+		</>
+	);
+}
+
+export default Page;

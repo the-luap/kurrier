@@ -5,6 +5,8 @@ on:
 
 jobs:
   publish:
+    # Upstream release flow only; never runs in forks.
+    if: ${{ github.repository == 'kurrier-org/kurrier' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

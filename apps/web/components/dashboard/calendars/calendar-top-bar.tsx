@@ -1,14 +1,29 @@
 "use client";
-import React, { useEffect } from "react";
-import { ActionIcon, Button, SegmentedControl } from "@mantine/core";
-import { ChevronLeft, ChevronRight } from "lucide-react";
-import { useAppearance } from "@/components/providers/appearance-provider";
-import { useParams, useRouter } from "next/navigation";
-import { useDynamicContext } from "@/hooks/use-dynamic-context";
-import { CalendarState, calendarViewsList, CalendarViewType } from "@schema";
 import { getDayjsTz } from "@common/day-js-extended";
+import { ActionIcon, Button, SegmentedControl } from "@mantine/core";
+import {
+	type CalendarState,
+	type CalendarViewType,
+	calendarViewsList,
+} from "@schema";
+import { ChevronLeft, ChevronRight } from "lucide-react";
+import { useParams, useRouter } from "next/navigation";
+import { useEffect } from "react";
+import NewEventButton from "@/components/dashboard/calendars/new-event-button";
+import { useAppearance } from "@/components/providers/appearance-provider";
+import { useOptionalDictionary } from "@/components/providers/dictionary-provider";
+import { useDynamicContext } from "@/hooks/use-dynamic-context";
+import { DAYJS_LOCALES } from "@/lib/locale";
 
-function CalendarTopBar() {
+const VIEW_LABEL_KEYS: Record<string, string> = {
+	day: "viewDay",
+	week: "viewWeek",
+	month: "viewMonth",
+	year: "viewYear",
+};
+
+function CalendarTopBar({ workspacePublicId }: { workspacePublicId: string }) {
+	const dict = useOptionalDictionary();
 	const { theme } = useAppearance();
 	const router = useRouter();
 	const { state, setState } = useDynamicContext<CalendarState>();
@@ -30,6 +45,9 @@ function CalendarTopBar() {
 					.month(Number(params.month) - 1)
 					.date(Number(params.day))
 			: today;
+	const localizedCurrentDay = currentDay.locale(
+		DAYJS_LOCALES[dict?.locale ?? "en"],
+	);
 
 	useEffect(() => {
 		const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -41,18 +59,18 @@ function CalendarTopBar() {
 
 	let currentViewTitle = "";
 	if (activeView === "week" || activeView === "month") {
-		currentViewTitle = currentDay.format("MMMM YYYY");
+		currentViewTitle = localizedCurrentDay.format("MMMM YYYY");
 	} else if (activeView === "year") {
-		currentViewTitle = currentDay.format("YYYY");
+		currentViewTitle = localizedCurrentDay.format("YYYY");
 	} else {
-		currentViewTitle = currentDay.format("DD MMMM YYYY");
+		currentViewTitle = localizedCurrentDay.format("DD MMMM YYYY");
 	}
 
 	const buildPath = (view: CalendarViewType, day = currentDay) => {
 		const year = day.year();
 		const month = day.month() + 1;
 		const date = day.date();
-		return `/dashboard/calendar/${calendarPublicId}/${view}/${year}/${month}/${date}`;
+		return `/w/${workspacePublicId}/dashboard/calendar/${calendarPublicId}/${view}/${year}/${month}/${date}`;
 	};
 
 	const switchView = (value: CalendarViewType) => {
@@ -79,43 +97,68 @@ function CalendarTopBar() {
 	};
 
 	return (
-		<div className="flex p-2 justify-between w-full">
-			<div className="flex gap-6">
+		<div className="flex min-w-0 w-full flex-col gap-3 p-1 sm:p-2 xl:flex-row xl:items-center xl:justify-between">
+			<div className="flex min-w-0 flex-wrap items-center gap-2 sm:gap-4 xl:flex-nowrap xl:gap-6">
 				<Button
+					w="auto"
 					onClick={goToToday}
 					size="sm"
 					variant="light"
 					className="rounded-full"
 				>
-					Today
+					{dict?.calendar?.today ?? "Today"}
 				</Button>
 
 				<div className="flex gap-2 items-center">
-					<ActionIcon variant="subtle" onClick={prev} aria-label="Previous">
+					<ActionIcon
+						variant="subtle"
+						onClick={prev}
+						aria-label={dict?.calendar?.previousPeriod ?? "Previous"}
+					>
 						<ChevronLeft size={24} />
 					</ActionIcon>
-					<ActionIcon variant="subtle" onClick={next} aria-label="Next">
+					<ActionIcon
+						variant="subtle"
+						onClick={next}
+						aria-label={dict?.calendar?.nextPeriod ?? "Next"}
+					>
 						<ChevronRight size={24} />
 					</ActionIcon>
 				</div>
 
-				<div className="flex justify-center items-center text-brand dark:text-brand-foreground font-medium text-2xl">
-					<h1>{currentViewTitle}</h1>
+				<div className="min-w-0 flex-1 text-brand dark:text-brand-foreground font-medium sm:flex-none">
+					<h1 className="truncate text-base sm:text-xl xl:text-2xl">
+						{currentViewTitle}
+					</h1>
 				</div>
+
+				<NewEventButton
+					compact
+					workspacePublicId={workspacePublicId}
+					className="ml-auto md:hidden"
+				/>
 			</div>
 
-			<SegmentedControl
-				onChange={switchView}
-				radius={20}
-				withItemsBorders={false}
-				size="sm"
-				value={String(activeView)}
-				color={theme}
-				data={calendarViewsList.map((item) => ({
-					label: <span className="capitalize">{item}</span>,
-					value: item,
-				}))}
-			/>
+			<div className="max-w-full overflow-x-auto pb-1 xl:pb-0">
+				<SegmentedControl
+					onChange={switchView}
+					radius={20}
+					withItemsBorders={false}
+					size="sm"
+					value={String(activeView)}
+					color={theme}
+					data={calendarViewsList.map((item) => ({
+						label: (
+							<span className="capitalize">
+								{(dict?.calendar as Record<string, string> | undefined)?.[
+									VIEW_LABEL_KEYS[item]
+								] ?? item}
+							</span>
+						),
+						value: item,
+					}))}
+				/>
+			</div>
 		</div>
 	);
 }

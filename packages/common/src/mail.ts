@@ -164,6 +164,7 @@ export async function upsertMailboxThreadItem(
 		mailboxId: mbx.id,
 
 		ownerId: mbx.ownerId,
+		workspaceId: mbx.workspaceId,
 		identityId: mbx.identityId,
 
 		identityPublicId: ident.publicId,
@@ -236,4 +237,43 @@ export function base64ToUint8Array(base64: string): Uint8Array {
 export function base64ToBlob(base64: string, contentType: string): Blob {
 	const bytes = base64ToUint8Array(base64);
 	return new Blob([bytes], { type: contentType });
+}
+
+
+export const isGmailIdentity = async (identityId: string) => {
+	const [identity] = await db
+		.select({ metaData: identities.metaData })
+		.from(identities)
+		.where(eq(identities.id, identityId))
+		.limit(1);
+
+	return Boolean((identity?.metaData as any)?.gmail?.googleAccountId);
+};
+
+export async function isGmailThread(threadId: string) {
+	const [message] = await db
+		.select({
+			gmailId: sql<string | null>`
+				${messages.metaData}->'gmail'->>'messageId'
+			`,
+		})
+		.from(messages)
+		.where(eq(messages.threadId, threadId))
+		.limit(1);
+
+	return Boolean(message?.gmailId);
+}
+
+export async function isGmailMailbox(mailboxId: string) {
+	const [mailbox] = await db
+		.select({
+			identityId: mailboxes.identityId,
+		})
+		.from(mailboxes)
+		.where(eq(mailboxes.id, mailboxId))
+		.limit(1);
+
+	if (!mailbox) return false;
+
+	return isGmailIdentity(mailbox.identityId);
 }

@@ -1,49 +1,4 @@
-import {
-	type BucketLocationConstraint,
-	CreateBucketCommand,
-	type CreateBucketCommandInput,
-	HeadBucketCommand,
-	PutBucketNotificationConfigurationCommand,
-	PutBucketPolicyCommand,
-	PutPublicAccessBlockCommand,
-	S3Client,
-} from "@aws-sdk/client-s3";
-import {
-	CreateReceiptRuleCommand,
-	CreateReceiptRuleSetCommand,
-	DeleteReceiptRuleCommand,
-	DescribeActiveReceiptRuleSetCommand,
-	DescribeReceiptRuleSetCommand,
-	GetSendQuotaCommand,
-	ListReceiptRuleSetsCommand,
-	type ReceiptRule,
-	SES,
-	SESClient,
-	SendEmailCommand,
-	SetActiveReceiptRuleSetCommand,
-	SetReceiptRulePositionCommand,
-	UpdateReceiptRuleCommand,
-} from "@aws-sdk/client-ses";
-import {
-	CreateEmailIdentityCommand,
-	DeleteEmailIdentityCommand,
-	GetEmailIdentityCommand,
-	PutEmailIdentityMailFromAttributesCommand,
-	SESv2Client,
-	SendEmailCommand as SendEmailCommandV2,
-	// DeleteEmailIdentityCommand,
-} from "@aws-sdk/client-sesv2";
-import {
-	CreateTopicCommand,
-	GetTopicAttributesCommand,
-	ListSubscriptionsByTopicCommand,
-	SetTopicAttributesCommand,
-	SNSClient,
-	SubscribeCommand,
-} from "@aws-sdk/client-sns";
-import { GetCallerIdentityCommand, STSClient } from "@aws-sdk/client-sts";
-import slugify from "@sindresorhus/slugify";
-import { ulid } from "ulid";
+import { createHash } from "node:crypto";
 import {
 	type DnsRecord,
 	type DomainIdentity,
@@ -53,6 +8,57 @@ import {
 	type SesConfig,
 	type VerifyResult,
 } from "../core";
+import {
+	CreateReceiptRuleCommand,
+	CreateReceiptRuleSetCommand,
+	DeleteReceiptRuleCommand,
+	DescribeActiveReceiptRuleSetCommand,
+	DescribeReceiptRuleCommand,
+	DescribeReceiptRuleSetCommand,
+	type ReceiptRule,
+	SES,
+	SESClient,
+	SendEmailCommand,
+	SetActiveReceiptRuleSetCommand,
+	SetReceiptRulePositionCommand,
+	UpdateReceiptRuleCommand,
+} from "@aws-sdk/client-ses";
+import {
+	type BucketLocationConstraint,
+	CreateBucketCommand,
+	type CreateBucketCommandInput,
+	GetBucketNotificationConfigurationCommand,
+	GetBucketPolicyCommand,
+	HeadBucketCommand,
+	PutBucketNotificationConfigurationCommand,
+	PutBucketPolicyCommand,
+	PutPublicAccessBlockCommand,
+	S3Client,
+} from "@aws-sdk/client-s3";
+import {
+	CreateTopicCommand,
+	GetTopicAttributesCommand,
+	ListSubscriptionsByTopicCommand,
+	SNSClient,
+	SetTopicAttributesCommand,
+	SubscribeCommand,
+} from "@aws-sdk/client-sns";
+import { GetCallerIdentityCommand, STSClient } from "@aws-sdk/client-sts";
+import {
+	type Attachment as SesV2Attachment,
+	CreateEmailIdentityCommand,
+	DeleteEmailIdentityCommand,
+	GetEmailIdentityCommand,
+	PutEmailIdentityMailFromAttributesCommand,
+	SESv2Client,
+	SendEmailCommand as SendEmailCommandV2, GetAccountCommand,
+} from "@aws-sdk/client-sesv2";
+import slugify from "@sindresorhus/slugify";
+
+type WebhookSubscriptionStatus =
+	| "not-configured"
+	| "pending"
+	| "confirmed";
 
 type BootResult = {
 	bucket: string;
@@ -61,18 +67,86 @@ type BootResult = {
 	bucketExists: boolean;
 	topicExists: boolean;
 	ruleCreated: boolean;
+	webhookSubscriptionStatus: WebhookSubscriptionStatus;
 };
 
-type MailAttachmentInput = {
-	name: string; // file name to show in the client
-	content: Blob; // the Blob you downloaded from storage
-	contentType?: string; // optional override
-	inline?: boolean; // if you want cid/inline later
-	contentId?: string; // if inline
-};
+type PolicyStatement = Record<string, unknown>;
 
-import type { Attachment as SesV2Attachment } from "@aws-sdk/client-sesv2";
-// import {kvGet} from "@common";
+function errorCode(error: unknown): string | undefined {
+	if (!error || typeof error !== "object") return undefined;
+
+	const value = error as { name?: string; Code?: string };
+	return value.name || value.Code;
+}
+
+function errorStatus(error: unknown): number | undefined {
+	if (!error || typeof error !== "object") return undefined;
+
+	return (
+		error as { $metadata?: { httpStatusCode?: number } }
+	).$metadata?.httpStatusCode;
+}
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error
+		? error.message
+		: "The AWS request failed.";
+}
+
+function getPolicyStatements(document: Record<string, unknown>) {
+	const value = document.Statement;
+
+	if (value === undefined) return [] as PolicyStatement[];
+
+	const statements = Array.isArray(value) ? value : [value];
+
+	if (
+		statements.some(
+			(statement) =>
+				!statement ||
+				typeof statement !== "object" ||
+				Array.isArray(statement),
+		)
+	) {
+		throw new Error("An existing AWS resource policy is invalid.");
+	}
+
+	return statements as PolicyStatement[];
+}
+
+function isInternalHostname(hostname: string): boolean {
+	const host = hostname.toLowerCase();
+
+	if (
+		host === "localhost" ||
+		host.endsWith(".localhost") ||
+		host.endsWith(".local")
+	) {
+		return true;
+	}
+
+	const parts = host.split(".");
+	if (
+		parts.length !== 4 ||
+		parts.some((part) => !/^\d{1,3}$/.test(part))
+	) {
+		return false;
+	}
+
+	const numbers = parts.map(Number);
+	if (numbers.some((part) => part > 255)) return false;
+
+	const [first, second] = numbers;
+
+	return (
+		first === 0 ||
+		first === 10 ||
+		first === 127 ||
+		(first === 169 && second === 254) ||
+		(first === 172 && second >= 16 && second <= 31) ||
+		(first === 192 && second === 168)
+	);
+}
 
 export class SesMailer implements Mailer {
 	private client: SESClient;
@@ -87,14 +161,14 @@ export class SesMailer implements Mailer {
 				secretAccessKey: cfg.secretAccessKey,
 			},
 		};
+
 		this.cfg = cfg;
 		this.client = new SESClient(shared);
 		this.v2 = new SESv2Client(shared);
 	}
 
 	static from(raw: unknown): SesMailer {
-		const cfg = RawSesConfigSchema.parse(raw);
-		return new SesMailer(cfg);
+		return new SesMailer(RawSesConfigSchema.parse(raw));
 	}
 
 	async verify(
@@ -102,37 +176,76 @@ export class SesMailer implements Mailer {
 		metaData?: Record<string, any>,
 	): Promise<VerifyResult> {
 		try {
-			const q = await this.client.send(new GetSendQuotaCommand({}));
-			const bootResult = await this.bootstrap(id, metaData || {});
+			const account = await this.v2.send(new GetAccountCommand({}));
+
+			if (account.ProductionAccessEnabled !== true) {
+				throw new Error(
+					`Amazon SES is in the sandbox in ${this.cfg.region}. Choose a region with production access.`,
+				);
+			}
+
+			if (account.SendingEnabled !== true) {
+				throw new Error(
+					`Amazon SES sending is disabled in ${this.cfg.region}.`,
+				);
+			}
+
+			const resourceIds = await this.bootstrap(id, metaData ?? {});
+
+			const message =
+				resourceIds.webhookSubscriptionStatus === "pending"
+					? "Amazon SES is connected. The webhook subscription is awaiting confirmation."
+					: resourceIds.webhookSubscriptionStatus === "not-configured"
+						? "Amazon SES is connected. No inbound webhook URL is configured."
+						: "Amazon SES is connected.";
 
 			return {
 				ok: true,
-				message: "OK",
+				message,
 				meta: {
 					send: true,
-					// handy diagnostics:
-					max24HourSend: q.Max24HourSend,
-					maxSendRate: q.MaxSendRate,
-					sentLast24Hours: q.SentLast24Hours,
-					resourceIds: bootResult,
+					max24HourSend: account.SendQuota?.Max24HourSend,
+					maxSendRate: account.SendQuota?.MaxSendRate,
+					sentLast24Hours: account.SendQuota?.SentLast24Hours,
+					resourceIds,
 				},
 			};
-		} catch (err: any) {
+		} catch (error) {
 			return {
 				ok: false,
-				message: err?.message ?? "SES verify failed",
+				message: errorMessage(error),
 				meta: {
-					code: err?.name,
-					httpStatus: err?.$metadata?.httpStatusCode,
+					code: errorCode(error),
+					httpStatus: errorStatus(error),
 				},
 			};
 		}
 	}
 
 	private baseNames(id: string) {
-		const base = `kurrier-${id ?? "acct"}`;
+		if (
+			!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+				id,
+			)
+		) {
+			throw new Error("The SES provider ID is invalid.");
+		}
+
+		const base = `kurrier-${id}`;
+		const compactId = id.replaceAll("-", "");
+		const readableRegionalBucket =
+			`kurrier-${compactId}-${this.cfg.region}-ses-inbound`;
+		const regionHash = createHash("sha256")
+			.update(this.cfg.region)
+			.digest("hex")
+			.slice(0, 8);
+
 		return {
-			bucket: `${base}-ses-inbound`,
+			legacyBucket: `${base}-ses-inbound`,
+			regionalBucket:
+				readableRegionalBucket.length <= 63
+					? readableRegionalBucket
+					: `kurrier-${compactId}-${regionHash}-ses-inbound`,
 			topicName: `${base}-ses-inbound-topic`,
 			ruleSetName: `${base}-rules`,
 			defaultRuleName: `${base}-inbound-default`,
@@ -140,281 +253,651 @@ export class SesMailer implements Mailer {
 		};
 	}
 
-	private buildSesHeaders(inReplyTo?: string, references?: string[]) {
-		const MAX_REF_VALUE_LEN = 850; // SES limit is 870, keep headroom
+	private buildSesHeaders(
+		inReplyTo?: string,
+		references?: string[],
+	) {
+		const normalize = (value?: string) => {
+			const trimmed = value?.trim();
 
-		const normalize = (id?: string) => {
-			if (!id) return "";
-			const s = String(id).trim();
-			if (!s) return "";
-			return s.startsWith("<") && s.endsWith(">")
-				? s
-				: s.startsWith("<")
-					? s + ">"
-					: `<${s}>`;
+			if (!trimmed) return "";
+			if (trimmed.startsWith("<") && trimmed.endsWith(">")) {
+				return trimmed;
+			}
+			if (trimmed.startsWith("<")) return `${trimmed}>`;
+
+			return `<${trimmed}>`;
 		};
 
 		const headers: { Name: string; Value: string }[] = [];
+		const replyId = normalize(inReplyTo);
 
-		if (inReplyTo) {
-			const val = normalize(inReplyTo);
-			if (val) headers.push({ Name: "In-Reply-To", Value: val });
+		if (replyId) {
+			headers.push({
+				Name: "In-Reply-To",
+				Value: replyId,
+			});
 		}
 
-		if (references && references.length > 0) {
-			const seen = new Set<string>();
-			const normalized: string[] = [];
-			for (const r of references) {
-				const id = normalize(r);
-				if (id && !seen.has(id)) {
-					seen.add(id);
-					normalized.push(id);
-				}
+		if (references?.length) {
+			const normalized = [
+				...new Set(references.map(normalize).filter(Boolean)),
+			];
+			const selected: string[] = [];
+			let length = 0;
+
+			for (let index = normalized.length - 1; index >= 0; index--) {
+				const value = normalized[index];
+				const addedLength =
+					value.length + (selected.length ? 1 : 0);
+
+				if (length + addedLength > 850) break;
+
+				selected.push(value);
+				length += addedLength;
 			}
 
-			// Add from newest back until we hit budget
-			const out: string[] = [];
-			let total = 0;
-			for (let i = normalized.length - 1; i >= 0; i--) {
-				const id = normalized[i];
-				const extra = (out.length ? 1 : 0) + id.length;
-				if (total + extra > MAX_REF_VALUE_LEN) break;
-				out.push(id);
-				total += extra;
-			}
-			if (out.length) {
-				headers.push({ Name: "References", Value: out.reverse().join(" ") });
+			if (selected.length) {
+				headers.push({
+					Name: "References",
+					Value: selected.reverse().join(" "),
+				});
 			}
 		}
 
 		return headers;
 	}
 
+	private async bucketState(s3: S3Client, bucket: string) {
+		try {
+			await s3.send(
+				new HeadBucketCommand({ Bucket: bucket }),
+			);
+
+			return "exists" as const;
+		} catch (error) {
+			const status = errorStatus(error);
+
+			if (status === 404) return "missing" as const;
+			if (status === 301) return "other-region" as const;
+
+			throw error;
+		}
+	}
+
+	private async ensureBucket(
+		s3: S3Client,
+		legacyBucket: string,
+		regionalBucket: string,
+	) {
+		const legacyState = await this.bucketState(
+			s3,
+			legacyBucket,
+		);
+
+		if (legacyState === "exists") {
+			return {
+				bucket: legacyBucket,
+				existed: true,
+			};
+		}
+
+		const bucket =
+			legacyState === "other-region"
+				? regionalBucket
+				: legacyBucket;
+
+		if (bucket === regionalBucket) {
+			const regionalState = await this.bucketState(
+				s3,
+				regionalBucket,
+			);
+
+			if (regionalState === "exists") {
+				return {
+					bucket: regionalBucket,
+					existed: true,
+				};
+			}
+
+			if (regionalState === "other-region") {
+				throw new Error(
+					"The SES inbound bucket is in a different AWS region.",
+				);
+			}
+		}
+
+		const input: CreateBucketCommandInput = {
+			Bucket: bucket,
+		};
+
+		if (this.cfg.region !== "us-east-1") {
+			input.CreateBucketConfiguration = {
+				LocationConstraint:
+					this.cfg.region as BucketLocationConstraint,
+			};
+		}
+
+		try {
+			await s3.send(new CreateBucketCommand(input));
+		} catch (error) {
+			if (errorCode(error) !== "BucketAlreadyOwnedByYou") {
+				throw error;
+			}
+
+			await s3.send(
+				new HeadBucketCommand({ Bucket: bucket }),
+			);
+
+			return {
+				bucket,
+				existed: true,
+			};
+		}
+
+		return {
+			bucket,
+			existed: false,
+		};
+	}
+
+	private async ensureBucketPolicy(
+		s3: S3Client,
+		bucket: string,
+		accountId: string,
+	) {
+		let document: Record<string, unknown> = {
+			Version: "2012-10-17",
+			Statement: [],
+		};
+
+		try {
+			const result = await s3.send(
+				new GetBucketPolicyCommand({ Bucket: bucket }),
+			);
+
+			if (result.Policy) {
+				const parsed: unknown = JSON.parse(result.Policy);
+
+				if (
+					!parsed ||
+					typeof parsed !== "object" ||
+					Array.isArray(parsed)
+				) {
+					throw new Error(
+						"The existing S3 bucket policy is invalid.",
+					);
+				}
+
+				document = parsed as Record<string, unknown>;
+			}
+		} catch (error) {
+			if (errorCode(error) !== "NoSuchBucketPolicy") {
+				throw error;
+			}
+		}
+
+		const sid = "AllowSESPutObject";
+		const statement = {
+			Sid: sid,
+			Effect: "Allow",
+			Principal: {
+				Service: "ses.amazonaws.com",
+			},
+			Action: "s3:PutObject",
+			Resource: `arn:aws:s3:::${bucket}/*`,
+			Condition: {
+				StringEquals: {
+					"aws:SourceAccount": accountId,
+				},
+			},
+		};
+
+		const existing = getPolicyStatements(document);
+		const current = existing.find(
+			(item) => item.Sid === sid,
+		);
+
+		if (
+			current &&
+			JSON.stringify(current) === JSON.stringify(statement)
+		) {
+			return;
+		}
+
+		document.Statement = [
+			...existing.filter((item) => item.Sid !== sid),
+			statement,
+		];
+
+		await s3.send(
+			new PutBucketPolicyCommand({
+				Bucket: bucket,
+				Policy: JSON.stringify(document),
+			}),
+		);
+	}
+
+	private async ensureTopicPolicy(
+		sns: SNSClient,
+		topicArn: string,
+		bucket: string,
+		accountId: string,
+	) {
+		const result = await sns.send(
+			new GetTopicAttributesCommand({
+				TopicArn: topicArn,
+			}),
+		);
+
+		const existingPolicy = result.Attributes?.Policy;
+		let document: Record<string, unknown> = {
+			Version: "2012-10-17",
+			Statement: [],
+		};
+
+		if (existingPolicy) {
+			const parsed: unknown = JSON.parse(existingPolicy);
+
+			if (
+				!parsed ||
+				typeof parsed !== "object" ||
+				Array.isArray(parsed)
+			) {
+				throw new Error(
+					"The existing SNS topic policy is invalid.",
+				);
+			}
+
+			document = parsed as Record<string, unknown>;
+		}
+
+		const sid = "AllowS3Publish";
+		const statement = {
+			Sid: sid,
+			Effect: "Allow",
+			Principal: {
+				Service: "s3.amazonaws.com",
+			},
+			Action: "sns:Publish",
+			Resource: topicArn,
+			Condition: {
+				StringEquals: {
+					"aws:SourceAccount": accountId,
+				},
+				ArnLike: {
+					"aws:SourceArn": `arn:aws:s3:::${bucket}`,
+				},
+			},
+		};
+
+		const existing = getPolicyStatements(document);
+		const current = existing.find(
+			(item) => item.Sid === sid,
+		);
+
+		if (
+			current &&
+			JSON.stringify(current) === JSON.stringify(statement)
+		) {
+			return;
+		}
+
+		document.Statement = [
+			...existing.filter((item) => item.Sid !== sid),
+			statement,
+		];
+
+		await sns.send(
+			new SetTopicAttributesCommand({
+				TopicArn: topicArn,
+				AttributeName: "Policy",
+				AttributeValue: JSON.stringify(document),
+			}),
+		);
+	}
+
+	private async ensureBucketNotification(
+		s3: S3Client,
+		bucket: string,
+		topicArn: string,
+		notificationId: string,
+	) {
+		const current = await s3.send(
+			new GetBucketNotificationConfigurationCommand({
+				Bucket: bucket,
+			}),
+		);
+
+		const desired = {
+			Id: notificationId,
+			TopicArn: topicArn,
+			Events: ["s3:ObjectCreated:*"] as const,
+			Filter: {
+				Key: {
+					FilterRules: [
+						{
+							Name: "prefix" as const,
+							Value: "inbound/",
+						},
+					],
+				},
+			},
+		};
+
+		const existing = current.TopicConfigurations?.find(
+			(item) => item.Id === notificationId,
+		);
+
+		if (
+			existing?.TopicArn === desired.TopicArn &&
+			existing.Events?.length === 1 &&
+			existing.Events[0] === desired.Events[0] &&
+			existing.Filter?.Key?.FilterRules?.length === 1 &&
+			existing.Filter.Key.FilterRules[0]?.Name === "prefix" &&
+			existing.Filter.Key.FilterRules[0]?.Value === "inbound/"
+		) {
+			return;
+		}
+
+		const topics = (
+			current.TopicConfigurations ?? []
+		).filter((item) => item.Id !== notificationId);
+
+		topics.push({
+			Id: desired.Id,
+			TopicArn: desired.TopicArn,
+			Events: ["s3:ObjectCreated:*"],
+			Filter: desired.Filter,
+		});
+
+		await s3.send(
+			new PutBucketNotificationConfigurationCommand({
+				Bucket: bucket,
+				NotificationConfiguration: {
+					TopicConfigurations: topics,
+					QueueConfigurations:
+					current.QueueConfigurations,
+					LambdaFunctionConfigurations:
+					current.LambdaFunctionConfigurations,
+					EventBridgeConfiguration:
+					current.EventBridgeConfiguration,
+				},
+			}),
+		);
+	}
+
 	private async ensureRuleSet(
 		ses: SES,
 		desired: string,
-	): Promise<{ name: string; usedExistingActive: boolean }> {
-		const active = await ses.send(new DescribeActiveReceiptRuleSetCommand({}));
-		if (active.Metadata?.Name)
-			return { name: active.Metadata.Name, usedExistingActive: true };
-
-		const sets = await ses.send(new ListReceiptRuleSetsCommand({}));
-		const exists = sets.RuleSets?.some((r) => r.Name === desired);
-		if (!exists) {
-			try {
-				await ses.send(
-					new CreateReceiptRuleSetCommand({ RuleSetName: desired }),
-				);
-			} catch (e: any) {
-				if ((e.name || e.Code) !== "RuleSetNameAlreadyExists") throw e;
-			}
-		}
-		await ses.send(
-			new SetActiveReceiptRuleSetCommand({ RuleSetName: desired }),
+	) {
+		const active = await ses.send(
+			new DescribeActiveReceiptRuleSetCommand({}),
 		);
-		return { name: desired, usedExistingActive: false };
-	}
 
-	async removeEmail(email: string, opts: Record<any, any>) {
-		const ses = new SES({ region: this.cfg.region, credentials: this.cfg });
+		if (active.Metadata?.Name) {
+			return {
+				name: active.Metadata.Name,
+				owned: active.Metadata.Name === desired,
+			};
+		}
 
 		try {
 			await ses.send(
-				new DeleteReceiptRuleCommand({
-					RuleSetName: opts.ruleSetName,
-					RuleName: opts.ruleName,
+				new CreateReceiptRuleSetCommand({
+					RuleSetName: desired,
 				}),
 			);
-			return { removed: true };
-		} catch (e: any) {
-			const code = e?.name || e?.Code;
-			if (code === "RuleDoesNotExist") return { removed: false };
-			throw e;
-		}
-	}
-
-	async addEmail(
-		address: string,
-		objectKeyPrefix: string,
-		metaData?: Record<string, any>,
-	): Promise<EmailIdentity> {
-		const ses = new SES({ region: this.cfg.region, credentials: this.cfg });
-		const res = metaData?.resourceIds as BootResult | undefined;
-
-		if (!res?.bucket || !res?.topicArn || !res?.ruleSetName) {
-			throw new Error(
-				"Missing SES bootstrap resource IDs (bucket/topicArn/ruleSetName).",
-			);
-		}
-
-		const normalized = address.trim().toLowerCase();
-		const { bucket, ruleSetName } = res;
-
-		const { name: activeRuleSet } = await this.ensureRuleSet(ses, ruleSetName);
-
-		const ruleName = (
-			slugify(`${normalized}`, {
-				customReplacements: [["@", " at "]],
-			}) + `-${ulid()}`
-		).slice(0, 64);
-
-		const ruleDef: ReceiptRule = {
-			Name: ruleName,
-			Enabled: true,
-			Recipients: [normalized],
-			Actions: [
-				{ S3Action: { BucketName: bucket, ObjectKeyPrefix: objectKeyPrefix } },
-				// { S3Action: { BucketName: bucket, ObjectKeyPrefix: `inbound/${slugify(address)}` } },
-				// {
-				// 	S3Action: {
-				// 		BucketName: bucket,
-				// 		ObjectKeyPrefix: `inbound/${address}`,
-				// 	},
-				// },
-				// { SNSAction: { TopicArn: topicArn, Encoding: "UTF-8" } },
-				{ StopAction: { Scope: "RuleSet" } },
-			],
-			ScanEnabled: true,
-			TlsPolicy: "Optional",
-		};
-
-		// Create-or-update (idempotent)
-		let created = false;
-		try {
-			await ses.send(
-				new CreateReceiptRuleCommand({
-					RuleSetName: activeRuleSet,
-					Rule: ruleDef,
-				}),
-			);
-			created = true;
-		} catch (e: any) {
-			if ((e?.name || e?.Code) === "RuleAlreadyExists") {
-				await ses.send(
-					new UpdateReceiptRuleCommand({
-						RuleSetName: activeRuleSet,
-						Rule: ruleDef,
-					}),
-				);
-			} else {
-				throw e;
+		} catch (error) {
+			if (errorCode(error) !== "RuleSetNameAlreadyExists") {
+				throw error;
 			}
 		}
 
 		await ses.send(
-			new SetReceiptRulePositionCommand({
-				RuleSetName: activeRuleSet,
-				RuleName: ruleName,
-				// After: ""
+			new SetActiveReceiptRuleSetCommand({
+				RuleSetName: desired,
 			}),
 		);
 
 		return {
-			address: normalized,
-			ruleName,
-			ruleSetName,
-			created,
-			slug: slugify(address),
+			name: desired,
+			owned: true,
 		};
+	}
+
+	private async ensureDefaultRule(
+		ses: SES,
+		ruleSetName: string,
+		ruleName: string,
+		bucket: string,
+	) {
+		const result = await ses.send(
+			new DescribeReceiptRuleSetCommand({
+				RuleSetName: ruleSetName,
+			}),
+		);
+
+		const existing = result.Rules?.find(
+			(rule) => rule.Name === ruleName,
+		);
+
+		if (existing) {
+			const correctDestination =
+				existing.Actions?.some(
+					(action) =>
+						action.S3Action?.BucketName === bucket &&
+						action.S3Action?.ObjectKeyPrefix ===
+						"inbound/",
+				) ?? false;
+
+			if (!correctDestination) {
+				await ses.send(
+					new UpdateReceiptRuleCommand({
+						RuleSetName: ruleSetName,
+						Rule: {
+							Name: ruleName,
+							Enabled: true,
+							Actions: [
+								{
+									S3Action: {
+										BucketName: bucket,
+										ObjectKeyPrefix: "inbound/",
+									},
+								},
+								{
+									StopAction: {
+										Scope: "RuleSet",
+									},
+								},
+							],
+							ScanEnabled: true,
+							TlsPolicy: "Optional",
+						},
+					}),
+				);
+			}
+
+			return false;
+		}
+
+		try {
+			await ses.send(
+				new CreateReceiptRuleCommand({
+					RuleSetName: ruleSetName,
+					Rule: {
+						Name: ruleName,
+						Enabled: true,
+						Actions: [
+							{
+								S3Action: {
+									BucketName: bucket,
+									ObjectKeyPrefix: "inbound/",
+								},
+							},
+							{
+								StopAction: {
+									Scope: "RuleSet",
+								},
+							},
+						],
+						ScanEnabled: true,
+						TlsPolicy: "Optional",
+					},
+				}),
+			);
+		} catch (error) {
+			if (errorCode(error) !== "RuleAlreadyExists") {
+				throw error;
+			}
+
+			return false;
+		}
+
+		return true;
 	}
 
 	async ensureWebhookSubscription(
 		sns: SNSClient,
 		topicArn: string,
 		webhookUrl?: string,
-	) {
-		if (!webhookUrl) return { subscribed: false };
+	): Promise<WebhookSubscriptionStatus> {
+		if (!webhookUrl) return "not-configured";
 
-		const existing = await sns.send(
-			new ListSubscriptionsByTopicCommand({ TopicArn: topicArn }),
-		);
-		const same = existing.Subscriptions?.find(
-			(s) => s.Endpoint === webhookUrl && s.Protocol?.startsWith("http"),
-		);
+		let url: URL;
 
-		if (!same) {
-			await sns.send(
-				new SubscribeCommand({
-					TopicArn: topicArn,
-					Protocol: webhookUrl.startsWith("https") ? "https" : "http",
-					Endpoint: webhookUrl,
-					Attributes: {
-						RawMessageDelivery: "false", // get raw JSON
-						// Optional filter policy to only receive SES inbound notifications you emit
-						// FilterPolicy: JSON.stringify({ source: ["ses"] })
-					},
-					ReturnSubscriptionArn: true, // will be "pending confirmation" for http(s)
-				}),
+		try {
+			url = new URL(webhookUrl);
+		} catch {
+			throw new Error(
+				"The SES webhook URL is invalid.",
 			);
 		}
 
-		return { subscribed: true };
+		if (
+			url.protocol !== "http:" &&
+			url.protocol !== "https:"
+		) {
+			throw new Error(
+				"The SES webhook URL must use HTTP or HTTPS.",
+			);
+		}
+
+		if (isInternalHostname(url.hostname)) {
+			throw new Error(
+				"Amazon SNS cannot reach the local webhook address. Configure the public tunnel URL and verify again.",
+			);
+		}
+
+		const endpoint = url.toString();
+		const protocol =
+			url.protocol === "https:" ? "https" : "http";
+		let nextToken: string | undefined;
+
+		do {
+			const result = await sns.send(
+				new ListSubscriptionsByTopicCommand({
+					TopicArn: topicArn,
+					NextToken: nextToken,
+				}),
+			);
+
+			const existing =
+				result.Subscriptions?.find(
+					(item) =>
+						item.Endpoint === endpoint &&
+						item.Protocol === protocol,
+				);
+
+			if (existing) {
+				return existing.SubscriptionArn &&
+				existing.SubscriptionArn !==
+				"PendingConfirmation"
+					? "confirmed"
+					: "pending";
+			}
+
+			nextToken = result.NextToken;
+		} while (nextToken);
+
+		try {
+			const result = await sns.send(
+				new SubscribeCommand({
+					TopicArn: topicArn,
+					Protocol: protocol,
+					Endpoint: endpoint,
+					Attributes: {
+						RawMessageDelivery: "false",
+					},
+					ReturnSubscriptionArn: true,
+				}),
+			);
+
+			return result.SubscriptionArn &&
+			result.SubscriptionArn !==
+			"PendingConfirmation"
+				? "confirmed"
+				: "pending";
+		} catch (error) {
+			if (
+				errorMessage(error).includes(
+					"Not authorized to subscribe internal endpoints",
+				)
+			) {
+				throw new Error(
+					"Amazon SNS sees the webhook as an internal address. Check that the configured URL is your public tunnel URL.",
+				);
+			}
+
+			throw error;
+		}
 	}
 
 	private async bootstrap(
 		id: string,
-		metaData: Record<any, any>,
+		metaData: Record<string, any>,
 	): Promise<BootResult> {
-		const { region, accessKeyId, secretAccessKey } = this.cfg;
-		const creds = { region, credentials: { accessKeyId, secretAccessKey } };
+		const { region, accessKeyId, secretAccessKey } =
+			this.cfg;
 
-		const s3 = new S3Client(creds);
-		const sns = new SNSClient(creds);
-		const ses = new SES(creds); // classic SES (inbound)
-		const sts = new STSClient(creds);
+		const shared = {
+			region,
+			credentials: {
+				accessKeyId,
+				secretAccessKey,
+			},
+		};
 
-		// Used in resource policies
-		const { Account: accountId = "" } = await sts.send(
+		const s3 = new S3Client(shared);
+		const sns = new SNSClient(shared);
+		const ses = new SES(shared);
+		const sts = new STSClient(shared);
+
+		const caller = await sts.send(
 			new GetCallerIdentityCommand({}),
 		);
+		const accountId = caller.Account;
 
-		const { bucket, topicName, ruleSetName, defaultRuleName, s3NotifId } =
-			this.baseNames(id);
-
-		let bucketExists = false;
-		try {
-			await s3.send(new HeadBucketCommand({ Bucket: bucket }));
-			bucketExists = true;
-		} catch {
-			const input: CreateBucketCommandInput = { Bucket: bucket };
-			if (region !== "us-east-1") {
-				input.CreateBucketConfiguration = {
-					LocationConstraint: region as BucketLocationConstraint,
-				};
-			}
-			try {
-				await s3.send(new CreateBucketCommand(input));
-				bucketExists = true;
-			} catch (e: any) {
-				const code = e?.name || e?.Code;
-				if (code !== "BucketAlreadyOwnedByYou") throw e;
-				bucketExists = true;
-			}
+		if (!accountId) {
+			throw new Error(
+				"AWS did not return an account ID.",
+			);
 		}
 
-		// Tight bucket policy for SES → S3 (PutObject)
-		// (Optionally include ArnLike SourceArn to further scope to your rule set)
-		const bucketPolicy = {
-			Version: "2012-10-17",
-			Statement: [
-				{
-					Sid: "AllowSESPutObject",
-					Effect: "Allow",
-					Principal: { Service: "ses.amazonaws.com" },
-					Action: "s3:PutObject",
-					Resource: `arn:aws:s3:::${bucket}/*`,
-					Condition: {
-						StringEquals: { "aws:SourceAccount": accountId },
-						// ArnLike: { "aws:SourceArn": `arn:aws:ses:${region}:${accountId}:receipt-rule-set/${ruleSetName}` }
-					},
-				},
-			],
-		};
-		await s3.send(
-			new PutBucketPolicyCommand({
-				Bucket: bucket,
-				Policy: JSON.stringify(bucketPolicy),
-			}),
+		const names = this.baseNames(id);
+		const {
+			bucket,
+			existed: bucketExists,
+		} = await this.ensureBucket(
+			s3,
+			names.legacyBucket,
+			names.regionalBucket,
+		);
+
+		await this.ensureBucketPolicy(
+			s3,
+			bucket,
+			accountId,
 		);
 
 		await s3.send(
@@ -429,124 +912,277 @@ export class SesMailer implements Mailer {
 			}),
 		);
 
-		// -----------------------------------------------------------
-		// 2) SNS topic (idempotent) + policy that allows SES Publish
-		// -----------------------------------------------------------
 		const topicArn = (
-			await sns.send(new CreateTopicCommand({ Name: topicName }))
-		).TopicArn!;
-		let topicExists = false;
-		try {
-			await sns.send(new GetTopicAttributesCommand({ TopicArn: topicArn }));
-			topicExists = true;
-		} catch {
-			topicExists = false;
+			await sns.send(
+				new CreateTopicCommand({
+					Name: names.topicName,
+				}),
+			)
+		).TopicArn;
+
+		if (!topicArn) {
+			throw new Error(
+				"AWS did not return the SNS topic ARN.",
+			);
 		}
 
-		const topicPolicy = {
-			Version: "2012-10-17",
-			Statement: [
-				// {
-				// 	Sid: "AllowSESPublish",
-				// 	Effect: "Allow",
-				// 	Principal: { Service: "ses.amazonaws.com" },
-				// 	Action: "sns:Publish",
-				// 	Resource: topicArn,
-				// 	Condition: { StringEquals: { "aws:SourceAccount": accountId } },
-				// 	// ArnLike: { "aws:SourceArn": `arn:aws:ses:${region}:${accountId}:receipt-rule-set/${ruleSetName}` }
-				// },
-				{
-					Sid: "AllowS3Publish",
-					Effect: "Allow",
-					Principal: { Service: "s3.amazonaws.com" },
-					Action: "sns:Publish",
-					Resource: topicArn,
-					Condition: {
-						StringEquals: { "aws:SourceAccount": accountId },
-						ArnLike: { "aws:SourceArn": `arn:aws:s3:::${bucket}` },
-					},
-				},
-			],
-		};
-		await sns.send(
-			new SetTopicAttributesCommand({
-				TopicArn: topicArn,
-				AttributeName: "Policy",
-				AttributeValue: JSON.stringify(topicPolicy),
-			}),
-		);
-		// const localTunnelUrl = await kvGet("local-tunnel-url")
-		const { subscribed } = await this.ensureWebhookSubscription(
+		await this.ensureTopicPolicy(
 			sns,
 			topicArn,
-			// `${localTunnelUrl ? localTunnelUrl : metaData.WEB_URL}/api/v1/hooks/aws/ses/inbound`,
-			metaData.webHookUrl,
-		);
-		console.log("subscribed", subscribed);
-
-		await s3.send(
-			new PutBucketNotificationConfigurationCommand({
-				Bucket: bucket,
-				NotificationConfiguration: {
-					TopicConfigurations: [
-						{
-							Id: s3NotifId,
-							TopicArn: topicArn,
-							Events: ["s3:ObjectCreated:*"],
-							Filter: {
-								Key: {
-									FilterRules: [{ Name: "prefix", Value: "inbound/" }],
-								},
-							},
-						},
-					],
-					// Omitting QueueConfigurations and LambdaFunctionConfigurations clears them.
-				},
-			}),
+			bucket,
+			accountId,
 		);
 
-		// Create the default inbound rule if missing
-		const { name: ruleSetNameInUse, usedExistingActive } =
-			await this.ensureRuleSet(ses, ruleSetName);
+		let webhookUrl: string | undefined = metaData.webHookUrl;
+		const localTunnelUrl = process.env.LOCAL_TUNNEL_URL?.trim();
 
-		let ruleCreated = false;
-		if (!usedExistingActive) {
-			const current = await ses.send(
-				new DescribeReceiptRuleSetCommand({ RuleSetName: ruleSetNameInUse }),
-			);
-			const hasRule = current.Rules?.some((r) => r.Name === defaultRuleName);
+		if (localTunnelUrl) {
+			const tunnel = new URL(localTunnelUrl);
+			const webhookPath = webhookUrl
+				? new URL(webhookUrl).pathname + new URL(webhookUrl).search
+				: "/api/v1/hooks/aws/ses/inbound";
 
-			if (!hasRule) {
-				await ses.send(
-					new CreateReceiptRuleCommand({
-						RuleSetName: ruleSetNameInUse,
-						Rule: {
-							Name: defaultRuleName,
-							Enabled: true,
-							// Recipients: [] // empty = catch-all
-							Actions: [
-								{
-									S3Action: { BucketName: bucket, ObjectKeyPrefix: "inbound/" },
-								},
-								// { SNSAction: { TopicArn: topicArn, Encoding: "UTF-8" } },
-								{ StopAction: { Scope: "RuleSet" } },
-							],
-							ScanEnabled: true,
-							TlsPolicy: "Optional",
-						},
-					}),
-				);
-				ruleCreated = true;
-			}
+			webhookUrl = new URL(webhookPath, tunnel.origin).toString();
 		}
+
+		const webhookSubscriptionStatus =
+			await this.ensureWebhookSubscription(
+				sns,
+				topicArn,
+				webhookUrl,
+			);
+
+		await this.ensureBucketNotification(
+			s3,
+			bucket,
+			topicArn,
+			names.s3NotifId,
+		);
+
+		const ruleSet = await this.ensureRuleSet(
+			ses,
+			names.ruleSetName,
+		);
+
+		const ruleCreated = ruleSet.owned
+			? await this.ensureDefaultRule(
+				ses,
+				ruleSet.name,
+				names.defaultRuleName,
+				bucket,
+			)
+			: false;
 
 		return {
 			bucket,
 			topicArn,
-			ruleSetName: ruleSetNameInUse,
+			ruleSetName: ruleSet.name,
 			bucketExists,
-			topicExists,
+			topicExists: true,
 			ruleCreated,
+			webhookSubscriptionStatus,
+		};
+	}
+
+	async removeEmail(
+		email: string,
+		opts: Record<any, any>,
+	) {
+		const ses = new SES({
+			region: this.cfg.region,
+			credentials: {
+				accessKeyId: this.cfg.accessKeyId,
+				secretAccessKey: this.cfg.secretAccessKey,
+			},
+		});
+
+		try {
+			await ses.send(
+				new DeleteReceiptRuleCommand({
+					RuleSetName: opts.ruleSetName,
+					RuleName: opts.ruleName,
+				}),
+			);
+
+			return { removed: true };
+		} catch (error) {
+			if (errorCode(error) === "RuleDoesNotExist") {
+				return { removed: false };
+			}
+
+			throw error;
+		}
+	}
+
+	async addEmail(
+		address: string,
+		objectKeyPrefix: string,
+		metaData?: Record<string, any>,
+	): Promise<EmailIdentity> {
+		const resources = metaData?.resourceIds as
+			| BootResult
+			| undefined;
+
+		if (!resources?.bucket || !resources.ruleSetName) {
+			throw new Error(
+				"Verify the SES provider before adding an email identity.",
+			);
+		}
+
+		const normalized = address.trim().toLowerCase();
+		const ses = new SES({
+			region: this.cfg.region,
+			credentials: {
+				accessKeyId: this.cfg.accessKeyId,
+				secretAccessKey: this.cfg.secretAccessKey,
+			},
+		});
+
+		const active = await this.ensureRuleSet(
+			ses,
+			resources.ruleSetName,
+		);
+
+		const current = await ses.send(
+			new DescribeReceiptRuleSetCommand({
+				RuleSetName: active.name,
+			}),
+		);
+
+		const existing = current.Rules?.find(
+			(rule) =>
+				rule.Recipients?.some(
+					(recipient) =>
+						recipient.toLowerCase() === normalized,
+				),
+		);
+
+		if (existing) {
+			const correctDestination =
+				existing.Actions?.some(
+					(action) =>
+						action.S3Action?.BucketName ===
+						resources.bucket &&
+						action.S3Action
+							?.ObjectKeyPrefix ===
+						objectKeyPrefix,
+				) ?? false;
+
+			if (
+				!correctDestination ||
+				!existing.Name
+			) {
+				throw new Error(
+					"This address already has a different SES receipt rule.",
+				);
+			}
+
+			await ses.send(
+				new SetReceiptRulePositionCommand({
+					RuleSetName: active.name,
+					RuleName: existing.Name,
+				}),
+			);
+
+			return {
+				address: normalized,
+				ruleName: existing.Name,
+				ruleSetName: active.name,
+				created: false,
+				slug: slugify(address),
+			};
+		}
+
+		const hash = createHash("sha256")
+			.update(`${resources.bucket}:${normalized}`)
+			.digest("hex")
+			.slice(0, 16);
+		const prefix = slugify(normalized, {
+			customReplacements: [["@", " at "]],
+		});
+		const ruleName = `${prefix.slice(0, 40)}-${hash}`;
+
+		const rule: ReceiptRule = {
+			Name: ruleName,
+			Enabled: true,
+			Recipients: [normalized],
+			Actions: [
+				{
+					S3Action: {
+						BucketName: resources.bucket,
+						ObjectKeyPrefix:
+						objectKeyPrefix,
+					},
+				},
+				{
+					StopAction: {
+						Scope: "RuleSet",
+					},
+				},
+			],
+			ScanEnabled: true,
+			TlsPolicy: "Optional",
+		};
+
+		let created = true;
+
+		try {
+			await ses.send(
+				new CreateReceiptRuleCommand({
+					RuleSetName: active.name,
+					Rule: rule,
+				}),
+			);
+		} catch (error) {
+			if (
+				errorCode(error) !==
+				"RuleAlreadyExists"
+			) {
+				throw error;
+			}
+
+			const result = await ses.send(
+				new DescribeReceiptRuleCommand({
+					RuleSetName: active.name,
+					RuleName: ruleName,
+				}),
+			);
+
+			const matches =
+				result.Rule?.Recipients?.length === 1 &&
+				result.Rule.Recipients[0]
+					.toLowerCase() === normalized &&
+				result.Rule.Actions?.some(
+					(action) =>
+						action.S3Action?.BucketName ===
+						resources.bucket &&
+						action.S3Action
+							?.ObjectKeyPrefix ===
+						objectKeyPrefix,
+				);
+
+			if (!matches) {
+				throw new Error(
+					"An SES receipt rule with this name already exists.",
+				);
+			}
+
+			created = false;
+		}
+
+		await ses.send(
+			new SetReceiptRulePositionCommand({
+				RuleSetName: active.name,
+				RuleName: ruleName,
+			}),
+		);
+
+		return {
+			address: normalized,
+			ruleName,
+			ruleSetName: active.name,
+			created,
+			slug: slugify(address),
 		};
 	}
 
@@ -555,54 +1191,55 @@ export class SesMailer implements Mailer {
 		opts: Record<any, any>,
 	): Promise<DomainIdentity> {
 		const { mailFrom, incoming } = opts;
-		// 1) Create/enable identity with Easy DKIM
+
 		try {
 			await this.v2.send(
 				new CreateEmailIdentityCommand({
 					EmailIdentity: domain,
 					DkimSigningAttributes: {
-						// Easy DKIM
-						NextSigningKeyLength: "RSA_2048_BIT",
+						NextSigningKeyLength:
+							"RSA_2048_BIT",
 					},
 				}),
 			);
-		} catch (err: any) {
-			// If it already exists, we’ll just proceed to fetch tokens
+		} catch (error) {
 			if (
-				err?.name !== "ConflictException" &&
-				err?.name !== "AlreadyExistsException"
+				errorCode(error) !==
+				"ConflictException" &&
+				errorCode(error) !==
+				"AlreadyExistsException"
 			) {
-				// Return a minimal object but still surface the error in meta
 				return {
 					domain,
 					status: "unverified" as any,
 					dns: [],
 					meta: {
-						error: err?.name ?? "CreateEmailIdentityError",
-						message: err?.message,
+						error:
+							errorCode(error) ??
+							"CreateEmailIdentityError",
+						message:
+							errorMessage(error),
 					},
 				};
 			}
 		}
 
-		// 2) Fetch identity details to build DNS records + status
 		const info = await this.v2.send(
-			new GetEmailIdentityCommand({ EmailIdentity: domain }),
+			new GetEmailIdentityCommand({
+				EmailIdentity: domain,
+			}),
 		);
 
-		// SESv2 Easy DKIM => CNAME records from Tokens
-		const tokens = info.DkimAttributes?.Tokens ?? [];
-		// const dns: DnsRecord[] = tokens.map((t) => ({
-		const dkimRecords: DnsRecord[] = tokens.map((t) => ({
+		const dkimRecords: DnsRecord[] = (
+			info.DkimAttributes?.Tokens ?? []
+		).map((token) => ({
 			type: "CNAME",
-			name: `${t}._domainkey.${domain}`,
-			value: `${t}.dkim.amazonses.com`,
-			// note: "Easy DKIM",
+			name: `${token}._domainkey.${domain}`,
+			value: `${token}.dkim.amazonses.com`,
 		}));
 
-		// Map SES status → your status
-		// SES: "PENDING" | "SUCCESS" | "FAILED" | "TEMPORARY_FAILURE"
-		const sesStatus = info.VerificationStatus || "PENDING";
+		const sesStatus =
+			info.VerificationStatus || "PENDING";
 		const status =
 			sesStatus === "SUCCESS"
 				? ("verified" as any)
@@ -614,32 +1251,45 @@ export class SesMailer implements Mailer {
 
 		let extraDns: DnsRecord[] = [];
 		let extraMeta: Record<string, any> = {};
+
 		if (mailFrom) {
-			const { dns, meta } = await this.configureMailFrom(domain, mailFrom);
-			extraDns = dns;
-			extraMeta = meta;
+			const configured =
+				await this.configureMailFrom(
+					domain,
+					mailFrom,
+				);
+			extraDns = configured.dns;
+			extraMeta = configured.meta;
 		}
 
-		const incomingDns: DnsRecord[] = [];
-		if (incoming) {
-			// 1. Add MX record instruction for inbound
-			incomingDns.push({
-				type: "MX",
-				name: domain,
-				value: `10 inbound-smtp.${this.cfg.region}.amazonaws.com`,
-				note: "Route incoming email via SES inbound",
-			});
-		}
+		const incomingDns: DnsRecord[] =
+			incoming
+				? [
+					{
+						type: "MX",
+						name: domain,
+						value: `10 inbound-smtp.${this.cfg.region}.amazonaws.com`,
+						note: "Route incoming email via SES inbound",
+					},
+				]
+				: [];
 
 		return {
 			domain,
 			status,
-			// dns,
-			dns: [...dkimRecords, ...extraDns, ...incomingDns],
+			dns: [
+				...dkimRecords,
+				...extraDns,
+				...incomingDns,
+			],
 			meta: {
 				sesStatus,
-				signingAttributesOrigin: info.DkimAttributes?.SigningAttributesOrigin,
-				...(mailFrom ? { mailFrom: extraMeta } : {}),
+				signingAttributesOrigin:
+				info.DkimAttributes
+					?.SigningAttributesOrigin,
+				...(mailFrom
+					? { mailFrom: extraMeta }
+					: {}),
 			},
 		};
 	}
@@ -647,139 +1297,161 @@ export class SesMailer implements Mailer {
 	private async configureMailFrom(
 		domain: string,
 		mailFrom: string,
-	): Promise<{ dns: DnsRecord[]; meta: Record<string, any> }> {
-		const mf = mailFrom.trim().replace(/\.$/, "");
-		if (!mf.endsWith(`.${domain}`)) {
-			throw new Error(`MAIL FROM must be a subdomain of ${domain}`);
+	): Promise<{
+		dns: DnsRecord[];
+		meta: Record<string, any>;
+	}> {
+		const normalized = mailFrom
+			.trim()
+			.replace(/\.$/, "");
+
+		if (
+			!normalized.endsWith(`.${domain}`)
+		) {
+			throw new Error(
+				`MAIL FROM must be a subdomain of ${domain}`,
+			);
 		}
 
 		await this.v2.send(
-			new PutEmailIdentityMailFromAttributesCommand({
-				EmailIdentity: domain,
-				MailFromDomain: mf,
-				// BehaviorOnMxFailure: "UseDefaultValue" | "RejectMessage"  // optional
-			}),
+			new PutEmailIdentityMailFromAttributesCommand(
+				{
+					EmailIdentity: domain,
+					MailFromDomain: normalized,
+				},
+			),
 		);
 
 		const info = await this.v2.send(
-			new GetEmailIdentityCommand({ EmailIdentity: domain }),
+			new GetEmailIdentityCommand({
+				EmailIdentity: domain,
+			}),
 		);
 
-		// Derive DNS (SES does not return explicit values)
-		const feedbackHost = `feedback-smtp.${this.cfg.region}.amazonses.com`;
 		const dns: DnsRecord[] = [
 			{
 				type: "MX",
-				name: mf,
-				value: `10 ${feedbackHost}`,
+				name: normalized,
+				value: `10 feedback-smtp.${this.cfg.region}.amazonses.com`,
 				priority: 10,
 				note: "Custom MAIL FROM (SPF alignment)",
 			},
 			{
 				type: "TXT",
-				name: mf,
-				value: "v=spf1 include:amazonses.com -all",
+				name: normalized,
+				value:
+					"v=spf1 include:amazonses.com -all",
 				note: "Custom MAIL FROM (SPF alignment)",
 			},
 			{
 				type: "TXT",
 				name: `_dmarc.${domain}`,
 				value: "v=DMARC1; p=none;",
-				note: "Recommended DMARC policy (start with p=none, strengthen later)",
+				note: "Recommended DMARC policy",
 			},
 		];
 
 		return {
 			dns,
 			meta: {
-				mailFromDomain: info.MailFromAttributes?.MailFromDomain,
-				mailFromDomainStatus: info.MailFromAttributes?.MailFromDomainStatus,
-				behaviorOnMxFailure: info.MailFromAttributes?.BehaviorOnMxFailure,
+				mailFromDomain:
+				info.MailFromAttributes
+					?.MailFromDomain,
+				mailFromDomainStatus:
+				info.MailFromAttributes
+					?.MailFromDomainStatus,
+				behaviorOnMxFailure:
+				info.MailFromAttributes
+					?.BehaviorOnMxFailure,
 			},
 		};
 	}
 
-	private normalizeDomain(d: string) {
-		return d.trim().replace(/\.$/, "").toLowerCase();
+	private normalizeDomain(domain: string) {
+		return domain
+			.trim()
+			.replace(/\.$/, "")
+			.toLowerCase();
 	}
 
-	async removeDomain(domain: string): Promise<DomainIdentity> {
-		const d = this.normalizeDomain(domain);
+	async removeDomain(
+		domain: string,
+	): Promise<DomainIdentity> {
+		const normalized =
+			this.normalizeDomain(domain);
 
-		// Try to delete; treat "not found" as success (idempotent).
 		try {
-			await this.client.send(
-				new DeleteEmailIdentityCommand({ EmailIdentity: d }),
+			await this.v2.send(
+				new DeleteEmailIdentityCommand({
+					EmailIdentity: normalized,
+				}),
 			);
-		} catch (e: any) {
-			const notFound =
-				e?.name === "NotFoundException" || e?.$metadata?.httpStatusCode === 404;
-			if (!notFound) throw e;
+		} catch (error) {
+			if (
+				errorCode(error) !==
+				"NotFoundException" &&
+				errorStatus(error) !== 404
+			) {
+				throw error;
+			}
 		}
 
-		// Best-effort: confirm it’s gone; if still present, return current state
-		try {
-			await this.client.send(new GetEmailIdentityCommand({ EmailIdentity: d }));
-			// Still exists (race/permissions). Report current state as “pending/unknown”.
-			return {
-				domain: d,
-				status: "unverified", // your enum: "unverified" | "pending" | "verified" | "failed"
-				dns: [],
-				meta: { deleted: false, reason: "still-present-after-delete" },
-			};
-		} catch {
-			// Deleted (or not found) – return empty DNS and a deleted flag
-			return {
-				domain: d,
-				status: "unverified",
-				dns: [],
-				meta: { deleted: true },
-			};
-		}
+		return {
+			domain: normalized,
+			status: "unverified" as any,
+			dns: [],
+			meta: { deleted: true },
+		};
 	}
 
-	async verifyDomain(domain: string): Promise<DomainIdentity> {
-		const d = this.normalizeDomain(domain);
+	async verifyDomain(
+		domain: string,
+	): Promise<DomainIdentity> {
+		const normalized =
+			this.normalizeDomain(domain);
 
 		try {
 			const info = await this.v2.send(
-				new GetEmailIdentityCommand({ EmailIdentity: d }),
+				new GetEmailIdentityCommand({
+					EmailIdentity: normalized,
+				}),
 			);
-			console.log("info", info);
 
-			// SES Easy DKIM → 3 CNAMEs (if tokens exist)
-			const tokens = info.DkimAttributes?.Tokens ?? [];
-			const dkimRecords: DnsRecord[] = tokens.map((t) => ({
+			const dkimRecords: DnsRecord[] = (
+				info.DkimAttributes?.Tokens ?? []
+			).map((token) => ({
 				type: "CNAME",
-				name: `${t}._domainkey.${d}`,
-				value: `${t}.dkim.amazonses.com`,
+				name: `${token}._domainkey.${normalized}`,
+				value: `${token}.dkim.amazonses.com`,
 			}));
 
-			// MAIL FROM: if configured, derive the two DNS records (MX + SPF TXT)
-			const mf = info.MailFromAttributes?.MailFromDomain?.trim().replace(
-				/\.$/,
-				"",
-			);
-			const mailFromDns: DnsRecord[] = mf
-				? [
+			const mailFrom =
+				info.MailFromAttributes
+					?.MailFromDomain?.trim()
+					.replace(/\.$/, "");
+
+			const mailFromDns: DnsRecord[] =
+				mailFrom
+					? [
 						{
 							type: "MX",
-							name: mf,
+							name: mailFrom,
 							value: `10 feedback-smtp.${this.cfg.region}.amazonses.com`,
 							priority: 10,
 							note: "Custom MAIL FROM (SPF alignment)",
 						},
 						{
 							type: "TXT",
-							name: mf,
+							name: mailFrom,
 							value: "v=spf1 include:amazonses.com -all",
 							note: "Custom MAIL FROM (SPF alignment)",
 						},
 					]
-				: [];
+					: [];
 
-			// Map SES status → your IdentityStatus
-			const sesStatus = info.VerificationStatus || "PENDING";
+			const sesStatus =
+				info.VerificationStatus ||
+				"PENDING";
 			const status =
 				sesStatus === "SUCCESS"
 					? ("verified" as any)
@@ -787,72 +1459,135 @@ export class SesMailer implements Mailer {
 						? ("pending" as any)
 						: sesStatus === "FAILED"
 							? ("failed" as any)
-							: ("unverified" as any); // TEMPORARY_FAILURE or anything else
+							: ("unverified" as any);
 
 			return {
-				domain: d,
+				domain: normalized,
 				status,
-				dns: [...dkimRecords, ...mailFromDns],
+				dns: [
+					...dkimRecords,
+					...mailFromDns,
+				],
 				meta: {
 					sesStatus,
-					signingAttributesOrigin: info.DkimAttributes?.SigningAttributesOrigin,
-					mailFrom: mf
+					signingAttributesOrigin:
+					info.DkimAttributes
+						?.SigningAttributesOrigin,
+					mailFrom: mailFrom
 						? {
-								mailFromDomain: mf,
-								mailFromDomainStatus:
-									info.MailFromAttributes?.MailFromDomainStatus,
-								behaviorOnMxFailure:
-									info.MailFromAttributes?.BehaviorOnMxFailure,
-							}
+							mailFromDomain:
+							mailFrom,
+							mailFromDomainStatus:
+							info.MailFromAttributes
+								?.MailFromDomainStatus,
+							behaviorOnMxFailure:
+							info.MailFromAttributes
+								?.BehaviorOnMxFailure,
+						}
 						: undefined,
-					verificationInfo: info.VerificationInfo,
+					verificationInfo:
+					info.VerificationInfo,
 				},
 			};
-		} catch (e: any) {
-			const notFound =
-				e?.name === "NotFoundException" || e?.$metadata?.httpStatusCode === 404;
+		} catch (error) {
 			return {
-				domain: d,
-				status: "unverified" as any,
+				domain: normalized,
+				status:
+					"unverified" as any,
 				dns: [],
 				meta: {
-					error: notFound ? "IdentityNotFound" : e?.name,
-					message: e?.message,
+					error:
+						errorCode(error) ===
+						"NotFoundException" ||
+						errorStatus(error) ===
+						404
+							? "IdentityNotFound"
+							: errorCode(error),
+					message:
+						errorMessage(error),
 				},
 			};
 		}
 	}
 
+	async getSendingQuota() {
+		const [account, caller] = await Promise.all([
+			this.v2.send(new GetAccountCommand({})),
+			new STSClient({
+				region: this.cfg.region,
+				credentials: {
+					accessKeyId: this.cfg.accessKeyId,
+					secretAccessKey: this.cfg.secretAccessKey,
+				},
+			}).send(new GetCallerIdentityCommand({})),
+		]);
+
+		const quota = account.SendQuota;
+
+		if (
+			!caller.Account ||
+			quota?.MaxSendRate === undefined ||
+			quota.Max24HourSend === undefined ||
+			quota.SentLast24Hours === undefined
+		) {
+			throw new Error("AWS did not return complete SES sending limits.");
+		}
+
+		return {
+			accountId: caller.Account,
+			region: this.cfg.region,
+			sendingEnabled: account.SendingEnabled === true,
+			productionAccessEnabled: account.ProductionAccessEnabled === true,
+			maxPerSecond: quota.MaxSendRate,
+			maxPer24Hours:
+				quota.Max24HourSend < 0 ? null : quota.Max24HourSend,
+			sentLast24Hours: quota.SentLast24Hours,
+		};
+	}
+
 	async sendTestEmail(
 		to: string,
-		opts?: { subject?: string; body?: string },
+		opts?: {
+			subject?: string;
+			body?: string;
+		},
 	): Promise<boolean> {
-		const subject = opts?.subject ?? "Test email";
+		const subject =
+			opts?.subject ?? "Test email";
 		const body =
 			opts?.body ??
-			"This is a test email from your configured SES account. Whats up";
-
-		// Must be a verified email or an address at a verified domain in this SES account/region
-		// const from = (this.cfg as SesConfig).mailFrom ?? to;
-		const from = "no-reply@kurrier.org";
+			"This is a test email from your configured SES account.";
+		const from =
+			"no-reply@kurrier.org";
 
 		try {
 			await this.client.send(
 				new SendEmailCommand({
 					Source: from,
-					Destination: { ToAddresses: [to] },
+					Destination: {
+						ToAddresses: [to],
+					},
 					Message: {
-						Subject: { Data: subject, Charset: "UTF-8" },
+						Subject: {
+							Data: subject,
+							Charset: "UTF-8",
+						},
 						Body: {
-							Text: { Data: body, Charset: "UTF-8" },
-							// Html: { Data: `<p>${body}</p>`, Charset: "UTF-8" }, // optional
+							Text: {
+								Data: body,
+								Charset: "UTF-8",
+							},
 						},
 					},
 				}),
 			);
+
 			return true;
-		} catch (err) {
-			console.error("SES sendTestEmail error:", err);
+		} catch (error) {
+			console.error(
+				"SES sendTestEmail error:",
+				error,
+			);
 			return false;
 		}
 	}
@@ -860,133 +1595,121 @@ export class SesMailer implements Mailer {
 	async sendEmail(
 		to: string[],
 		opts: {
+			cc?: string[];
+			bcc?: string[];
 			subject: string;
 			text: string;
 			html: string;
 			from: string;
-			cc?: string[];
-			bcc?: string[];
 			inReplyTo: string;
 			references: string[];
-			attachments?: { name: string; content: Blob; contentType: string }[];
+			headers?: Record<string, string>;
+			attachments?: {
+				name: string;
+				content: Blob;
+				contentType: string;
+			}[];
 		},
-	): Promise<{ success: boolean; MessageId?: string }> {
-		// const subject = opts?.subject ?? "Test email";
-		// const body =
-		//     opts?.body ??
-		//     "This is a test email from your configured SES account. Whats up";
-
-		// Must be a verified email or an address at a verified domain in this SES account/region
-		// const from = (this.cfg as SesConfig).mailFrom ?? to;
-		// const from = "no-reply@kurrier.org";
-
-		// const base64Attachments = await Promise.all(
-		//     opts.attachments.map(async (att) => {
-		//         const arrayBuffer = await att.content.arrayBuffer();
-		//         const base64 = Buffer.from(new Uint8Array(arrayBuffer)).toString("base64")
-		//         return {
-		//             FileName: att.name,
-		//             // RawContent: new Uint8Array(arrayBuffer),   // ✅ correct type
-		//             RawContent: base64,   // ✅ correct type
-		//             ContentType: att.contentType || "application/octet-stream",
-		//             ContentDisposition: "ATTACHMENT",
-		//         };
-		//     })
-		// )
-
-		// const base64Attachments = await Promise.all(
-		//     (opts.attachments ?? []).map(async (att) => {
-		//         const ab = await att.content.arrayBuffer();
-		//         const bytes = new Uint8Array(ab);
-		//
-		//         return {
-		//             FileName: att.name,                                  // not FileName
-		//             RawContent: bytes,                                  // not RawContent, not base64 string
-		//             // ContentType: att.contentType || att.content.type || "application/octet-stream",
-		//             // ContentDisposition: "ATTACHMENT",
-		//         } as const;
-		//     })
-		// );
-
-		async function toSesV2Attachments(
-			inputs: MailAttachmentInput[],
-		): Promise<SesV2Attachment[]> {
-			return Promise.all(
-				inputs.map(async (att) => {
-					const ab = await att.content.arrayBuffer();
-					const bytes = new Uint8Array(ab);
-
-					const out: SesV2Attachment = {
-						FileName: att.name,
-						RawContent: bytes, // <-- Uint8Array (do NOT base64 yourself)
+	): Promise<{
+		success: boolean;
+		MessageId?: string;
+		error?: string;
+	}> {
+		const attachments:
+			SesV2Attachment[] =
+			await Promise.all(
+				(opts.attachments ??
+					[]).map(
+					async (attachment) => ({
+						FileName:
+						attachment.name,
+						RawContent:
+							new Uint8Array(
+								await attachment.content.arrayBuffer(),
+							),
 						ContentType:
-							att.contentType || att.content.type || "application/octet-stream",
-						ContentTransferEncoding: "BASE64",
-						// ContentDisposition: att.inline ? "INLINE" : "ATTACHMENT",
-						// ...(att.contentId ? { ContentId: att.contentId } : {}),
-					};
-					return out;
-				}),
+							attachment.contentType ||
+							attachment.content.type ||
+							"application/octet-stream",
+						ContentTransferEncoding:
+							"BASE64",
+					}),
+				),
 			);
-		}
-
-		const base64Attachments = await toSesV2Attachments(opts.attachments ?? []);
 
 		try {
-			const { MessageId } = await this.v2.send(
-				new SendEmailCommandV2({
-					FromEmailAddress: opts.from,
-					Destination: {
-						ToAddresses: to,
-						...(opts.cc?.length ? { CcAddresses: opts.cc } : {}),
-						...(opts.bcc?.length ? { BccAddresses: opts.bcc } : {}),
-					},
-					// Source: opts.from,
-					Content: {
-						Simple: {
-							Subject: { Data: opts.subject, Charset: "UTF-8" },
-							Body: {
-								Text: { Data: opts.text, Charset: "UTF-8" },
-								Html: { Data: opts.html, Charset: "UTF-8" }, // optional
+			const { MessageId } =
+				await this.v2.send(
+					new SendEmailCommandV2(
+						{
+							FromEmailAddress:
+							opts.from,
+							Destination: {
+								ToAddresses:
+								to,
+								CcAddresses:
+									opts.cc
+										?.length
+										? opts.cc
+										: undefined,
+								BccAddresses:
+									opts.bcc
+										?.length
+										? opts.bcc
+										: undefined,
 							},
-							...(opts.attachments && opts.attachments.length > 0
-								? {
-										Attachments: base64Attachments,
-									}
-								: {}),
-							Headers: this.buildSesHeaders(opts.inReplyTo, opts.references),
+							Content: {
+								Simple: {
+									Subject:
+										{
+											Data: opts.subject,
+											Charset:
+												"UTF-8",
+										},
+									Body: {
+										Text: {
+											Data: opts.text,
+											Charset:
+												"UTF-8",
+										},
+										Html: {
+											Data: opts.html,
+											Charset:
+												"UTF-8",
+										},
+									},
+									...(attachments.length
+										? {
+											Attachments:
+											attachments,
+										}
+										: {}),
+									Headers: [
+										...this.buildSesHeaders(opts.inReplyTo, opts.references),
+										...Object.entries(opts.headers ?? {}).map(([Name, Value]) => ({
+											Name,
+											Value,
+										})),
+									],
+								},
+							},
 						},
-					},
-				}),
-			);
+					),
+				);
 
-			// await this.client.send(
-			//     new SendEmailCommandV2({
-			//         Source: opts.from,
-			//         Destination: { ToAddresses: to },
-			//         Message: {
-			//             Subject: { Data: opts.subject, Charset: "UTF-8" },
-			//             Body: {
-			//                 Text: { Data: opts.text, Charset: "UTF-8" },
-			//                 Html: { Data: opts.html, Charset: "UTF-8" }, // optional
-			//             },
-			//         },
-			//     }),
-			// );
 			return {
-				MessageId: `<${MessageId}@${this.cfg.region}.amazonses.com>`,
+				MessageId: MessageId
+					? `<${MessageId}@${this.cfg.region}.amazonses.com>`
+					: undefined,
 				success: true,
 			};
-		} catch (err) {
-			console.error("SES sendTestEmail error:", err);
-			return { success: false };
+		} catch (error) {
+			console.error("SES sendEmail error:", error);
+
+			return {
+				success: false,
+				error: errorCode(error) ?? "SesSendFailed",
+			};
 		}
 	}
-
-	// async close(): Promise<void> {
-	//     // best-effort close if transport supports it
-	//     try {
-	//         this.transporter.close?.();
-	//     } catch { /* ignore */ }
-	// }
 }

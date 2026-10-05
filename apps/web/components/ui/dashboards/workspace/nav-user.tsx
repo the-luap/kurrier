@@ -17,18 +17,21 @@ import {
 	SidebarMenuItem,
 	useSidebar,
 } from "@/components/ui/sidebar";
-import { UserResponse } from "@supabase/supabase-js";
 import { Avatar as MantineAvatar } from "@mantine/core";
-import { getGravatarUrl, signOut } from "@/lib/actions/auth";
+import {FetchIsSignedInResult, getGravatarUrl, signOut} from "@/lib/actions/auth";
 import { useEffect, useState } from "react";
+import {FetchWorkspacesResult, switchWorkSpace} from "@/lib/actions/workspace";
+import { LanguageSwitcherSubmenu } from "@/components/common/language-switcher";
+import { useOptionalDictionary } from "@/components/providers/dictionary-provider";
 
 // Every dashboard section mounts its own sidebar, so cache the resolved URL
 // per email for the lifetime of the tab instead of calling the server action
 // on every section switch / router.refresh().
 const gravatarCache = new Map<string, string>();
 
-export function NavUser({ user }: { user: UserResponse["data"]["user"] }) {
+export function NavUser({ workspacePublicId, user, userWorkspaces }: { workspacePublicId: string | undefined, user: FetchIsSignedInResult, userWorkspaces: FetchWorkspacesResult }) {
 	const { isMobile } = useSidebar();
+	const dict = useOptionalDictionary();
 	const email = user?.email;
 	const [gravatarUrl, setGravatarUrl] = useState<string | null>(
 		() => (email && gravatarCache.get(email)) || null,
@@ -94,12 +97,45 @@ export function NavUser({ user }: { user: UserResponse["data"]["user"] }) {
 							</div>
 						</DropdownMenuLabel>
 						<DropdownMenuSeparator />
+						<DropdownMenuLabel className="p-0 font-normal">
+							<ul className="max-h-40 overflow-y-auto rounded-md bg-white p-1 dark:bg-neutral-900">
+								{userWorkspaces.map((userWorkspace) => {
+									const isSelected =
+										userWorkspace.workspaces.publicId === workspacePublicId;
+
+									return (
+										<li
+											key={userWorkspace.workspaces.id}
+											onClick={() => switchWorkSpace(userWorkspace.workspaces.publicId, userWorkspace.workspaces.id)}
+											className={`
+          cursor-pointer rounded-md px-3 py-2 text-sm
+          transition-colors
+          ${
+												isSelected
+													? "bg-blue-50 text-blue-700 dark:bg-blue-500/15 dark:text-blue-300"
+													: "text-neutral-700 hover:bg-neutral-100 dark:text-neutral-200 dark:hover:bg-neutral-800"
+											}
+          focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500
+        `}
+										>
+											<div className="truncate font-medium">
+												{userWorkspace.workspaces.name}
+											</div>
+										</li>
+									);
+								})}
+							</ul>
+
+						</DropdownMenuLabel>
+						<DropdownMenuSeparator />
+						<LanguageSwitcherSubmenu />
+						<DropdownMenuSeparator />
 						<DropdownMenuItem
 							onClick={() => signOut()}
 							className={"cursor-pointer"}
 						>
 							<LogOut />
-							Log out
+							{dict?.dashboard?.logOut ?? "Log out"}
 						</DropdownMenuItem>
 					</DropdownMenuContent>
 				</DropdownMenu>

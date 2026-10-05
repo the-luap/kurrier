@@ -16,6 +16,7 @@ const { SEARCH_REBUILD_ON_BOOT } = getServerEnv();
 export default defineNitroPlugin(async (nitroApp) => {
 	console.log("[typesense] boot");
 
+
 	const worker = new Worker(
 		"search-ingest",
 		async (job) => {

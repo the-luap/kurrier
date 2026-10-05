@@ -1,29 +1,32 @@
 "use client";
 
+import type { ThreadHit } from "@schema";
+import { IconStar, IconStarFilled } from "@tabler/icons-react";
+import { Paperclip, Search } from "lucide-react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import * as React from "react";
+import { useOptionalDictionary } from "@/components/providers/dictionary-provider";
+import { Badge } from "@/components/ui/badge";
 import {
 	CommandDialog,
 	CommandInput,
 	CommandSeparator,
 } from "@/components/ui/command";
-import { Badge } from "@/components/ui/badge";
-import { Search, Paperclip } from "lucide-react";
 import { initSearch } from "@/lib/actions/mailbox";
-import type { User } from "@supabase/supabase-js";
-import type { ThreadHit, SearchThreadsResponse } from "@schema";
-import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
-import { IconStar, IconStarFilled } from "@tabler/icons-react";
+
+const DEBOUNCE_MS = 250;
 
 export default function MailboxSearch({
-	user,
 	publicId,
 	mailboxSlug,
+	workspacePublicId,
 }: {
-	user: User | null;
 	publicId: string;
 	mailboxSlug: string;
+	workspacePublicId: string;
 }) {
+	const dict = useOptionalDictionary();
 	const [open, setOpen] = React.useState(false);
 	const [query, setQuery] = React.useState("");
 	const [hasAttachment, setHasAttachment] = React.useState(false);
@@ -46,171 +49,179 @@ export default function MailboxSearch({
 		return () => window.removeEventListener("keydown", onKey);
 	}, []);
 
-	// Debounced search. The timer is cleared on every change / unmount and a
-	// request id drops responses that arrive after a newer query was typed,
-	// so a slow earlier search can no longer overwrite newer results.
-	const requestIdRef = React.useRef(0);
 	React.useEffect(() => {
-		const requestId = ++requestIdRef.current;
-		const timer = setTimeout(async () => {
-			if (!query.trim()) {
-				setItems([]);
-				setTotalThreads(0);
-				setTotalMessages(0);
-				setLoading(false);
-				return;
-			}
+		const q = query.trim();
+		if (!q) {
+			setLoading(false);
+			setItems([]);
+			setTotalThreads(0);
+			setTotalMessages(0);
+			return;
+		}
+
+		// Only the latest request may update the results: a slow earlier
+		// search must not overwrite newer ones.
+		let cancelled = false;
+		const t = setTimeout(async () => {
 			try {
 				setLoading(true);
-				const res = (await initSearch(
-					query,
-					String(user?.id),
+
+				const res = await initSearch(
+					q,
+					workspacePublicId,
+					publicId,
+					mailboxSlug,
 					hasAttachment,
 					onlyUnread,
 					isStarred,
 					1,
-				)) as SearchThreadsResponse;
-				if (requestId !== requestIdRef.current) return;
+				);
+
+				if (cancelled) return;
 				setItems(res.items || []);
 				setTotalThreads(res.totalThreads ?? res.items?.length ?? 0);
 				setTotalMessages(res.totalMessages ?? res.items?.length ?? 0);
 			} catch {
-				if (requestId !== requestIdRef.current) return;
+				if (cancelled) return;
 				setItems([]);
 				setTotalThreads(0);
 				setTotalMessages(0);
 			} finally {
-				if (requestId === requestIdRef.current) setLoading(false);
+				if (!cancelled) setLoading(false);
 			}
-		}, 250);
-		return () => clearTimeout(timer);
-	}, [query, hasAttachment, onlyUnread, isStarred, user?.id]);
+		}, DEBOUNCE_MS);
+
+		return () => {
+			cancelled = true;
+			clearTimeout(t);
+		};
+	}, [
+		query,
+		hasAttachment,
+		onlyUnread,
+		isStarred,
+		workspacePublicId,
+		publicId,
+		mailboxSlug,
+	]);
 
 	const toggle = (setter: React.Dispatch<React.SetStateAction<boolean>>) =>
 		setter((v) => !v);
 
-	const router = useRouter();
+	// Mail only lives under /dashboard/mail (there is no /w/<id>/mail route).
+	const mailboxBase = `/w/${workspacePublicId}/dashboard/mail/${publicId}/${mailboxSlug}`;
+	const threadBase = `${mailboxBase}/threads`;
 
-	const pathName = usePathname();
+	const router = useRouter();
 
 	return (
 		<>
 			<button
 				type="button"
 				onClick={() => setOpen(true)}
-				aria-keyshortcuts="Control+K Meta+K"
-				className="flex w-full items-center gap-2 rounded-lg border bg-background px-4 py-2.5 text-muted-foreground hover:bg-muted/30"
+				className="flex min-w-0 flex-1 items-center justify-center gap-2 rounded-lg border bg-background px-3 py-2.5 text-muted-foreground hover:bg-muted/30 sm:justify-start sm:px-4"
 			>
-				<Search className="h-4 w-4 opacity-60" />
-				<span className="text-sm">Search all mailboxes (⌘K)</span>
+				<Search className="size-4 shrink-0 opacity-60" />
+				<span className="hidden truncate text-sm sm:inline">
+					{dict?.mailbox?.searchMailboxHint ?? "Search this mailbox (⌘K)"}
+				</span>
+				<span className="sr-only sm:hidden">
+					{dict?.mailbox?.searchMailPlaceholder ?? "Search mail"}
+				</span>
 			</button>
 
 			<CommandDialog open={open} onOpenChange={setOpen}>
 				<CommandInput
 					autoFocus
-					placeholder="Search mail…"
+					placeholder={dict?.mailbox?.searchMailPlaceholder ?? "Search mail…"}
 					value={query}
 					onValueChange={setQuery}
 					onKeyDown={(e) => {
-						if (e.key === "Enter") {
-							e.preventDefault();
-							setOpen(false);
-							router.push(
-								`${pathName.match("/dashboard/mail") ? "/dashboard" : ""}/mail/${publicId}/${mailboxSlug}/search?q=${encodeURIComponent(query)}&has=${hasAttachment ? "1" : "0"}&unread=${onlyUnread ? "1" : "0"}&starred=${isStarred ? "1" : "0"}`,
-							);
-						}
+						if (e.key !== "Enter") return;
+						e.preventDefault();
+						setOpen(false);
+						router.push(
+							`${mailboxBase}/search?q=${encodeURIComponent(query)}&has=${hasAttachment ? "1" : "0"}&unread=${onlyUnread ? "1" : "0"}&starred=${isStarred ? "1" : "0"}`,
+						);
 					}}
 				/>
 
 				<div className="sticky top-0 z-10 flex flex-wrap gap-2 border-b bg-background px-4 py-2">
 					<Badge
-						asChild
+						onClick={() => toggle(setHasAttachment)}
 						className={`cursor-pointer rounded-full px-3 py-1 text-sm ${
 							hasAttachment ? "bg-primary text-primary-foreground" : ""
 						}`}
 						variant={hasAttachment ? "default" : "secondary"}
 					>
-						<button
-							type="button"
-							aria-pressed={hasAttachment}
-							onClick={() => toggle(setHasAttachment)}
-						>
-							Has attachment
-						</button>
+						{dict?.mailbox?.hasAttachment ?? "Has attachment"}
 					</Badge>
 
 					<Badge
-						asChild
+						onClick={() => toggle(setOnlyUnread)}
 						className={`cursor-pointer rounded-full px-3 py-1 text-sm ${
 							onlyUnread ? "bg-primary text-primary-foreground" : ""
 						}`}
 						variant={onlyUnread ? "default" : "secondary"}
 					>
-						<button
-							type="button"
-							aria-pressed={onlyUnread}
-							onClick={() => toggle(setOnlyUnread)}
-						>
-							Unread only
-						</button>
+						{dict?.mailbox?.unreadOnly ?? "Unread only"}
 					</Badge>
 
 					<Badge
-						asChild
+						onClick={() => toggle(setIsStarred)}
 						className={`cursor-pointer rounded-full px-3 py-1 text-sm ${
 							isStarred ? "bg-primary text-primary-foreground" : ""
 						}`}
 						variant={isStarred ? "default" : "secondary"}
 					>
-						<button
-							type="button"
-							aria-pressed={isStarred}
-							onClick={() => toggle(setIsStarred)}
-						>
-							Starred only
-						</button>
+						{dict?.mailbox?.starredOnly ?? "Starred only"}
 					</Badge>
 				</div>
 
 				<div className="px-4 py-2 text-xs text-muted-foreground">
 					{loading
-						? "Searching…"
-						: `Threads: ${totalThreads} · Messages: ${totalMessages}`}
+						? (dict?.mailbox?.searching ?? "Searching…")
+						: `${dict?.mailbox?.threadsLabel ?? "Threads"}: ${totalThreads} · ${dict?.mailbox?.messagesLabel ?? "Messages"}: ${totalMessages}`}
 				</div>
 
 				<div className="max-h-[60vh] overflow-auto px-2 pb-2">
 					{items.length === 0 && !loading ? (
 						<div className="px-4 py-8 text-center text-sm text-muted-foreground">
-							No results found.
+							{dict?.mailbox?.noResultsFound ?? "No results found."}
 						</div>
 					) : (
 						<ul className="space-y-2">
 							{items.map((t) => (
-								<li key={t.id} className={"my-2"}>
+								<li key={t.id} className="my-2">
 									<Link
-										href={`${pathName.match("/dashboard/mail") ? "/dashboard/mail" : "/mail"}/${publicId}/inbox/threads/${t.threadId}`}
-										className="w-full rounded-md px-4 py-3 text-left hover:bg-muted/60 block focus:outline-none focus:ring-2 focus:ring-ring"
+										href={`${threadBase}/${t.threadId}`}
+										className="block w-full rounded-md px-4 py-3 text-left hover:bg-muted/60 focus:outline-none focus:ring-2 focus:ring-ring"
+										onClick={() => setOpen(false)}
 									>
 										<div className="flex items-center gap-2">
-											<span className={"flex mt-0.5"}>
+											<span className="mt-0.5 flex">
 												{t.starred ? (
 													<IconStarFilled
-														className={"text-yellow-400"}
+														className="text-yellow-400"
 														size={12}
 													/>
 												) : (
 													<IconStar className="h-3 w-3" />
 												)}
 											</span>
+
 											<span
 												aria-hidden
 												className={`mt-1 h-2 w-2 shrink-0 rounded-full ${
 													t.unread ? "bg-primary" : "bg-muted-foreground/30"
 												}`}
 											/>
+
 											<div className="truncate text-[15px] font-medium">
-												{t.subject || "(no subject)"}
+												{t.subject ||
+													(dict?.mailbox?.noSubject ?? "(no subject)")}
 											</div>
+
 											{t.hasAttachment && (
 												<span className="ml-1 text-muted-foreground">
 													<Paperclip className="h-3.5 w-3.5" />
@@ -225,12 +236,12 @@ export default function MailboxSearch({
 										)}
 
 										<div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
-											{t.fromName && (
+											{t.fromName ? (
 												<span className="truncate">{t.fromName}</span>
-											)}
-											{t.fromEmail && !t.fromName && (
+											) : t.fromEmail ? (
 												<span className="truncate">{t.fromEmail}</span>
-											)}
+											) : null}
+
 											{t.participants?.length > 0 && (
 												<>
 													<span>•</span>
@@ -240,8 +251,9 @@ export default function MailboxSearch({
 													</span>
 												</>
 											)}
+
 											{t.createdAt ? (
-												<div className={"flex min-w-16"}>
+												<div className="flex min-w-16">
 													<span>•&nbsp;</span>
 													<span>
 														{new Date(t.createdAt).toLocaleDateString(
@@ -264,18 +276,17 @@ export default function MailboxSearch({
 
 				<CommandSeparator />
 
-				{/* FOOTER */}
 				<div className="flex items-center justify-between rounded-b-lg bg-background/95 px-4 py-3 backdrop-blur">
 					<div className="flex items-center gap-2 text-sm text-muted-foreground">
 						<Search className="h-4 w-4 opacity-70" />
 						<span>
-							All search results for{" "}
-							<span className="font-medium text-foreground">
-								{`‘${query || ""}’`}
-							</span>
+							{dict?.mailbox?.allSearchResultsFor ?? "All search results for"}{" "}
+							<span className="font-medium text-foreground">{`‘${query || ""}’`}</span>
 						</span>
 					</div>
-					<div className="text-xs text-muted-foreground">Press ENTER</div>
+					<div className="text-xs text-muted-foreground">
+						{dict?.mailbox?.pressEnter ?? "Press ENTER"}
+					</div>
 				</div>
 			</CommandDialog>
 		</>

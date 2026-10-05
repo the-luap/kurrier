@@ -5,6 +5,8 @@ on:
 
 jobs:
   create-release-pr:
+    # Upstream release flow only; never runs in forks.
+    if: ${{ github.repository == 'kurrier-org/kurrier' }}
     permissions:
       contents: write
       pull-requests: write

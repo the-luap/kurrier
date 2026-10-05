@@ -1,4 +1,5 @@
 import { db, mailboxes, messages, mailboxThreads } from "@db";
+import { upsertMailboxThreadItem } from "@common";
 import { and, eq, sql } from "drizzle-orm";
 import { ImapFlow } from "imapflow";
 import { initSmtpClient } from "./imap-client";
@@ -22,6 +23,7 @@ export const moveMail = async (
 		op,
 		toMailboxId,
 		moveImap,
+		messageId,
 	} = data;
 
 	// Source mailbox
@@ -67,17 +69,21 @@ export const moveMail = async (
 	const destPath: string =
 		(destMailboxRow.metaData as any)?.imap?.path ?? destMailboxRow.name;
 
-	// Messages in thread scoped to the source mailbox
+	// Messages in thread scoped to the source mailbox (only the one message
+	// for a single-message action).
+	const sourceScope = and(
+		eq(messages.threadId, threadId),
+		eq(messages.mailboxId, fromMailboxId),
+		messageId ? eq(messages.id, messageId) : undefined,
+	);
 	const threadMsgs = await db
 		.select({ id: messages.id, meta: messages.metaData })
 		.from(messages)
-		.where(
-			and(
-				eq(messages.threadId, threadId),
-				eq(messages.mailboxId, fromMailboxId),
-			),
-		);
+		.where(sourceScope);
 	if (threadMsgs.length === 0) return;
+
+	// New UID per moved message row (null: server did not report one).
+	const newUids = new Map<string, number | null>();
 
 	if (moveImap) {
 		type Group = { path: string; uids: number[]; messageIds: string[] };
@@ -105,20 +111,30 @@ export const moveMail = async (
 		} else {
 			const client = await initSmtpClient(srcMailbox.identityId, imapInstances);
 			if (client?.authenticated && client.usable) {
-				try {
-					for (const { path: srcPath, uids } of byPath.values()) {
-						if (!uids.length) continue;
-						const lock = await client.getMailboxLock(srcPath);
-						try {
-							await client.messageMove(uids, destPath, { uid: true });
-						} finally {
-							lock.release();
-						}
+				for (const { path: srcPath, uids, messageIds } of byPath.values()) {
+					if (!uids.length) continue;
+					const lock = await client.getMailboxLock(srcPath);
+					try {
+						// UIDs change with the folder: keep the destination UID
+						// (UIDPLUS) instead of the stale source UID, which would
+						// address another message in the destination folder.
+						const res = await client.messageMove(uids, destPath, {
+							uid: true,
+						});
+						uids.forEach((uid, i) => {
+							newUids.set(
+								messageIds[i],
+								(res && res.uidMap?.get(uid)) || null,
+							);
+						});
+					} finally {
+						lock.release();
 					}
-				} catch (err) {
-					console.error("[mail:move] IMAP move failed:", err);
-					// Let DB update happen; delta sync can reconcile.
 				}
+				// An IMAP failure throws: the job is retried and the DB is
+				// not moved away from where the message still is.
+			} else {
+				throw new Error("[mail:move] IMAP client not usable");
 			}
 		}
 	}
@@ -140,15 +156,52 @@ export const moveMail = async (
       `;
 		}
 
-		await tx
-			.update(messages)
-			.set(set)
+		await tx.update(messages).set(set).where(sourceScope);
+
+		for (const [id, uid] of newUids) {
+			await tx
+				.update(messages)
+				.set({
+					metaData: sql`jsonb_set(coalesce(${messages.metaData}, '{}'::jsonb), '{imap,uid}', ${uid === null ? sql`'null'::jsonb` : sql`to_jsonb(${uid}::bigint)`}, true)`,
+				})
+				.where(eq(messages.id, id));
+		}
+
+		if (messageId) {
+			await moveSingleMessageSummary(tx, {
+				threadId,
+				fromMailboxId,
+				messageId,
+			});
+			return;
+		}
+
+		// The thread may already have a row in the destination (part of it
+		// was moved / archived before): (thread_id, mailbox_id) is the
+		// primary key, so merge into that row instead of renaming onto it.
+		const [destRow] = await tx
+			.select({ threadId: mailboxThreads.threadId })
+			.from(mailboxThreads)
 			.where(
 				and(
-					eq(messages.threadId, threadId),
-					eq(messages.mailboxId, fromMailboxId),
+					eq(mailboxThreads.threadId, threadId),
+					eq(mailboxThreads.mailboxId, destMailboxRow.id),
 				),
-			);
+			)
+			.limit(1);
+
+		if (destRow) {
+			await tx
+				.delete(mailboxThreads)
+				.where(
+					and(
+						eq(mailboxThreads.threadId, threadId),
+						eq(mailboxThreads.mailboxId, fromMailboxId),
+					),
+				);
+			await upsertMailboxThreadItem(threadMsgs[0].id, tx);
+			return;
+		}
 
 		await tx
 			.update(mailboxThreads)
@@ -165,3 +218,78 @@ export const moveMail = async (
 			);
 	});
 };
+
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/**
+ * After one message of a thread moved: the destination row gains it (upsert
+ * aggregates the destination mailbox's messages of the thread), and the
+ * source row is recomputed from what is left there, or removed when nothing
+ * is left.
+ */
+export async function moveSingleMessageSummary(
+	tx: Tx,
+	{
+		threadId,
+		fromMailboxId,
+		messageId,
+	}: { threadId: string; fromMailboxId: string; messageId: string },
+) {
+	await upsertMailboxThreadItem(messageId, tx);
+
+	const remaining = sql`
+		select ${messages.id} as id, ${messages.seen} as seen,
+			${messages.flagged} as flagged,
+			${messages.hasAttachments} as has_attachments,
+			coalesce(${messages.date}, ${messages.createdAt}) as at
+		from ${messages}
+		where ${messages.threadId} = ${threadId}
+			and ${messages.mailboxId} = ${fromMailboxId}
+	`;
+
+	const [{ left }] = await tx
+		.select({ left: sql<number>`count(*)::int` })
+		.from(messages)
+		.where(
+			and(
+				eq(messages.threadId, threadId),
+				eq(messages.mailboxId, fromMailboxId),
+			),
+		);
+
+	if (!left) {
+		await tx
+			.delete(mailboxThreads)
+			.where(
+				and(
+					eq(mailboxThreads.threadId, threadId),
+					eq(mailboxThreads.mailboxId, fromMailboxId),
+				),
+			);
+		return;
+	}
+
+	// Exact recompute: upsertMailboxThreadItem only ever grows the timeline
+	// and the starred/attachment flags, which is wrong after a removal.
+	await tx
+		.update(mailboxThreads)
+		.set({
+			messageCount: sql`(select count(*) from (${remaining}) r)`,
+			unreadCount: sql`(select count(*) filter (where not r.seen) from (${remaining}) r)`,
+			starred: sql`(select coalesce(bool_or(r.flagged), false) from (${remaining}) r)`,
+			hasAttachments: sql`(select coalesce(bool_or(r.has_attachments), false) from (${remaining}) r)`,
+			lastActivityAt: sql`(select max(r.at) from (${remaining}) r)`,
+			firstMessageAt: sql`(select min(r.at) from (${remaining}) r)`,
+			previewText: sql`coalesce((
+				select ${messages.snippet} from ${messages}
+				where ${messages.id} = (select r.id from (${remaining}) r order by r.at desc limit 1)
+			), ${mailboxThreads.previewText})`,
+			updatedAt: new Date(),
+		})
+		.where(
+			and(
+				eq(mailboxThreads.threadId, threadId),
+				eq(mailboxThreads.mailboxId, fromMailboxId),
+			),
+		);
+}

@@ -1,15 +1,14 @@
 // @ts-nocheck
-
-import { sanitizeFilename } from "@common/mail-client";
+import {
+	DomainIdentity,
+	Mailer,
+	RawSendgridConfigSchema,
+	SendgridConfig,
+	VerifyResult,
+} from "../core";
 import sgClient from "@sendgrid/client";
 import sgMail from "@sendgrid/mail";
-import {
-	type DomainIdentity,
-	type Mailer,
-	RawSendgridConfigSchema,
-	type SendgridConfig,
-	type VerifyResult,
-} from "../core";
+import { sanitizeFilename } from "@common/mail-client";
 
 export class SendgridMailer implements Mailer {
 	private client: sgClient.Client;
@@ -60,7 +59,7 @@ export class SendgridMailer implements Mailer {
 		opts?: { subject?: string; body?: string; from?: string },
 	): Promise<boolean> {
 		try {
-			await this.mailClient.send({
+			const res = await this.mailClient.send({
 				to,
 				from: opts?.from ?? "no-reply@kurrier.org",
 				subject: opts?.subject ?? "Test email",
@@ -393,13 +392,11 @@ export class SendgridMailer implements Mailer {
 			text: string;
 			html: string;
 			from: string;
-			cc?: string[];
-			bcc?: string[];
 			inReplyTo: string;
 			references: string[];
 			attachments?: { name: string; content: Blob; contentType: string }[];
 		},
-	): Promise<{ success: boolean; MessageId?: string; error?: string }> {
+	): Promise<{ success: boolean; MessageId?: string }> {
 		try {
 			// Convert Blob attachments -> SendGrid format (Base64 string)
 			const attachments = opts.attachments
@@ -424,8 +421,8 @@ export class SendgridMailer implements Mailer {
 			const msg: MailDataRequired = {
 				from: opts.from,
 				to,
-				...(opts.cc?.length ? { cc: opts.cc } : {}),
-				...(opts.bcc?.length ? { bcc: opts.bcc } : {}),
+				cc: opts.cc?.length ? opts.cc : undefined,
+				bcc: opts.bcc?.length ? opts.bcc : undefined,
 				subject: opts.subject,
 				text: opts.text || undefined,
 				html: opts.html || undefined,

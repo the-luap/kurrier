@@ -1,51 +1,140 @@
 import { defineNitroPlugin } from "nitropack/runtime";
 import { JobScheduler, Worker } from "bullmq";
-import { getRedis, workerOptions } from "../../lib/get-redis";
-import { db, mailboxThreads, MessageEntity, providers } from "@db";
-import { PROVIDERS, STORAGE_PROVIDERS } from "@schema";
+import { redisConnection, workerOptions } from "../../lib/get-redis";
+import {db, mailboxThreads, messages, providers} from "@db";
+import {INBOUND_SPEC, JMAP_SPEC, MAILTRAP_SPEC, PROVIDERS, STORAGE_PROVIDERS} from "@schema";
 import { kvDel, kvGet, kvSet } from "@common";
 import { processWebhook } from "../../lib/webhooks/message.received";
-import { and, isNull, lte } from "drizzle-orm";
+import {and, eq, isNull, lte} from "drizzle-orm";
 import { processRules } from "../../lib/rules/rules-processor";
 
+import {GetObjectCommand, PutBucketCorsCommand} from "@aws-sdk/client-s3";
+import { s3 } from "../../lib/create-s3-client";
+import { getServerEnv } from "@schema";
+
 export default defineNitroPlugin(async (nitroApp) => {
-	const connection = (await getRedis()).connection;
+	const connection = redisConnection.connection
+	try {
+		const { S3_BUCKET } = getServerEnv();
+
+		const isProduction =
+			process.env.NODE_ENV === "production";
+
+		const allowedOrigin = isProduction
+			? process.env.WEB_URL
+			: "*";
+
+		if (S3_BUCKET && allowedOrigin) {
+			await s3.send(
+				new PutBucketCorsCommand({
+					Bucket: S3_BUCKET,
+					CORSConfiguration: {
+						CORSRules: [
+							{
+								AllowedOrigins: [
+									allowedOrigin,
+								],
+								AllowedMethods: [
+									"GET",
+									"PUT",
+									"POST",
+									"DELETE",
+									"HEAD",
+								],
+								AllowedHeaders: ["*"],
+								ExposeHeaders: ["ETag"],
+								MaxAgeSeconds: 3600,
+							},
+						],
+					},
+				}),
+			);
+
+			console.info(
+				"[COMMON] S3 bucket CORS configured",
+			);
+		}
+	} catch (err: any) {
+		console.error(
+			"[COMMON] Failed to configure S3 bucket CORS:",
+			err?.message ?? err,
+		);
+	}
+
+
 
 	const worker = new Worker(
 		"common-worker",
 		async (job) => {
 			switch (job.name) {
 				case "sync-providers": {
-					const { userId } = job.data as { userId: string };
+					const { userId, workspaceId } = job.data as { userId: string, workspaceId: string };
+					console.log("[COMMON WORKER] syncing providers for user, workspace", userId, workspaceId);
 					await db
 						.insert(providers)
 						.values(
-							[...PROVIDERS, ...STORAGE_PROVIDERS].map((k) => ({
+							[...PROVIDERS, ...STORAGE_PROVIDERS, INBOUND_SPEC, JMAP_SPEC, MAILTRAP_SPEC].map((k) => ({
 								type: k.key,
 								ownerId: userId,
+								workspaceId: workspaceId,
 							})),
 						)
 						.onConflictDoNothing({
-							target: [providers.ownerId, providers.type],
+							target: [providers.ownerId, providers.type, providers.workspaceId],
 						})
 						.returning();
 					return { success: true };
 				}
 				case "webhook:message.received": {
-					const { message, rawEmail } = job.data as {
-						message: MessageEntity;
-						rawEmail: string;
+					const { messageId } = job.data as {
+						messageId: string;
 					};
+
+					const [message] = await db
+						.select()
+						.from(messages)
+						.where(eq(messages.id, messageId))
+						.limit(1);
+
+					if (!message) {
+						return { success: false, reason: "message-not-found" };
+					}
+
+					// Use the message's own key, not the one in the job payload,
+					// so a job can never attach another object of the bucket.
+					const rawStorageKey = message.rawStorageKey;
+
+					// The raw source is missing when its upload failed during
+					// ingestion: deliver the webhook without it.
+					let rawEmail = "";
+					if (rawStorageKey) {
+						const response = await s3.send(
+							new GetObjectCommand({
+								Bucket: process.env.S3_BUCKET!,
+								Key: rawStorageKey,
+							}),
+						);
+
+						if (!response.Body) {
+							throw new Error(
+								`Raw email not found in storage: ${rawStorageKey}`,
+							);
+						}
+
+						rawEmail = await response.Body.transformToString();
+					}
+
 					await processWebhook({ message, rawEmail });
+
 					return { success: true };
 				}
-                case "rules:processor": {
-                    const { messageId } = job.data as {
-                        messageId: string;
-                    };
-                    await processRules({ messageId });
-                    return { success: true };
-                }
+				case "rules:processor": {
+					const { messageId } = job.data as {
+						messageId: string;
+					};
+					await processRules({ messageId });
+					return { success: true };
+				}
 				case "mail:snooze-tick": {
 					const now = new Date();
 					await db
@@ -98,24 +187,28 @@ export default defineNitroPlugin(async (nitroApp) => {
 		const existing = await kvGet("local-tunnel-url");
 		if (!existing || existing !== process.env.LOCAL_TUNNEL_URL) {
 			await kvSet("local-tunnel-url", process.env.LOCAL_TUNNEL_URL);
-			console.log(
+			console.info(
 				`✅ Stored local tunnel URL: ${process.env.LOCAL_TUNNEL_URL}`,
 			);
 		} else {
-			console.log(`ℹ️ Using existing tunnel URL from Redis: ${existing}`);
+			console.info(`ℹ️ Using existing tunnel URL from Redis: ${existing}`);
 		}
 
 	} else {
-		console.log("Local tunnel not enabled");
+		console.info("Local tunnel not enabled");
 		await kvDel("local-tunnel-url");
 	}
 
+	// Always close the worker and scheduler (it used to happen only when the
+	// local tunnel was disabled).
 	nitroApp.hooks.hookOnce("close", async () => {
-		console.log("Closing common worker");
 		try {
-			await worker.close();
+			await Promise.allSettled([
+				worker?.close(),
+				scheduler?.close(),
+			]);
 		} catch (err: any) {
-			console.error("Error closing common worker:", err?.message ?? err);
+			console.error("Error closing BullMQ resources:", err?.message ?? err);
 		}
 	});
 });

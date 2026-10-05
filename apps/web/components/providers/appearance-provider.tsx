@@ -19,37 +19,27 @@ import {
 } from "@/lib/actions/appearance";
 import { Toaster } from "@/components/ui/sonner";
 
-type ResolvedMode = "light" | "dark";
-
 type AppearanceCtx = {
 	theme: ThemeName;
 	mode: ThemeMode;
-	setTheme: (t: ThemeName) => void;
-	setMode: (m: ThemeMode) => void;
+	setTheme: (theme: ThemeName) => void;
+	setWorkspaceTheme: (theme: ThemeName | null) => void;
+	setMode: (mode: ThemeMode) => void;
 	pending: boolean;
-	applyColorScheme: (mode: ThemeMode) => void;
 };
+
+type ResolvedMode = "light" | "dark";
 
 const Ctx = createContext<AppearanceCtx | null>(null);
 
 const DARK_QUERY = "(prefers-color-scheme: dark)";
 
-/**
- * Applies the resolved color scheme to <html> for Tailwind (`.dark`), native
- * controls (`color-scheme`) and Mantine (`data-mantine-color-scheme`).
- * Module-level so its identity is stable across renders.
- */
-function applyColorScheme(mode: ThemeMode): ResolvedMode {
+function applyMode(isDark: boolean) {
 	const el = document.documentElement;
-	const isDark =
-		mode === "dark" ||
-		(mode === "system" && window.matchMedia(DARK_QUERY).matches);
 
 	el.classList.toggle("dark", isDark);
 	el.style.setProperty("color-scheme", isDark ? "dark" : "light");
 	el.setAttribute("data-mantine-color-scheme", isDark ? "dark" : "light");
-
-	return isDark ? "dark" : "light";
 }
 
 export function AppearanceProvider({
@@ -67,57 +57,82 @@ export function AppearanceProvider({
 	const router = useRouter();
 	const [pending, start] = useTransition();
 	const [theme, setThemeState] = useState<ThemeName>(initialTheme);
+	const [workspaceTheme, setWorkspaceTheme] = useState<ThemeName | null>(null);
 	const [mode, setModeState] = useState<ThemeMode>(initialMode);
+
+	const activeTheme = workspaceTheme ?? theme;
 	// Last resolved value persisted in the cookie; avoids a server action round
-	// trip on every page load when nothing changed.
+	// trip on every page load in "system" mode when nothing changed.
 	const persistedResolved = useRef<ResolvedMode | undefined>(initialResolved);
 
-	// Keep DOM synced with theme
 	useEffect(() => {
-		document.documentElement.setAttribute("data-theme", theme);
-	}, [theme]);
+		setThemeState(initialTheme);
+	}, [initialTheme]);
 
-	// Keep DOM (+ resolved cookie for "system") synced with mode. A single
-	// listener handles OS-level changes while in "system" mode.
 	useEffect(() => {
-		const syncResolved = (resolved: ResolvedMode) => {
+		document.documentElement.setAttribute("data-theme", activeTheme);
+	}, [activeTheme]);
+
+	useEffect(() => {
+		if (mode === "dark" || mode === "light") {
+			applyMode(mode === "dark");
+			// setModeServer already stores the resolved cookie for explicit modes.
+			persistedResolved.current = mode;
+			return;
+		}
+
+		const media = window.matchMedia(DARK_QUERY);
+
+		const syncSystemMode = (isDark: boolean) => {
+			applyMode(isDark);
+			const resolved: ResolvedMode = isDark ? "dark" : "light";
 			if (persistedResolved.current === resolved) return;
 			persistedResolved.current = resolved;
 			void setResolvedServer(resolved);
 		};
 
-		const resolved = applyColorScheme(mode);
-		if (mode !== "system") {
-			// setModeServer already stores the resolved cookie for explicit modes
-			persistedResolved.current = resolved;
-			return;
-		}
-		syncResolved(resolved);
+		syncSystemMode(media.matches);
 
-		const mq = window.matchMedia(DARK_QUERY);
-		const onChange = () => syncResolved(applyColorScheme("system"));
-		mq.addEventListener("change", onChange);
-		return () => mq.removeEventListener("change", onChange);
+		const onChange = (event: MediaQueryListEvent) => {
+			syncSystemMode(event.matches);
+		};
+
+		media.addEventListener("change", onChange);
+
+		return () => {
+			media.removeEventListener("change", onChange);
+		};
 	}, [mode]);
 
 	const setTheme = useCallback(
-		(t: ThemeName) => {
-			setThemeState(t);
-			document.documentElement.setAttribute("data-theme", t);
+		(nextTheme: ThemeName) => {
+			setThemeState(nextTheme);
+
+			if (workspaceTheme === null) {
+				document.documentElement.setAttribute("data-theme", nextTheme);
+			}
+
 			start(async () => {
-				await setThemeServer(t);
+				await setThemeServer(nextTheme);
 				router.refresh();
 			});
 		},
-		[router],
+		[workspaceTheme, router],
 	);
 
 	const setMode = useCallback(
-		(m: ThemeMode) => {
-			setModeState(m);
-			applyColorScheme(m);
+		(nextMode: ThemeMode) => {
+			setModeState(nextMode);
+
+			const isDark =
+				nextMode === "dark" ||
+				(nextMode === "system" &&
+					window.matchMedia(DARK_QUERY).matches);
+
+			applyMode(isDark);
+
 			start(async () => {
-				await setModeServer(m);
+				await setModeServer(nextMode);
 				router.refresh();
 			});
 		},
@@ -125,8 +140,15 @@ export function AppearanceProvider({
 	);
 
 	const value = useMemo(
-		() => ({ theme, mode, setTheme, setMode, pending, applyColorScheme }),
-		[theme, mode, setTheme, setMode, pending],
+		() => ({
+			theme: activeTheme,
+			mode,
+			setTheme,
+			setWorkspaceTheme,
+			setMode,
+			pending,
+		}),
+		[activeTheme, mode, setTheme, setMode, pending],
 	);
 
 	return (
@@ -139,7 +161,10 @@ export function AppearanceProvider({
 
 export function useAppearance() {
 	const ctx = useContext(Ctx);
-	if (!ctx)
+
+	if (!ctx) {
 		throw new Error("useAppearance must be used within <AppearanceProvider>");
+	}
+
 	return ctx;
 }

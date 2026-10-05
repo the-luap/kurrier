@@ -7,20 +7,25 @@ import { ReusableFormButton } from "@/components/common/reusable-form-button";
 import { oneClickUnsubscribe } from "@/lib/actions/mailbox";
 import { usePathname } from "next/navigation";
 import {Badge} from "@mantine/core";
+import { useOptionalDictionary } from "@/components/providers/dictionary-provider";
 
-function MailUnsubscriber({ mailSubscription }: {
+function MailUnsubscriber({ message, mailSubscription }: {
     message: MessageEntity;
     mailSubscription: MailSubscriptionEntity | null;
 }) {
+    const dict = useOptionalDictionary();
     const pathname = usePathname();
     if (!mailSubscription) return null;
 
-    const url = mailSubscription.unsubscribeHttpUrl;
+    // The URL comes from the mail's List-Unsubscribe header: only ever link
+    // to http(s), never javascript:/data: or other schemes.
+    const rawUrl = mailSubscription.unsubscribeHttpUrl?.trim() ?? "";
+    const url = /^https?:\/\//i.test(rawUrl) ? rawUrl : null;
 
     if (mailSubscription.status === "unsubscribed") {
         return (
             <Badge size={"sm"} color="gray" variant="light" className="mt-0.5">
-                Unsubscribed
+                {dict?.mailbox?.unsubscribed ?? "Unsubscribed"}
             </Badge>
         );
     }
@@ -28,7 +33,7 @@ function MailUnsubscriber({ mailSubscription }: {
     if (!url && !mailSubscription.unsubscribeMailto) {
         return (
             <Badge>
-                No unsubscribe link
+                {dict?.mailbox?.noUnsubscribeLink ?? "No unsubscribe link"}
             </Badge>
         );
     }
@@ -38,10 +43,11 @@ function MailUnsubscriber({ mailSubscription }: {
             {mailSubscription.oneClick && url ? (
                 <ReusableFormButton
                     action={oneClickUnsubscribe}
-                    label="Unsubscribe"
+                    label={dict?.mailbox?.unsubscribe ?? "Unsubscribe"}
                     buttonProps={{ size: "compact-xs", variant: "light" }}
                 >
                     <input type="hidden" name="mailSubscriptionId" value={mailSubscription.id} />
+                    <input type="hidden" name="messageId" value={message.id} />
                     <input type="hidden" name="pathname" value={pathname} />
                 </ReusableFormButton>
             ) : url ? (
@@ -51,14 +57,14 @@ function MailUnsubscriber({ mailSubscription }: {
                     target="_blank"
                     rel="noreferrer noopener"
                 >
-                    Unsubscribe <ExternalLink size={14} />
+                    {dict?.mailbox?.unsubscribe ?? "Unsubscribe"} <ExternalLink size={14} />
                 </a>
             ) : (
                 <a
                     className="inline-flex items-center gap-1 rounded-md bg-gray-100 px-2 py-1 text-xs font-medium hover:bg-gray-200"
                     href={`mailto:${mailSubscription.unsubscribeMailto}`}
                 >
-                    Unsubscribe <ExternalLink size={14} />
+                    {dict?.mailbox?.unsubscribe ?? "Unsubscribe"} <ExternalLink size={14} />
                 </a>
             )}
         </div>

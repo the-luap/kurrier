@@ -1,76 +1,82 @@
 "use server";
 
-import { kvGet } from "@common";
 import {
-	apiKeys,
-	createSecret,
-	davAccounts,
+	apiKeys, createSecret, davAccounts,
+	db, deleteSecretAdmin, draftMessages, driveEntries,
 	driveVolumes,
-	getSecret,
-	getSecrets,
-	type IdentityCreate,
-	type IdentityEntity,
-	IdentityInsertSchema,
+	getSecret, getSecrets, googleAccounts,
 	identities,
-	mailboxes,
+	IdentityCreate,
+	IdentityEntity,
+	IdentityInsertSchema,
+	mailboxes, messageAttachments,
 	messages,
-	providerSecrets,
 	providers,
+	providerSecrets,
 	secretsMeta,
-	smtpAccountSecrets,
 	smtpAccounts,
-	updateSecret,
-	userAiSettings,
+	smtpAccountSecrets,
+	updateSecret, WebhookInsertEntity, webhooks, workspaceMembers,
 } from "@db";
 import {
-	createMailer,
-	createStore,
-	type DomainIdentity,
-	type VerifyResult,
-} from "@providers";
-import {
 	apiScopeList,
-	DomainIdentityFormSchema,
+	CustomEmailProviderCredentialsSchema, CustomEmailProviderSchema,
 	defaultImapQuota,
-	type FormState,
+	DomainIdentityFormSchema,
+	FormState, getCustomEmailProviders,
 	getPublicEnv,
 	getServerEnv,
 	handleAction,
 	MailboxKindDisplay,
+	materializeCustomEmailProvider,
+	parseCustomEmailProviders,
+	parseCustomEmailProvidersValue,
 	ProviderAccountFormSchema,
-	type Providers,
+	Providers,
 	SmtpAccountFormSchema,
 	SYSTEM_MAILBOXES,
+	webHookList,
 } from "@schema";
-import slugify from "@sindresorhus/slugify";
-import { decode } from "decode-formdata";
-import { and, count, desc, eq, gte, sql } from "drizzle-orm";
-import type { PgColumn, PgTable } from "drizzle-orm/pg-core";
-import { nanoid } from "nanoid";
+import { isMetadataOrLinkLocalAddress } from "@/lib/safe-url";
+import { httpOutboundPolicy, isBlockedIp } from "@providers/net-guard";
+import { isIP } from "node:net";
+import { isSignedIn } from "@/lib/actions/auth";
+import { readSessionToken as currentSession } from "@/lib/auth-session";
+import {and, count, eq, sql, gte, desc, sum, countDistinct} from "drizzle-orm";
 import { revalidatePath } from "next/cache";
-import { v4 as uuidv4 } from "uuid";
-import type { z } from "zod";
-import { currentSession, isSignedIn } from "@/lib/actions/auth";
-import { requireSession, rlsClient } from "@/lib/actions/clients";
-import { addJobAndWait } from "@/lib/actions/get-redis";
-import { backfillMailboxes, clearImapClients } from "@/lib/actions/mailbox";
-import { invalidateServerCache, withServerCache } from "@/lib/server-cache";
-import { parseSecret } from "@/lib/utils";
+import { decode } from "decode-formdata";
+import { PgColumn, PgTable } from "drizzle-orm/pg-core";
 import {
-	type AiProvider,
-	aiAuthHeaders,
-	aiProviderLabel,
-	fetchAiEndpoint,
-	getAiDefaults,
-	isAiProvider,
-	normalizeAiBaseUrl,
-	resolveAiApiKey,
-	runAiPrompt,
-} from "@/lib/ai-endpoint";
+	createMailer,
+	createStore,
+	DomainIdentity, gmailClientForGoogleAccount,
+	VerifyResult,
+} from "@providers";
+import { parseSecret } from "@/lib/utils";
+import { z } from "zod";
+import slugify from "@sindresorhus/slugify";
+import {getWorkspaceId, getWorkspaceRole, rlsClient} from "@/lib/actions/clients";
+import { v4 as uuidv4 } from "uuid";
+import {queueGmailBackfill, queueImapBackfill, queueStopIdle} from "@/lib/mail-jobs";
+import { kvGet } from "@common";
+import { nanoid } from "nanoid";
+import { addJobAndWait, getQueue } from "@/lib/actions/get-redis";
+import {
+	checkDefaultWorkspaceIdentity,
+} from "@/lib/actions/workspace";
+import {workspaceIdentityMembers} from "@db";
+import { DISTRIBUTION_CONFIG } from "@distribution/config";
+import {
+	createEmailIdentity,
+	createSMTPAccount,
+	updateSMTPAccount,
+	verifySMTPAccount
+} from "@/lib/actions/email-identity";
+import { access } from "@/lib/actions/shared";
+import { requireWorkspaceAdmin } from "@/lib/actions/authz";
 
-const DASHBOARD_PATH = "/dashboard/platform/providers";
+const DASHBOARD_PATH = "/w/[workspaceId]/dashboard/providers";
 const CURRENT_API_VERSION = 1;
-const DEFAULT_AI_PROVIDER: AiProvider = "ollama";
 
 // Mailgun, Postmark and SendGrid can't send custom headers, so the worker
 // also accepts the inbound webhook secret as a ?token= query parameter.
@@ -82,245 +88,51 @@ const withInboundWebhookToken = (url: string) => {
 	return withToken.toString();
 };
 
-const toAiBaseUrl = (
-	provider: AiProvider,
-	value: string,
-	opts?: { resolveHost?: boolean },
-) => normalizeAiBaseUrl(value?.trim() || getAiDefaults(provider).baseUrl, opts);
-
-const fetchAiModelsForProvider = async ({
-	provider,
-	baseUrl,
-	apiKey,
-}: {
-	provider: AiProvider;
-	baseUrl: string;
-	apiKey?: string | null;
-}) => {
-	if (provider === "lmstudio") {
-		const data = (await fetchAiEndpoint(`${baseUrl}/models`, {
-			label: "LM Studio",
-			method: "GET",
-			headers: aiAuthHeaders(apiKey),
-			signal: AbortSignal.timeout(10_000),
-		})) as {
-			data?: Array<{ id?: string; object?: string; owned_by?: string }>;
-		};
-
-		return (data.data || [])
-			.map((model) => ({
-				name: model.id || "",
-				size: 0,
-				parameterSize: "",
-				quantization: "",
-			}))
-			.filter((model) => model.name);
-	}
-
-	const data = (await fetchAiEndpoint(`${baseUrl}/api/tags`, {
-		label: "Ollama",
-		method: "GET",
-		headers: aiAuthHeaders(apiKey),
-		signal: AbortSignal.timeout(10_000),
-	})) as {
-		models?: Array<{
-			name?: string;
-			model?: string;
-			size?: number;
-			details?: { parameter_size?: string; quantization_level?: string };
-		}>;
-	};
-
-	return (data.models || [])
-		.map((model) => ({
-			name: String(model.name || model.model || ""),
-			size: Number(model.size || 0),
-			parameterSize: String(model.details?.parameter_size || ""),
-			quantization: String(model.details?.quantization_level || ""),
-		}))
-		.filter((model) => model.name);
-};
-
-const fetchSavedAiSettings = async (provider: AiProvider) => {
+/** A provider of the caller's workspace (through RLS), or throws. */
+async function requireWorkspaceProvider(providerId: string) {
+	if (!providerId) throw new Error("Provider not found");
 	const rls = await rlsClient();
-	const [saved] = await rls((tx) =>
+	const [provider] = await rls((tx) =>
 		tx
 			.select()
-			.from(userAiSettings)
-			.where(eq(userAiSettings.provider, provider))
+			.from(providers)
+			.where(eq(providers.id, String(providerId)))
 			.limit(1),
 	);
-	return saved;
-};
-
-export const fetchAiSettings = async () => {
-	const rls = await rlsClient();
-	const [settings] = await rls((tx) =>
-		tx
-			.select()
-			.from(userAiSettings)
-			.orderBy(desc(userAiSettings.updatedAt))
-			.limit(1),
-	);
-
-	const provider = isAiProvider(settings?.provider || "")
-		? (settings.provider as AiProvider)
-		: DEFAULT_AI_PROVIDER;
-	const defaults = getAiDefaults(provider);
-
-	return {
-		id: settings?.id ?? "",
-		provider,
-		baseUrl: settings?.baseUrl ?? defaults.baseUrl,
-		model: settings?.model ?? defaults.model,
-		systemPrompt: settings?.systemPrompt ?? "",
-		temperature: settings?.temperature ?? "0.4",
-		maxTokens: settings?.maxTokens ?? 700,
-		// AI stays off until the user has saved a configuration.
-		enabled: settings?.enabled ?? false,
-		hasApiKey: Boolean(settings?.apiKey),
-	};
-};
-
-export const listAiModels = async (input: {
-	provider?: string;
-	baseUrl: string;
-	apiKey?: string;
-}): Promise<FormState> => {
-	return handleAction(async () => {
-		const user = await isSignedIn();
-		if (!user?.id) throw new Error("Please sign in first.");
-		const provider = isAiProvider(input.provider || "")
-			? (input.provider as AiProvider)
-			: DEFAULT_AI_PROVIDER;
-		const baseUrl = await toAiBaseUrl(provider, input.baseUrl);
-		const saved = await fetchSavedAiSettings(provider);
-		const models = await fetchAiModelsForProvider({
-			provider,
-			baseUrl,
-			apiKey: resolveAiApiKey(input.apiKey, saved, baseUrl),
-		});
-		return { success: true, data: { models } };
-	});
-};
-
-export async function saveAiSettings(
-	_prev: FormState,
-	formData: FormData,
-): Promise<FormState> {
-	return handleAction(async () => {
-		const user = await isSignedIn();
-		if (!user?.id) throw new Error("Please sign in first.");
-
-		const provider = isAiProvider(String(formData.get("provider") ?? ""))
-			? (String(formData.get("provider")) as AiProvider)
-			: DEFAULT_AI_PROVIDER;
-		const defaults = getAiDefaults(provider);
-		const baseUrl = await toAiBaseUrl(
-			provider,
-			String(formData.get("baseUrl") ?? defaults.baseUrl),
-			{ resolveHost: false },
-		);
-		const model = String(formData.get("model") ?? defaults.model).trim();
-		const submittedApiKey = String(formData.get("apiKey") ?? "").trim();
-		const clearApiKey = formData.get("clearApiKey") === "on";
-		const systemPrompt = String(formData.get("systemPrompt") ?? "")
-			.trim()
-			.slice(0, 4000);
-		const temperature = Number(formData.get("temperature") ?? 0.4);
-		const maxTokens = Number(formData.get("maxTokens") ?? 700);
-		const enabled = formData.get("enabled") === "on";
-
-		if (!model) throw new Error("Please select a model.");
-		if (!Number.isFinite(temperature) || temperature < 0 || temperature > 2) {
-			throw new Error("Temperature must be between 0 and 2.");
-		}
-		if (!Number.isInteger(maxTokens) || maxTokens < 64 || maxTokens > 4096) {
-			throw new Error("Max tokens must be between 64 and 4096.");
-		}
-
-		const rls = await rlsClient();
-		const [existingSettings] = await rls((tx) =>
-			tx
-				.select()
-				.from(userAiSettings)
-				.where(eq(userAiSettings.provider, provider))
-				.limit(1),
-		);
-		// Keep the stored key only while the base URL stays the same.
-		const apiKey = clearApiKey
-			? null
-			: resolveAiApiKey(submittedApiKey, existingSettings, baseUrl);
-
-		await rls((tx) =>
-			tx
-				.insert(userAiSettings)
-				.values({
-					ownerId: user.id,
-					provider,
-					baseUrl,
-					model,
-					apiKey,
-					systemPrompt: systemPrompt || null,
-					temperature: String(temperature),
-					maxTokens,
-					enabled,
-				})
-				.onConflictDoUpdate({
-					target: [userAiSettings.ownerId, userAiSettings.provider],
-					set: {
-						baseUrl,
-						model,
-						apiKey,
-						systemPrompt: systemPrompt || null,
-						temperature: String(temperature),
-						maxTokens,
-						enabled,
-						updatedAt: new Date(),
-					},
-				}),
-		);
-
-		revalidatePath("/dashboard/platform/ai");
-		return { success: true, message: "AI settings saved" };
-	});
+	if (!provider) throw new Error("Provider not found");
+	return provider;
 }
 
-export const testAiSettings = async (input: {
-	provider?: string;
-	baseUrl: string;
-	model: string;
-	apiKey?: string;
-	temperature?: number;
-	maxTokens?: number;
-}): Promise<FormState> => {
-	return handleAction(async () => {
-		const user = await isSignedIn();
-		if (!user?.id) throw new Error("Please sign in first.");
-		const provider = isAiProvider(input.provider || "")
-			? (input.provider as AiProvider)
-			: DEFAULT_AI_PROVIDER;
-		const baseUrl = await toAiBaseUrl(provider, input.baseUrl);
-		const saved = await fetchSavedAiSettings(provider);
-		const apiKey = resolveAiApiKey(input.apiKey, saved, baseUrl);
-		const response = await runAiPrompt({
-			provider,
-			baseUrl,
-			apiKey,
-			model: input.model,
-			prompt:
-				"Reply with one short sentence confirming that Kurrier AI is ready.",
-			temperature: input.temperature ?? 0.2,
-			maxTokens: input.maxTokens ?? 80,
-		});
-
-		return {
-			success: true,
-			message: `${aiProviderLabel(provider)} test successful`,
-			data: { response },
-		};
+/** Stored, decrypted secret row of a workspace provider (never client data). */
+async function loadProviderSecretRow(providerId: string | null | undefined) {
+	if (!providerId) return undefined;
+	const [row] = await fetchDecryptedSecrets({
+		linkTable: providerSecrets,
+		foreignCol: providerSecrets.providerId,
+		secretIdCol: providerSecrets.secretId,
+		parentId: String(providerId),
 	});
-};
+	return row;
+}
+
+/** Identity (+ SMTP account / provider) of the current workspace, or throws. */
+async function loadWorkspaceIdentityRow(identityId: string, workspaceId: string) {
+	if (!identityId) throw new Error("Identity not found");
+	const [row] = await db
+		.select()
+		.from(identities)
+		.leftJoin(smtpAccounts, eq(identities.smtpAccountId, smtpAccounts.id))
+		.leftJoin(providers, eq(identities.providerId, providers.id))
+		.where(
+			and(
+				eq(identities.id, String(identityId)),
+				eq(identities.workspaceId, workspaceId),
+			),
+		)
+		.limit(1);
+	if (!row) throw new Error("Identity not found");
+	return row;
+}
 
 export const syncProviders = async () => {
 	const rls = await rlsClient();
@@ -337,11 +149,39 @@ export async function upsertProviderAccount(
 	formData: FormData,
 ): Promise<FormState> {
 	return handleAction(async () => {
-		const session = requireSession(await currentSession());
+		await requireWorkspaceAdmin();
+		const session = await currentSession();
 		const data = decode(formData);
+		const workspaceId = await getWorkspaceId();
+
+
+		const { canCreateProvider, reason } = await access("canCreateProvider");
+		if (!canCreateProvider) {
+			return {
+				success: false,
+				error:
+					reason ??
+					"dashboard.providerCreationDisabled",
+			};
+		}
+
+
 		const parsed = ProviderAccountFormSchema.parse(data);
+		// The provider id comes from the form: it must be ours.
+		await requireWorkspaceProvider(String(parsed.providerId));
 
 		const rls = await rlsClient();
+		if (!DISTRIBUTION_CONFIG.features.drive) {
+			const [provider] = await rls((tx) =>
+				tx
+					.select({ type: providers.type })
+					.from(providers)
+					.where(eq(providers.id, String(parsed.providerId))),
+			);
+			if (provider?.type === "s3") {
+				throw new Error("Drive is disabled");
+			}
+		}
 		const [providerSecret] = await rls((tx) =>
 			tx
 				.select()
@@ -350,7 +190,7 @@ export async function upsertProviderAccount(
 		);
 
 		if (!providerSecret) {
-			const newSecret = await createSecret(session, {
+			const newSecret = await createSecret(session, workspaceId, {
 				name: String(parsed.ulid),
 				value: JSON.stringify(parsed.required),
 			});
@@ -361,7 +201,7 @@ export async function upsertProviderAccount(
 				}),
 			);
 		} else {
-			await updateSecret(session, providerSecret.secretId, {
+			await updateSecret(session, workspaceId, providerSecret.secretId, {
 				name: String(parsed.ulid),
 				value: JSON.stringify(parsed.required),
 			});
@@ -371,7 +211,7 @@ export async function upsertProviderAccount(
 
 		return {
 			success: true,
-			message: "Successfully updated provider account",
+			message: "dashboard.providerAccountUpdated",
 		};
 	});
 }
@@ -381,87 +221,186 @@ export async function upsertSMTPAccount(
 	formData: FormData,
 ): Promise<FormState> {
 	return handleAction(async () => {
-		const session = requireSession(await currentSession());
-
+		await requireWorkspaceAdmin();
 		const data = decode(formData);
 		const parsed = SmtpAccountFormSchema.parse(data);
-		const cleanedOptional = parsed.optional;
-		const cleanedRequired = parsed.required;
 
-		const smtpConfig: Record<string, unknown> = {
-			ulid: parsed.ulid,
-			label: String(parsed.label || "My SMTP Account").trim(),
-			...cleanedRequired,
-			...cleanedOptional,
+		const input = {
+			label: parsed.label
+				? String(parsed.label)
+				: undefined,
+			ulid: String(parsed.ulid),
+			required: parsed.required,
+			optional: parsed.optional,
 		};
 
-		const rls = await rlsClient();
+		const result = parsed.accountId
+			? await updateSMTPAccount({
+				...input,
+				accountId: String(parsed.accountId),
+			})
+			: await createSMTPAccount(input);
 
-		if (parsed.accountId) {
-			const [accountSecret] = await rls((tx) =>
-				tx
-					.select()
-					.from(smtpAccountSecrets)
-					.where(eq(smtpAccountSecrets.accountId, String(parsed.accountId))),
-			);
-
-			if (!accountSecret) {
-				const newSecret = await createSecret(session, {
-					name: String(parsed.ulid),
-					value: JSON.stringify(smtpConfig),
-				});
-				await rls((tx) =>
-					tx.insert(smtpAccountSecrets).values({
-						accountId: String(parsed.accountId),
-						secretId: newSecret.id,
-					}),
-				);
-			} else {
-				await updateSecret(session, accountSecret.secretId, {
-					value: JSON.stringify(smtpConfig),
-				});
-			}
-		} else {
-			const secretMeta = await createSecret(session, {
-				name: String(parsed.ulid),
-				value: JSON.stringify(smtpConfig),
-			});
-
-			// Account and its secret link in one transaction.
-			await rls(async (tx) => {
-				const [smtpAccount] = await tx
-					.insert(smtpAccounts)
-					.values({})
-					.returning({ id: smtpAccounts.id });
-				await tx.insert(smtpAccountSecrets).values({
-					accountId: smtpAccount.id,
-					secretId: secretMeta.id,
-				});
-			});
+		if (!result.success) {
+			return result;
 		}
 
 		revalidatePath(DASHBOARD_PATH);
 
 		return {
 			success: true,
-			message: "Done",
+			message: result.message || "dashboard.done",
+		};
+	});
+}
+
+export async function connectCustomEmailProvider(
+	_prev: FormState,
+	formData: FormData,
+): Promise<FormState> {
+	return handleAction(async () => {
+		await requireWorkspaceAdmin();
+		const credentials = CustomEmailProviderCredentialsSchema.parse(
+			decode(formData),
+		);
+		const preset = (await fetchCustomEmailProviders()).find(
+			(provider) => provider.id === credentials.presetId,
+		);
+
+		if (!preset) {
+			throw new Error("dashboard.customProviderUnavailable");
+		}
+
+		const smtpConfig = materializeCustomEmailProvider(preset, credentials);
+		const displayName = credentials.displayName ?? "";
+		const workspaceId = await getWorkspaceId();
+		const rls = await rlsClient();
+
+		if (preset.imap) {
+			if (!displayName) {
+				throw new Error("dashboard.displayNameRequired");
+			}
+
+			const [existingIdentity] = await rls((tx) =>
+				tx
+					.select({
+						publicId: identities.publicId,
+						mailboxSlug: mailboxes.slug,
+					})
+					.from(identities)
+					.leftJoin(
+						mailboxes,
+						and(
+							eq(mailboxes.identityId, identities.id),
+							eq(mailboxes.kind, "inbox"),
+						),
+					)
+					.where(
+						and(
+							eq(identities.workspaceId, workspaceId),
+							eq(identities.kind, "email"),
+							eq(identities.value, smtpConfig.SMTP_USERNAME),
+						),
+					)
+					.limit(1),
+			);
+
+			if (existingIdentity) {
+				return {
+					success: true,
+					message: "dashboard.mailboxAlreadyConnected",
+					data: {
+						identityPublicId: existingIdentity.publicId,
+						mailboxSlug: existingIdentity.mailboxSlug ?? undefined,
+					},
+				};
+			}
+		}
+
+		const { label, ulid, ...connectionConfig } = smtpConfig;
+		const accountResult = await createSMTPAccount({
+			label,
+			ulid,
+			required: connectionConfig,
+		});
+
+		if (!accountResult.success || !accountResult.data?.accountId) {
+			return accountResult;
+		}
+		const accountId = accountResult.data.accountId;
+
+		if (!preset.imap) {
+			revalidatePath(DASHBOARD_PATH);
+			return {
+				success: true,
+				message: "dashboard.customProviderAccountAdded",
+			};
+		}
+
+		const identityResult = await createEmailIdentity({
+			dailyQuota: credentials.dailyQuota,
+			displayName,
+			email: smtpConfig.SMTP_USERNAME,
+			smtpAccountId: accountId,
+		});
+
+		if (!identityResult.success) {
+			await deleteSmtpAccount(accountId);
+			return identityResult;
+		}
+
+		const [emailIdentity] = await rls((tx) =>
+			tx
+				.select({
+					publicId: identities.publicId,
+					mailboxSlug: mailboxes.slug,
+				})
+				.from(identities)
+				.leftJoin(
+					mailboxes,
+					and(
+						eq(mailboxes.identityId, identities.id),
+						eq(mailboxes.kind, "inbox"),
+					),
+				)
+				.where(eq(identities.smtpAccountId, accountId))
+				.limit(1),
+		);
+
+		const mailboxSlug = emailIdentity?.mailboxSlug ?? undefined;
+		revalidatePath(DASHBOARD_PATH);
+		revalidatePath("/w/[wPublicId]/dashboard/mail", "layout");
+
+		return {
+			success: true,
+			message: mailboxSlug
+				? "dashboard.customProviderMailboxConnected"
+				: "dashboard.customProviderMailboxSyncing",
+			data: emailIdentity?.publicId
+				? {
+						identityPublicId: emailIdentity.publicId,
+						mailboxSlug,
+					}
+				: undefined,
 		};
 	});
 }
 
 export async function fetchDecryptedSecrets({
-	linkTable,
-	foreignCol,
-	secretIdCol,
-	parentId,
-}: {
+												linkTable,
+												foreignCol,
+												secretIdCol,
+												parentId,
+											}: {
 	linkTable: PgTable;
 	foreignCol: PgColumn;
 	secretIdCol: PgColumn;
 	parentId?: string;
 }) {
+	// Returns decrypted provider/SMTP credentials: owners/admins only.
+	await requireWorkspaceAdmin();
 	const rls = await rlsClient();
-	const session = requireSession(await currentSession());
+	const session = await currentSession();
 
 	const rows = await rls((tx) => {
 		let q = tx
@@ -484,34 +423,38 @@ export async function fetchDecryptedSecrets({
 		return q;
 	});
 
-	// One batched vault read instead of three round trips per row.
-	const secrets = await getSecrets(
+	// One RLS round trip for all secrets instead of one client and
+	// transaction per row.
+	const workspaceId = rows.length ? await getWorkspaceId() : undefined;
+	const secretsById = await getSecrets(
 		session,
 		rows.map((r) => String(r.metaId)),
+		workspaceId,
 	);
-	return rows.map((r) => {
-		const metaId = String(r.metaId);
-		const secret = secrets.get(metaId);
-		if (!secret) throw new Error("Not found or not allowed");
-		const { vault } = secret;
 
-		const payload = {
-			linkRow: r.linkRow,
-			metaId,
-			vault,
-			providerId: r.linkRow?.providerId,
-			accountId: r.linkRow?.accountId,
-			provider: r.provider,
-			smtpAccount: r.smtpAccount,
-		};
-		const parsedSecret = parseSecret(
-			payload as FetchDecryptedSecretsResult[number],
-		);
-		return {
-			...payload,
-			parsedSecret: parsedSecret,
-		};
-	});
+	return Promise.all(
+		rows.map(async (r) => {
+			const metaId = String(r.metaId);
+			const { vault } = secretsById.get(metaId)!;
+
+			const payload = {
+				linkRow: r.linkRow,
+				metaId,
+				vault,
+				providerId: r.linkRow?.providerId,
+				accountId: r.linkRow?.accountId,
+				provider: r.provider,
+				smtpAccount: r.smtpAccount,
+			};
+			const parsedSecret = parseSecret(
+				payload as FetchDecryptedSecretsResult[number],
+			);
+			return {
+				...payload,
+				parsedSecret: parsedSecret,
+			};
+		}),
+	);
 }
 
 export type FetchDecryptedSecretsResult = Awaited<
@@ -523,8 +466,19 @@ export type FetchDecryptedSecretsResultRow =
 
 export const deleteSmtpAccount = async (id: string): Promise<FormState> => {
 	return handleAction(async () => {
+		await requireWorkspaceAdmin();
 		const rls = await rlsClient();
-		await rls((tx) => tx.delete(smtpAccounts).where(eq(smtpAccounts.id, id)));
+
+		await rls(async (tx) => {
+			const [accountSecret] = await tx.select().from(smtpAccountSecrets).where(eq(
+				smtpAccountSecrets.accountId,
+				id
+			))
+			if (accountSecret) {
+				await deleteSecretAdmin(accountSecret.secretId);
+				await tx.delete(smtpAccounts).where(eq(smtpAccounts.id, id))
+			}
+		});
 		revalidatePath(DASHBOARD_PATH);
 		return {
 			success: true,
@@ -536,28 +490,16 @@ export const deleteSmtpAccount = async (id: string): Promise<FormState> => {
 export const verifySmtpAccount = async (
 	smtpSecret: FetchDecryptedSecretsResultRow,
 ): Promise<FormState<VerifyResult>> => {
-	return handleAction(async () => {
-		const parsedVaultValues = smtpSecret.parsedSecret;
-		const session = requireSession(await currentSession());
-
-		const mailer = createMailer("smtp", parsedVaultValues);
-		const res = await mailer.verify(String(smtpSecret?.linkRow?.accountId));
-		parsedVaultValues.sendVerified = res?.meta?.send;
-		parsedVaultValues.receiveVerified = res?.meta?.receive;
-
-		await updateSecret(session, smtpSecret.metaId, {
-			value: JSON.stringify(parsedVaultValues),
-		});
-		revalidatePath(DASHBOARD_PATH);
-		return {
-			success: res.ok,
-			message: res.message,
-			data: res as VerifyResult,
-		};
-	});
+	await requireWorkspaceAdmin();
+	const result = await verifySMTPAccount(
+		String(smtpSecret.linkRow?.accountId),
+	);
+	revalidatePath(DASHBOARD_PATH);
+	return result;
 };
 
 export const getProviderById = async (providerId: string) => {
+	await requireWorkspaceAdmin();
 	const rls = await rlsClient();
 	const [provider] = await rls((tx) =>
 		tx.select().from(providers).where(eq(providers.id, providerId)),
@@ -565,18 +507,11 @@ export const getProviderById = async (providerId: string) => {
 	return provider;
 };
 
-export const getIdentityById = async (identityId: string) => {
-	const rls = await rlsClient();
-	const [identity] = await rls((tx) =>
-		tx.select().from(identities).where(eq(identities.id, identityId)),
-	);
-	return identity;
-};
-
 export async function initializeDomainIdentity(
 	data: Record<string, unknown>,
 ): Promise<FormState<{ identity: DomainIdentity }>> {
 	return handleAction(async () => {
+		await requireWorkspaceAdmin();
 		const [secret] = await fetchDecryptedSecrets({
 			linkTable: providerSecrets,
 			foreignCol: providerSecrets.providerId,
@@ -587,12 +522,12 @@ export async function initializeDomainIdentity(
 		});
 
 		if (!secret) {
-			throw new Error("No provider secret found for this selection");
+			throw new Error("dashboard.noProviderSecretFound");
 		}
 
 		const providerIdentifier = secret?.provider?.type;
 		if (!providerIdentifier) {
-			throw new Error("Unsupported provider type or missing provider");
+			throw new Error("dashboard.unsupportedProviderType");
 		}
 
 		const decrypted = secret.parsedSecret;
@@ -628,10 +563,13 @@ export async function addNewDomainIdentity(
 	formData: FormData,
 ): Promise<FormState<DomainIdentityResult["data"]>> {
 	return handleAction(async () => {
+		await requireWorkspaceAdmin();
 		const parsed = DomainIdentityFormSchema.parse(decode(formData));
+		await requireWorkspaceProvider(String(parsed.providerId));
 		const { success, data, error } = await initializeDomainIdentity(parsed);
+
 		if (!success || !data?.identity)
-			throw new Error(error ?? "Failed to add new identity");
+			throw new Error(error ?? "dashboard.failedToAddIdentity");
 
 		const identity = data.identity;
 
@@ -643,22 +581,36 @@ export async function addNewDomainIdentity(
 			status: identity.status,
 			incomingDomain: String(parsed?.incomingDomain) === "true",
 			dnsRecords: identity.dns ?? undefined,
-			metaData: identity.meta ?? undefined,
+			metaData: identity.meta ?? undefined
 		} satisfies z.infer<typeof IdentityInsertSchema>;
-
-		await rls((tx) => tx.insert(identities).values(payload as IdentityCreate));
+		const [domainIdentity] = await rls(async (tx) => {
+			return tx.insert(identities).values(payload as IdentityCreate)
+		});
+		// await addIdentityOwnerGrant(domainIdentity)
 		revalidatePath(DASHBOARD_PATH);
 
-		return { success: true, message: "Added new identity", data };
+		return { success: true, message: "dashboard.addedNewIdentity", data };
 	});
 }
 
 export async function verifyDomainIdentity(
-	userDomainIdentity: FetchUserIdentitiesResult[number],
-	providerAccount: FetchDecryptedSecretsResult[number] | undefined,
+	clientDomainIdentity: FetchUserIdentitiesResult[number],
+	_clientProviderAccount: FetchDecryptedSecretsResult[number] | undefined,
 ): Promise<FormState<DomainIdentity>> {
 	return handleAction(async () => {
-		// const decrypted = parseSecret(providerAccount);
+		// Both arguments come from the browser: only the identity id is used,
+		// identity and provider credentials are reloaded server-side.
+		const { workspaceId } = await requireWorkspaceAdmin();
+		const userDomainIdentity = await loadWorkspaceIdentityRow(
+			String(clientDomainIdentity?.identities?.id ?? ""),
+			workspaceId,
+		);
+		const providerAccount = await loadProviderSecretRow(
+			userDomainIdentity.identities.providerId,
+		);
+		if (!providerAccount?.provider) {
+			throw new Error("dashboard.noProviderSecretFound");
+		}
 		const decrypted = providerAccount?.parsedSecret;
 		const mailer = createMailer(
 			providerAccount?.provider?.type as Providers,
@@ -737,16 +689,49 @@ const initializeEmailIdentity = async (
 	});
 };
 
-export const initializeMailboxes = async (emailIdentity: IdentityEntity) => {
+export const initializeMailboxes = async (clientIdentity: IdentityEntity, _userId: string, _workspaceId: string) => {
+	// Exported server action: never trust the identity object passed in.
+	// Reload it and require it to live in the caller's (membership-checked)
+	// workspace. Not an RLS select: a freshly created identity that is not
+	// shared and not assigned to the creator is invisible through RLS.
+	const { user: sessionUser, workspaceId: currentWorkspaceId } =
+		await requireWorkspaceAdmin();
+	const [emailIdentity] = await db
+		.select()
+		.from(identities)
+		.where(
+			and(
+				eq(identities.id, String(clientIdentity?.id)),
+				eq(identities.workspaceId, currentWorkspaceId),
+			),
+		)
+		.limit(1);
+	if (!emailIdentity) throw new Error("Identity not found");
 	if (emailIdentity.kind !== "email") return;
 
+	const isRemote =
+		(emailIdentity.metaData as any)?.provider === "google" ||
+		Boolean(emailIdentity.smtpAccountId);
+	if (isRemote && !(await access("canSyncMail")).canSyncMail) {
+		console.info(
+			`[backfill:${emailIdentity.id}] mail sync disabled for workspace ${emailIdentity.workspaceId}`,
+		);
+		return;
+	}
+
+	if ((emailIdentity.metaData as any)?.provider === "google") {
+		await queueGmailBackfill(emailIdentity.id, emailIdentity.workspaceId);
+		return;
+	}
+
 	if (emailIdentity.smtpAccountId) {
-		await backfillMailboxes(emailIdentity.id);
+		await queueImapBackfill(emailIdentity.id, emailIdentity.workspaceId);
 		return;
 	}
 
 	const rows = SYSTEM_MAILBOXES.map((m) => ({
 		ownerId: emailIdentity.ownerId,
+		workspaceId: emailIdentity.workspaceId,
 		identityId: emailIdentity.id,
 		kind: m.kind,
 		name: MailboxKindDisplay[m.kind],
@@ -755,32 +740,211 @@ export const initializeMailboxes = async (emailIdentity: IdentityEntity) => {
 	}));
 
 	const rls = await rlsClient();
-	await rls((tx) => {
-		return tx.insert(mailboxes).values(rows).onConflictDoNothing().returning();
+	await rls(async (tx) => {
+		await tx.insert(mailboxes).values(rows).onConflictDoNothing().returning();
+		// Server-side values only: the arguments come from the caller.
+		await getQueue("dav-worker").add("dav:create-identity", { identityId: emailIdentity.id, userId: sessionUser.id, workspaceId: emailIdentity.workspaceId }, { jobId: `identity-dav-bootstrap-${emailIdentity.id}`, removeOnComplete: true, removeOnFail: true });
+		return
 	});
 	return rows;
 };
 
+
+const assignWorkspaceMembersToIdentity = async (
+	identity: IdentityEntity,
+	list: string
+) => {
+	const rls = await rlsClient();
+
+	const requested = list ? String(list).split(",").filter(Boolean) : [];
+	if (!requested.length) return;
+	const members = await rls((tx) =>
+		tx
+			.select({ userId: workspaceMembers.userId })
+			.from(workspaceMembers)
+			.where(eq(workspaceMembers.workspaceId, identity.workspaceId)),
+	);
+	const memberIds = new Set(members.map((m) => String(m.userId)));
+	const listIds = requested.filter((id) => memberIds.has(id));
+	if (!listIds.length) return;
+
+	await rls((tx) =>
+		tx.insert(workspaceIdentityMembers).values(
+			listIds.map((userId) => ({
+				identityId: identity.id,
+				userId,
+			}))
+		)
+	);
+};
+
+export const assignIdentityToAllWorkspaceMembers = async (
+	clientIdentity: IdentityEntity
+) => {
+	// Public endpoint: granting identity access is an admin operation, and
+	// the identity must be one of the current workspace (not client data).
+	const { workspaceId } = await requireWorkspaceAdmin();
+	const [identity] = await db
+		.select({ id: identities.id, workspaceId: identities.workspaceId })
+		.from(identities)
+		.where(
+			and(
+				eq(identities.id, String(clientIdentity?.id ?? "")),
+				eq(identities.workspaceId, workspaceId),
+			),
+		)
+		.limit(1);
+	if (!identity) throw new Error("Identity not found");
+
+	const rls = await rlsClient();
+
+	const members = await rls((tx) => tx.select().from(workspaceMembers).where(eq(workspaceMembers.workspaceId, identity.workspaceId)));
+	const listIds = members.map(m => m.userId);
+	if (!listIds.length) return;
+
+	await rls((tx) =>
+		tx.insert(workspaceIdentityMembers).values(
+			listIds.map((userId) => ({
+				identityId: identity.id,
+				userId,
+			}))
+		)
+	);
+};
 export async function addNewEmailIdentity(
 	_prev: FormState,
 	formData: FormData,
 ) {
 	return handleAction(async () => {
+		await requireWorkspaceAdmin();
 		const rls = await rlsClient();
-		const data = decode(formData);
+		const data = decode(formData) as Record<string, any>;
+
+		const sharedWithWorkspace = true
+
+		if (!sharedWithWorkspace) {
+			const workspaceMembers = data?.workspaceMembers as string[] | undefined;
+
+			if (!workspaceMembers?.length) {
+				return {
+					success: false,
+					error: "dashboard.mustAssignAtLeastOneMember",
+				};
+			}
+		}
+
+		const workspaceId = await getWorkspaceId();
+		const userId = String((await isSignedIn())?.id);
+
+		if (!userId) {
+			return {
+				success: false,
+				error: "dashboard.notSignedIn",
+			};
+		}
+
+		if (data.googleAccountId) {
+			console.log("[GOOGLE BRANCH]", {
+
+				googleAccountId: data.googleAccountId,
+				workspaceId,
+			});
+
+			const [googleAccount] = await db
+				.select()
+				.from(googleAccounts)
+				.where(
+					and(
+						eq(googleAccounts.id, String(data.googleAccountId)),
+						eq(googleAccounts.workspaceId, workspaceId),
+					),
+				)
+				.limit(1);
+
+			if (!googleAccount) {
+				return {
+					success: false,
+					error: "dashboard.googleAccountNotFound",
+				};
+			}
+
+			if (googleAccount.status !== "connected") {
+				return {
+					success: false,
+					error: "dashboard.googleAccountNotConnected",
+				};
+			}
+
+			const identityData = IdentityInsertSchema.parse({
+				workspaceId,
+				ownerId: userId,
+				value: googleAccount.email,
+				displayName: data.displayName || googleAccount.name || googleAccount.email,
+				kind: "email",
+				sharedWithWorkspace,
+				metaData: {
+					provider: "google",
+					dailyQuota: Number(data.dailyQuota) || defaultImapQuota,
+					sharedWithWorkspace,
+					gmail: {
+						googleAccountId: googleAccount.id,
+					},
+				},
+			});
+
+			const [identity] = await db
+				.insert(identities)
+				.values(identityData as IdentityCreate)
+				.returning();
+
+			console.log("[GOOGLE IDENTITY INSERTED]", identity.id);
+
+			await db
+				.update(googleAccounts)
+				.set({
+					identityId: identity.id,
+					updatedAt: new Date(),
+				})
+				.where(eq(googleAccounts.id, googleAccount.id));
+
+			await checkDefaultWorkspaceIdentity();
+
+			if (sharedWithWorkspace) {
+				await assignIdentityToAllWorkspaceMembers(identity);
+			} else {
+				await assignWorkspaceMembersToIdentity(
+					identity,
+					data.workspaceMembers as string,
+				);
+			}
+
+			console.log("[GOOGLE BEFORE INIT MAILBOXES]", identity.id);
+			try {
+				await initializeMailboxes(identity, userId, workspaceId);
+			} catch (err) {
+				console.error("[GOOGLE MAILBOX INIT FAILED]", err);
+			}
+
+			revalidatePath(DASHBOARD_PATH);
+
+			return {
+				success: true,
+				message: "dashboard.addedGoogleEmailIdentity",
+			};
+		}
 
 		if (data.smtpAccountId) {
-			const identityData = IdentityInsertSchema.parse(data);
-			identityData.metaData = {
+			const result = await createEmailIdentity({
+				email: String(data.value),
+				displayName: data.displayName
+					? String(data.displayName)
+					: undefined,
+				smtpAccountId: String(data.smtpAccountId),
 				dailyQuota: Number(data.dailyQuota) || defaultImapQuota,
-			};
-			const [identity] = await rls((tx) =>
-				tx
-					.insert(identities)
-					.values(identityData as IdentityCreate)
-					.returning(),
-			);
-			await initializeMailboxes(identity);
+			});
+			if (!result.success) {
+				return result;
+			}
 		} else {
 			data.domainIdentityId = data.domain;
 
@@ -788,68 +952,156 @@ export async function addNewEmailIdentity(
 				tx
 					.select()
 					.from(identities)
-					.where(eq(identities.id, String(data.domainIdentityId))),
+					.where(
+						and(
+							eq(identities.id, String(data.domainIdentityId)),
+							eq(identities.workspaceId, workspaceId),
+							eq(identities.kind, "domain"),
+						),
+					),
 			);
+			if (!domainIdentity?.providerId) {
+				throw new Error("Domain identity not found");
+			}
+			// The provider is the domain's, not whatever the form says.
+			data.providerId = domainIdentity.providerId;
 
 			const id = uuidv4();
 			const initRes = await initializeEmailIdentity(data, id);
+
 			if (!initRes.success || !initRes.data) {
 				throw new Error("Failed to initialize email identity");
 			}
+
 			const { response, parsedVaultValues, secret } = initRes.data;
 
-			data.metaData = response;
-			data.id = id;
-			const identityData = IdentityInsertSchema.parse(data);
-			const [emailIdentity] = await rls((tx) =>
-				tx
-					.insert(identities)
-					.values(identityData as IdentityCreate)
-					.returning(),
-			);
+			// Explicit fields only: spreading the form let callers set
+			// workspaceId, ownerId, status, smtpAccountId, ...
+			const identityData = IdentityInsertSchema.parse({
+				id,
+				workspaceId,
+				ownerId: userId,
+				kind: "email",
+				value: String(data.value ?? "").trim(),
+				displayName: data.displayName ? String(data.displayName) : undefined,
+				domainIdentityId: domainIdentity.id,
+				providerId: domainIdentity.providerId,
+				sharedWithWorkspace,
+				metaData: response,
+			});
 
-			const session = requireSession(await currentSession());
+			const [emailIdentity] = await db
+				.insert(identities)
+				.values(identityData as IdentityCreate)
+				.returning();
+
+			await checkDefaultWorkspaceIdentity();
+
+			if (sharedWithWorkspace) {
+				await assignIdentityToAllWorkspaceMembers(emailIdentity);
+			} else {
+				await assignWorkspaceMembersToIdentity(
+					emailIdentity,
+					data.workspaceMembers as string,
+				);
+			}
+
+			const session = await currentSession();
+
 			parsedVaultValues.sendVerified = true;
 			parsedVaultValues.receiveVerified = domainIdentity.incomingDomain;
+
 			if (domainIdentity.incomingDomain) {
-				await initializeMailboxes(emailIdentity);
+				await initializeMailboxes(emailIdentity, userId, workspaceId);
 			}
-			await updateSecret(session, secret.metaId, {
+
+			await updateSecret(session, workspaceId, secret.metaId, {
 				value: JSON.stringify(parsedVaultValues),
 			});
 		}
 
 		revalidatePath(DASHBOARD_PATH);
+
 		return {
 			success: true,
-			message: "Added new identity",
+			message: "dashboard.addedNewIdentity",
 		};
 	});
 }
 
 export const testSendingEmail = async (
-	userIdentity: FetchUserIdentitiesResult[number],
-	decryptedSecrets: Record<any, unknown>,
+	clientIdentity: FetchUserIdentitiesResult[number],
+	_clientSecrets: Record<any, unknown>,
 ) => {
 	return handleAction(async () => {
+		// The browser only names the identity; the identity, the SMTP host
+		// and the credentials are reloaded server-side (a caller-supplied
+		// SMTP config was an SSRF / relay primitive).
+		const { workspaceId } = await requireWorkspaceAdmin();
+		const userIdentity = await loadWorkspaceIdentityRow(
+			String(clientIdentity?.identities?.id ?? ""),
+			workspaceId,
+		);
+		let decryptedSecrets: Record<any, unknown> = {};
+		if (userIdentity.smtp_accounts) {
+			const [smtpRow] = await fetchDecryptedSecrets({
+				linkTable: smtpAccountSecrets,
+				foreignCol: smtpAccountSecrets.accountId,
+				secretIdCol: smtpAccountSecrets.secretId,
+				parentId: userIdentity.smtp_accounts.id,
+			});
+			if (!smtpRow) throw new Error("SMTP account secret not found");
+			decryptedSecrets = smtpRow.parsedSecret;
+		} else if (userIdentity.providers) {
+			const providerRow = await loadProviderSecretRow(userIdentity.providers.id);
+			if (!providerRow) throw new Error("dashboard.noProviderSecretFound");
+			decryptedSecrets = providerRow.parsedSecret;
+		}
+
 		if (userIdentity?.smtp_accounts) {
 			const mailer = createMailer("smtp", decryptedSecrets);
-			await mailer.sendTestEmail(userIdentity.identities.value, {
+
+			const ok = await mailer.sendTestEmail(userIdentity.identities.value, {
 				subject: "Test email from Kurrier",
 				body: "This is a test email from your configured SMTP account in Kurrier.",
 			});
-			return { success: true, message: "Test email sent successfully." };
-		} else if (userIdentity?.providers) {
+
+			return ok
+				? { success: true, message: "Test email sent successfully." }
+				: { success: false, error: "Failed to send test email." };
+		}
+
+		if (userIdentity?.providers) {
 			const mailer = createMailer(
-				userIdentity?.providers.type as Providers,
+				userIdentity.providers.type as Providers,
 				decryptedSecrets,
 			);
-			await mailer.sendTestEmail(userIdentity.identities.value, {
+
+			const ok = await mailer.sendTestEmail(userIdentity.identities.value, {
 				subject: "Test email from Kurrier",
 				from: userIdentity.identities.value,
 				body: "This is a test email from your configured account in Kurrier.",
 			});
-			return { success: true, message: "Test email sent successfully." };
+
+			return ok
+				? { success: true, message: "Test email sent successfully." }
+				: { success: false, error: "Failed to send test email." };
+		}
+
+		if (userIdentity?.identities?.metaData?.provider === "google") {
+			const mailer = createMailer("google" as Providers, {
+				identityId: userIdentity.identities.id,
+			});
+
+			const ok = await mailer.sendTestEmail(userIdentity.identities.value, {
+				subject: "Test email from Kurrier",
+				from: userIdentity.identities.value,
+				body: "This is a test email from your connected Gmail account in Kurrier.",
+			});
+
+			return ok
+				? { success: true, message: "Test email sent successfully." }
+				: { success: false, error: "Failed to send test email." };
 		}
 
 		return { success: false, error: "Provider not supported yet." };
@@ -857,70 +1109,41 @@ export const testSendingEmail = async (
 };
 
 export const fetchUserIdentities = async () => {
-	const rls = await rlsClient();
-	return await rls((tx) =>
-		tx
-			.select()
-			.from(identities)
-			.leftJoin(smtpAccounts, eq(identities.smtpAccountId, smtpAccounts.id))
-			.leftJoin(providers, eq(identities.providerId, providers.id)),
-	);
+	const { workspaceId } = await requireWorkspaceAdmin();
+	return db.select()
+		.from(identities)
+		.leftJoin(smtpAccounts, eq(identities.smtpAccountId, smtpAccounts.id))
+		.leftJoin(providers, eq(identities.providerId, providers.id))
+		.where(and(
+			eq(identities.workspaceId, workspaceId)
+		))
 };
 
-export async function updateIdentitySignature(
-	_prev: FormState,
-	formData: FormData,
-): Promise<FormState> {
-	return handleAction(async () => {
-		const identityId = String(formData.get("identityId") ?? "");
-		const signatureHtml = String(formData.get("signatureHtml") ?? "").trim();
-		const safeSignatureHtml = signatureHtml
-			.replace(/<\/?script[^>]*>/gi, "")
-			.replace(/\son\w+=("[^"]*"|'[^']*'|[^\s>]*)/gi, "")
-			.replace(/javascript:/gi, "");
-
-		if (!identityId) {
-			throw new Error("Missing identity id.");
-		}
-
-		if (safeSignatureHtml.length > 20_000) {
-			throw new Error("Signature is too large. Keep it below 20 KB.");
-		}
-
-		const rls = await rlsClient();
-		await rls((tx) =>
-			tx
-				.update(identities)
-				.set({
-					signatureHtml: safeSignatureHtml || null,
-					updatedAt: new Date(),
-				})
-				.where(
-					and(eq(identities.id, identityId), eq(identities.kind, "email")),
-				),
-		);
-
-		revalidatePath("/dashboard/platform/identities");
-		revalidatePath("/dashboard/mail");
-
-		return { success: true, message: "Signature saved" };
-	});
-}
-
 export const deleteDomainIdentity = async (
-	userDomainIdentity: FetchUserIdentitiesResult[number],
-	providerAccount: FetchDecryptedSecretsResult[number] | undefined,
+	clientDomainIdentity: FetchUserIdentitiesResult[number],
+	_clientProviderAccount: FetchDecryptedSecretsResult[number] | undefined,
 ): Promise<FormState> => {
 	return handleAction(async () => {
+		// Only the identity id is taken from the browser.
+		const { workspaceId } = await requireWorkspaceAdmin();
+		const userDomainIdentity = await loadWorkspaceIdentityRow(
+			String(clientDomainIdentity?.identities?.id ?? ""),
+			workspaceId,
+		);
+		if (userDomainIdentity.identities.kind !== "domain") {
+			throw new Error("Identity not found");
+		}
+		const providerAccount = await loadProviderSecretRow(
+			userDomainIdentity.identities.providerId,
+		);
 		const rls = await rlsClient();
 		const emailsUsingThisDomain = await rls((tx) =>
 			tx
-				.select({ id: identities.id })
+				.select()
 				.from(identities)
 				.where(
 					eq(identities.domainIdentityId, userDomainIdentity?.identities.id),
-				)
-				.limit(1),
+				),
 		);
 		if (emailsUsingThisDomain.length > 0) {
 			throw new Error(
@@ -946,96 +1169,276 @@ export const deleteDomainIdentity = async (
 	});
 };
 
+const enqueueIdentityCleanup = async (identityId: string, workspaceId: string) => {
+	await getQueue("dav-worker").add(
+		"dav:delete:identity",
+		{ identityId, workspaceId },
+		{
+			jobId: `identity-dav-cleanup-${identityId}`,
+			removeOnComplete: true,
+			removeOnFail: false,
+			attempts: 3,
+			backoff: {
+				type: "exponential",
+				delay: 5000,
+			},
+		},
+	);
+};
+
 export const deleteEmailIdentity = async (
-	userIdentity: FetchUserIdentitiesResult[number],
+	clientIdentity: FetchUserIdentitiesResult[number],
 ) => {
 	return handleAction(async () => {
-		const rls = await rlsClient();
-		if (!userIdentity.smtp_accounts) {
-			const [secret] = await fetchDecryptedSecrets({
-				linkTable: providerSecrets,
-				foreignCol: providerSecrets.providerId,
-				secretIdCol: providerSecrets.secretId,
-				parentId: String(userIdentity?.identities.providerId),
+		// The argument comes from the browser: reload the row from the
+		// caller's workspace and use the stored provider/account data instead
+		// of the client copy. Owners/admins may delete any identity of the
+		// workspace (also ones restricted to other members, which RLS hides);
+		// other members only identities they can see.
+		const identityId = String(clientIdentity?.identities?.id);
+		// Identity management is an owner/admin operation.
+		const { workspaceId, role: workspaceRole } = await requireWorkspaceAdmin();
+		const [userIdentity] = await db
+			.select()
+			.from(identities)
+			.leftJoin(smtpAccounts, eq(identities.smtpAccountId, smtpAccounts.id))
+			.leftJoin(providers, eq(identities.providerId, providers.id))
+			.where(
+				and(
+					eq(identities.id, identityId),
+					eq(identities.workspaceId, workspaceId),
+				),
+			)
+			.limit(1);
+		if (!userIdentity) throw new Error("Identity not found");
+		if (workspaceRole !== "owner" && workspaceRole !== "admin") {
+			const rls = await rlsClient();
+			const [visible] = await rls((tx) =>
+				tx
+					.select({ id: identities.id })
+					.from(identities)
+					.where(eq(identities.id, identityId))
+					.limit(1),
+			);
+			if (!visible) throw new Error("Identity not found");
+		}
+		const identity = userIdentity.identities;
+		const isGoogle = identity?.metaData?.provider === "google";
+
+		if (isGoogle) {
+			const mailer = createMailer("google" as Providers, {
+				identityId: identity.id,
 			});
-			const providerType = userIdentity?.providers?.type as Providers;
-			const mailer = createMailer(providerType, secret.parsedSecret);
-			if (userIdentity?.providers?.type === "ses") {
-				await mailer.removeEmail(userIdentity?.identities?.value, {
-					ruleSetName: userIdentity?.identities?.metaData?.ruleSetName,
-					ruleName: userIdentity?.identities?.metaData?.ruleName,
+
+			await mailer.removeEmail(identity.value, {
+				revoke: true,
+			});
+
+			await db
+				.update(googleAccounts)
+				.set({
+					identityId: null,
+					updatedAt: new Date(),
+				})
+				.where(eq(googleAccounts.identityId, identity.id));
+		} else if (!userIdentity.smtp_accounts) {
+			// Only SES needs provider-side cleanup (receipt rules). The other
+			// providers' removeEmail is a no-op, and inbound/mailtrap/JMAP
+			// identities have no provider secret row at all: for those the
+			// cleanup + delete below is exactly what deleteProviderIdentity
+			// does on the platform identities page.
+			const providerType = userIdentity.providers?.type as Providers;
+			if (providerType === "ses" && identity.providerId) {
+				const [secret] = await fetchDecryptedSecrets({
+					linkTable: providerSecrets,
+					foreignCol: providerSecrets.providerId,
+					secretIdCol: providerSecrets.secretId,
+					parentId: String(identity.providerId),
 				});
+
+				if (secret?.parsedSecret) {
+					const mailer = createMailer(providerType, secret.parsedSecret);
+					await mailer.removeEmail(identity.value, {
+						ruleSetName: identity.metaData?.ruleSetName,
+						ruleName: identity.metaData?.ruleName,
+					});
+				}
 			}
 		} else {
-			await clearImapClients(userIdentity.identities.id);
+			await queueStopIdle(identity.id);
 		}
 
-		await rls((tx) =>
-			tx
-				.delete(identities)
-				.where(eq(identities.id, String(userIdentity.identities.id))),
-		);
+		await enqueueIdentityCleanup(identity.id, identity.workspaceId);
+
+		await db
+			.delete(identities)
+			.where(eq(identities.id, identity.id));
 
 		revalidatePath(DASHBOARD_PATH);
-		return { success: true, message: "Deleted email identity" };
+
+		return {
+			success: true,
+			message: "Deleted email identity",
+		};
 	});
 };
 
 export const verifyProviderAccount = async (
-	providerType: Providers,
-	providerSecret: FetchDecryptedSecretsResultRow,
+	_clientProviderType: Providers,
+	clientProviderSecret: FetchDecryptedSecretsResultRow,
 ) => {
 	return handleAction(async () => {
 		let res = { ok: false, message: "Not implemented" } as VerifyResult;
-		const metaId = String(providerSecret?.metaId);
+		// Only the provider id is taken from the browser: type, credentials
+		// and secret ids are reloaded from the caller's workspace.
+		const { workspaceId } = await requireWorkspaceAdmin();
+		const providerSecret = await loadProviderSecretRow(
+			String(clientProviderSecret?.linkRow?.providerId ?? ""),
+		);
+		if (!providerSecret?.provider) {
+			throw new Error("dashboard.noProviderSecretFound");
+		}
+		const providerType = providerSecret.provider.type as Providers;
 		if (providerType === "ses") {
+			const mailer = createMailer("ses", providerSecret.parsedSecret);
 			const { WEB_URL } = getPublicEnv();
 			const localTunnelUrl = await kvGet("local-tunnel-url");
-			res = await createMailer("ses", providerSecret.parsedSecret).verify(
-				metaId,
-				{
-					webHookUrl: `${localTunnelUrl ? localTunnelUrl : WEB_URL}/api/v1/hooks/aws/ses/inbound`,
-				},
-			);
+			res = await mailer.verify(String(providerSecret?.metaId), {
+				webHookUrl: `${localTunnelUrl ? localTunnelUrl : WEB_URL}/api/v1/hooks/aws/ses/inbound`,
+			});
+
+			const data = providerSecret.parsedSecret;
+			data.verified = res.ok;
+
+			const session = await currentSession();
+			await updateSecret(session, workspaceId, String(providerSecret?.linkRow?.secretId), {
+				value: JSON.stringify(data),
+			});
+
+			if (res.ok) {
+				const rls = await rlsClient();
+				await rls((tx) =>
+					tx
+						.update(providers)
+						.set({
+							metaData: {
+								...(providerSecret?.provider?.metaData ?? {}),
+								...{ verification: res.meta },
+							},
+						})
+						.where(
+							eq(providers.id, String(providerSecret?.linkRow?.providerId)),
+						),
+				);
+			}
 		} else if (providerType === "s3") {
-			res = await createStore(providerType, providerSecret.parsedSecret).verify(
-				metaId,
-				{},
-			);
-		} else if (
-			providerType === "mailgun" ||
-			providerType === "postmark" ||
-			providerType === "sendgrid"
-		) {
-			res = await createMailer(
-				providerType,
-				providerSecret.parsedSecret,
-			).verify(metaId, {});
-		} else {
-			return { success: true, data: res };
-		}
+			const store = createStore(providerType, providerSecret.parsedSecret);
+			res = await store.verify(String(providerSecret?.metaId), {});
+			const data = providerSecret.parsedSecret;
+			data.verified = res.ok;
+			const session = await currentSession();
+			await updateSecret(session, workspaceId,  String(providerSecret?.linkRow?.secretId), {
+				value: JSON.stringify(data),
+			});
 
-		const data = providerSecret.parsedSecret;
-		data.verified = res.ok;
+			if (res.ok) {
+				const rls = await rlsClient();
+				await rls((tx) =>
+					tx
+						.update(providers)
+						.set({
+							metaData: {
+								...(providerSecret?.provider?.metaData ?? {}),
+								...{ verification: res.meta },
+							},
+						})
+						.where(
+							eq(providers.id, String(providerSecret?.linkRow?.providerId)),
+						),
+				);
+			}
+		} else if (providerType === "mailgun") {
+			const mailer = createMailer(providerType, providerSecret.parsedSecret);
+			res = await mailer.verify(String(providerSecret?.metaId), {});
 
-		const session = requireSession(await currentSession());
-		await updateSecret(session, String(providerSecret?.linkRow?.secretId), {
-			value: JSON.stringify(data),
-		});
+			const data = providerSecret.parsedSecret;
+			data.verified = res.ok;
 
-		if (res.ok) {
-			const rls = await rlsClient();
-			await rls((tx) =>
-				tx
-					.update(providers)
-					.set({
-						metaData: {
-							...(providerSecret?.provider?.metaData ?? {}),
-							...{ verification: res.meta },
-						},
-					})
-					.where(eq(providers.id, String(providerSecret?.linkRow?.providerId))),
-			);
+			const session = await currentSession();
+			await updateSecret(session, workspaceId, String(providerSecret?.linkRow?.secretId), {
+				value: JSON.stringify(data),
+			});
+
+			if (res.ok) {
+				const rls = await rlsClient();
+				await rls((tx) =>
+					tx
+						.update(providers)
+						.set({
+							metaData: {
+								...(providerSecret?.provider?.metaData ?? {}),
+								...{ verification: res.meta },
+							},
+						})
+						.where(
+							eq(providers.id, String(providerSecret?.linkRow?.providerId)),
+						),
+				);
+			}
+		} else if (providerType === "postmark") {
+			const mailer = createMailer(providerType, providerSecret.parsedSecret);
+			res = await mailer.verify(String(providerSecret?.metaId), {});
+			const data = providerSecret.parsedSecret;
+			data.verified = res.ok;
+
+			const session = await currentSession();
+			await updateSecret(session, workspaceId, String(providerSecret?.linkRow?.secretId), {
+				value: JSON.stringify(data),
+			});
+
+			if (res.ok) {
+				const rls = await rlsClient();
+				await rls((tx) =>
+					tx
+						.update(providers)
+						.set({
+							metaData: {
+								...(providerSecret?.provider?.metaData ?? {}),
+								...{ verification: res.meta },
+							},
+						})
+						.where(
+							eq(providers.id, String(providerSecret?.linkRow?.providerId)),
+						),
+				);
+			}
+		} else if (providerType === "sendgrid") {
+			const mailer = createMailer(providerType, providerSecret.parsedSecret);
+			res = await mailer.verify(String(providerSecret?.metaId), {});
+			const data = providerSecret.parsedSecret;
+			data.verified = res.ok;
+
+			const session = await currentSession();
+			await updateSecret(session, workspaceId, String(providerSecret?.linkRow?.secretId), {
+				value: JSON.stringify(data),
+			});
+
+			if (res.ok) {
+				const rls = await rlsClient();
+				await rls((tx) =>
+					tx
+						.update(providers)
+						.set({
+							metaData: {
+								...(providerSecret?.provider?.metaData ?? {}),
+								...{ verification: res.meta },
+							},
+						})
+						.where(
+							eq(providers.id, String(providerSecret?.linkRow?.providerId)),
+						),
+				);
+			}
 		}
 
 		revalidatePath(DASHBOARD_PATH);
@@ -1050,50 +1453,123 @@ export type FetchUserIdentitiesResult = Awaited<
 
 export const getDashboardStats = async () => {
 	return handleAction(async () => {
-		const session = requireSession(await currentSession());
 		const rls = await rlsClient();
+		const workspaceRole = await getWorkspaceRole();
+		const isOwner = workspaceRole === "owner";
 
-		const data = await withServerCache(
-			session.user.id,
-			`dashboard-stats:${session.user.id}`,
-			30,
-			() =>
-				rls(async (tx) => {
-					const [[mp], [sa], [vd], [ai], [epTotal], [ep24h]] =
-						await Promise.all([
-							tx.select({ count: count() }).from(providers),
-							tx.select({ count: count() }).from(smtpAccounts),
-							tx
-								.select({ count: count() })
-								.from(identities)
-								.where(
-									and(
-										eq(identities.kind, "domain"),
-										eq(identities.status, "verified"),
-									),
-								),
-							tx
-								.select({ count: count() })
-								.from(identities)
-								.where(eq(identities.kind, "email")),
-							tx.select({ count: count() }).from(messages),
-							tx
-								.select({ count: count() })
-								.from(messages)
-								.where(
-									gte(messages.createdAt, sql`now() - interval '24 hours'`),
-								),
-						]);
+		const data = await rls(async (tx) => {
+			const [
+				[messageCount],
+				[messageCount24h],
+				[threadCount],
+				[draftCount],
+				[scheduledDraftCount],
+				[attachmentCount],
+				[rawMessageStorage],
+				[attachmentStorage],
+			] = await Promise.all([
+				tx.select({ count: count() }).from(messages),
 
-					return {
-						connectedProviders: (mp?.count ?? 0) + (sa?.count ?? 0),
-						verifiedDomains: vd?.count ?? 0,
-						activeIdentities: ai?.count ?? 0,
-						emailsProcessedTotal: epTotal?.count ?? 0,
-						emailsProcessed24h: ep24h?.count ?? 0,
-					};
-				}),
-		);
+				tx
+					.select({ count: count() })
+					.from(messages)
+					.where(gte(messages.createdAt, sql`now() - interval '24 hours'`)),
+
+				tx.select({ count: countDistinct(messages.threadId) }).from(messages),
+
+				tx.select({ count: count() }).from(draftMessages),
+
+				tx
+					.select({ count: count() })
+					.from(draftMessages)
+					.where(eq(draftMessages.status, "scheduled")),
+
+				tx.select({ count: count() }).from(messageAttachments),
+
+				tx.select({ bytes: sum(messages.sizeBytes) }).from(messages),
+
+				tx.select({ bytes: sum(messageAttachments.sizeBytes) }).from(messageAttachments),
+			]);
+
+			let connectedProviders = null as number | null;
+			let verifiedDomains = null as number | null;
+			let activeIdentities = null as number | null;
+			let volumeCount = null as number | null;
+			let driveEntryCount = null as number | null;
+			let driveStorageBytes = 0;
+
+			if (isOwner) {
+				const [
+					[providerCount],
+					[smtpCount],
+					[verifiedDomainCount],
+					[identityCount],
+					[driveVolumeCount],
+					[driveEntriesCount],
+					[driveStorage],
+				] = await Promise.all([
+					tx.select({ count: count() }).from(providers),
+
+					tx.select({ count: count() }).from(smtpAccounts),
+
+					tx
+						.select({ count: count() })
+						.from(identities)
+						.where(
+							and(
+								eq(identities.kind, "domain"),
+								eq(identities.status, "verified"),
+							),
+						),
+
+					tx
+						.select({ count: count() })
+						.from(identities)
+						.where(eq(identities.kind, "email")),
+
+					tx.select({ count: count() }).from(driveVolumes),
+
+					tx.select({ count: count() }).from(driveEntries),
+
+					tx.select({ bytes: sum(driveEntries.sizeBytes) }).from(driveEntries),
+				]);
+
+				connectedProviders =
+					Number(providerCount?.count ?? 0) + Number(smtpCount?.count ?? 0);
+				verifiedDomains = Number(verifiedDomainCount?.count ?? 0);
+				activeIdentities = Number(identityCount?.count ?? 0);
+				volumeCount = Number(driveVolumeCount?.count ?? 0);
+				driveEntryCount = Number(driveEntriesCount?.count ?? 0);
+				driveStorageBytes = Number(driveStorage?.bytes ?? 0);
+			}
+
+			const rawMessageBytes = Number(rawMessageStorage?.bytes ?? 0);
+			const attachmentBytes = Number(attachmentStorage?.bytes ?? 0);
+			const totalStorageBytes = rawMessageBytes + driveStorageBytes;
+
+			return {
+				isOwner,
+
+				connectedProviders,
+				verifiedDomains,
+				activeIdentities,
+				volumeCount,
+				driveEntryCount,
+
+				emailsProcessedTotal: Number(messageCount?.count ?? 0),
+				emailsProcessed24h: Number(messageCount24h?.count ?? 0),
+				threadCount: Number(threadCount?.count ?? 0),
+				draftCount: Number(draftCount?.count ?? 0),
+				scheduledDraftCount: Number(scheduledDraftCount?.count ?? 0),
+				attachmentCount: Number(attachmentCount?.count ?? 0),
+
+				rawMessageBytes,
+				attachmentBytes,
+				driveStorageBytes,
+				totalStorageBytes,
+				storageBytesUsed: totalStorageBytes
+			};
+		});
 
 		return { success: true, message: "OK", data };
 	});
@@ -1104,8 +1580,10 @@ export async function addApiKey(
 	formData: FormData,
 ): Promise<FormState> {
 	return handleAction(async () => {
-		const session = requireSession(await currentSession());
+		await requireWorkspaceAdmin();
+		const session = await currentSession();
 		const data = decode(formData);
+		const workspaceId = await getWorkspaceId();
 
 		const { ulid, name, scope } = data as {
 			ulid: string;
@@ -1129,7 +1607,7 @@ export async function addApiKey(
 		const rawKey = `${keyPrefix}.${nanoid(32)}`;
 		const keyLast4 = rawKey.slice(-4);
 
-		const secretMeta = await createSecret(session, {
+		const secretMeta = await createSecret(session, workspaceId, {
 			name: ulid,
 			value: JSON.stringify({ rawKey }),
 		});
@@ -1154,14 +1632,16 @@ export async function addApiKey(
 
 		return {
 			success: true,
-			message: "API key created successfully",
+			message: "dashboard.apiKeyCreated",
 		};
 	});
 }
 
 export const fetchUserAPIKeys = async () => {
+	// Returns raw API keys: owners/admins only.
+	const { workspaceId } = await requireWorkspaceAdmin();
 	const rls = await rlsClient();
-	const session = requireSession(await currentSession());
+	const session = await currentSession();
 
 	const apiKeyRows = await rls((tx) =>
 		tx
@@ -1171,31 +1651,251 @@ export const fetchUserAPIKeys = async () => {
 			})
 			.from(apiKeys)
 			.leftJoin(secretsMeta, eq(apiKeys.secretId, secretsMeta.id))
-			.orderBy(desc(apiKeys.createdAt)),
+			.orderBy(desc(apiKeys.createdAt))
 	);
 
-	const secrets = await getSecrets(
-		session,
-		apiKeyRows.map((r) => String(r.metaId)),
+	const userApiKeys = await Promise.all(
+		apiKeyRows.map(async (r) => {
+			const { vault } = await getSecret(session, String(r.metaId), workspaceId);
+			return {
+				...r.key,
+				vault: vault?.decrypted_secret
+					? JSON.parse(vault.decrypted_secret)
+					: {},
+			};
+		}),
 	);
-	return apiKeyRows.map((r) => {
-		const secret = secrets.get(String(r.metaId));
-		if (!secret) throw new Error("Not found or not allowed");
-		const { vault } = secret;
-		return {
-			...r.key,
-			vault: vault?.decrypted_secret ? JSON.parse(vault.decrypted_secret) : {},
-		};
-	});
+
+	return userApiKeys;
 };
 
 export type FetchUserAPIKeysResult = Awaited<
 	ReturnType<typeof fetchUserAPIKeys>
 >;
 
-export const fetchUserDavAccounts = async () => {
+
+
+export const regenerateDavPassword = async () => {
+	const user = await isSignedIn();
+	if (!user?.id) throw new Error("Not authenticated");
+	const workspaceId = await getWorkspaceId();
+	const result = await addJobAndWait(
+		"dav-worker",
+		"dav:update-password",
+		{ userId: user.id, workspaceId },
+		{ removeOnComplete: true, removeOnFail: { age: 24 * 3600 } },
+	);
+	revalidatePath("/w/[workspaceId]/dashboard/platform/sync-services");
+	return result;
+};
+
+export async function addNewVolume(_prev: FormState, formData: FormData) {
+	return handleAction(async () => {
+		await requireWorkspaceAdmin();
+		if (!DISTRIBUTION_CONFIG.features.drive) {
+			throw new Error("Drive is disabled");
+		}
+
+		const { canCreateStorageVolume, reason } =
+			await access("canCreateStorageVolume");
+
+		if (!canCreateStorageVolume) {
+			return {
+				success: false,
+				error:
+					reason ??
+					"dashboard.storageVolumeCreationDisabled",
+			};
+		}
+
+		const rls = await rlsClient();
+		const data = decode(formData);
+		const user = await isSignedIn();
+
+		const label = String(
+			data.volumeName || data.bucketName || "",
+		).trim();
+
+		if (!label) {
+			return {
+				success: false,
+				error: "dashboard.volumeNameRequired",
+			};
+		}
+
+		const code = label
+			.toLowerCase()
+			.replace(/[^a-z0-9-]+/g, "-")
+			.replace(/^-+|-+$/g, "");
+
+		if (!code) {
+			return {
+				success: false,
+				error: "dashboard.invalidVolumeName",
+			};
+		}
+
+		const bucket = process.env.S3_BUCKET;
+
+		if (!bucket) {
+			return {
+				success: false,
+				error: "dashboard.s3BucketNotConfigured",
+			};
+		}
+
+		await rls((tx) =>
+			tx.insert(driveVolumes).values({
+				ownerId: String(user?.id),
+				label,
+				kind: "cloud",
+				code,
+				providerId: null,
+				metaData: {
+					bucket,
+				},
+			}),
+		);
+
+		revalidatePath(
+			"/[locale]/w/[wPublicId]/dashboard/platform/storage",
+			"page",
+		);
+
+		return {
+			success: true,
+			message: "dashboard.addedNewVolume",
+		};
+	});
+}
+
+
+/**
+ * Webhook targets: http(s) only, no credentials, never cloud metadata or
+ * link-local addresses; private/loopback only with
+ * OUTBOUND_ALLOW_PRIVATE_NETWORKS=true. The worker repeats the check at
+ * connect time (DNS names are resolved there).
+ */
+function parseWebhookUrl(rawUrl: string) {
+	let url: URL;
+	try {
+		url = new URL(rawUrl.trim());
+	} catch {
+		throw new Error("Invalid webhook URL");
+	}
+	if (url.protocol !== "https:" && url.protocol !== "http:") {
+		throw new Error("Webhook URL must use http or https");
+	}
+	if (url.username || url.password) {
+		throw new Error("Webhook URL must not contain credentials");
+	}
+	// Same rule as the public API (apps/worker/lib/api-helpers.ts
+	// assertValidWebhookUrl): literal internal / link-local / metadata IPs are
+	// rejected unless OUTBOUND_ALLOW_PRIVATE_NETWORKS=true.
+	const host = url.hostname.replace(/^\[|\]$/g, "");
+	if (
+		!host ||
+		isMetadataOrLinkLocalAddress(host) ||
+		(isIP(host) !== 0 && isBlockedIp(host, httpOutboundPolicy())) ||
+		(!httpOutboundPolicy().allowPrivate &&
+			(host.toLowerCase() === "localhost" || host.toLowerCase().endsWith(".localhost")))
+	) {
+		throw new Error(
+			"Webhook url must be a public http(s) URL (internal addresses are not allowed)",
+		);
+	}
+	return url.toString();
+}
+
+export const fetchUserWebhooks = async () => {
+	await requireWorkspaceAdmin();
 	const rls = await rlsClient();
-	const session = requireSession(await currentSession());
+
+	const hookRows = await rls((tx) =>
+		tx
+			.select()
+			.from(webhooks)
+			.leftJoin(identities, eq(webhooks.identityId, identities.id))
+
+	);
+
+	return hookRows;
+};
+
+export type FetchUserWebhooksResult = Awaited<
+	ReturnType<typeof fetchUserWebhooks>
+>;
+
+
+
+export async function addWebhook(
+	_prev: FormState,
+	formData: FormData,
+): Promise<FormState> {
+	return handleAction(async () => {
+		await requireWorkspaceAdmin();
+		const data = decode(formData);
+		const url = parseWebhookUrl(String(data.url ?? ""));
+		const identityId = data.identityId ? String(data.identityId) : null;
+		const rls = await rlsClient();
+		if (identityId) {
+			const [identity] = await rls((tx) =>
+				tx
+					.select({ id: identities.id })
+					.from(identities)
+					.where(eq(identities.id, identityId))
+					.limit(1),
+			);
+			if (!identity) throw new Error("Identity not found");
+		}
+		const insertPayload = {
+			url,
+			identityId,
+			events: [String(data.scope ?? "")],
+		};
+		if (!(webHookList as readonly string[]).includes(insertPayload.events[0])) {
+			throw new Error("Invalid webhook event");
+		}
+
+		await rls((tx) =>
+			tx
+				.insert(webhooks)
+				.values(insertPayload as WebhookInsertEntity)
+		);
+		revalidatePath(DASHBOARD_PATH);
+
+		return {
+			success: true,
+			message: "dashboard.webhookCreated",
+		};
+	});
+}
+
+export const deleteWebhook = async (
+	_prev: FormState,
+	formData: FormData,
+): Promise<FormState> => {
+	return handleAction(async () => {
+		await requireWorkspaceAdmin();
+		const data = decode(formData);
+		const rls = await rlsClient();
+		await rls((tx) =>
+			tx.delete(webhooks).where(eq(webhooks.id, String(data.id))),
+		);
+
+		revalidatePath(DASHBOARD_PATH);
+		return {
+			success: true,
+		};
+	});
+};
+
+
+export const fetchUserDavAccountForWorkspace = async () => {
+	const rls = await rlsClient();
+	const session = await currentSession();
+	const user = await isSignedIn();
+	const workspaceId = await getWorkspaceId();
 
 	const [row] = await rls((tx) =>
 		tx
@@ -1205,68 +1905,911 @@ export const fetchUserDavAccounts = async () => {
 			})
 			.from(davAccounts)
 			.leftJoin(secretsMeta, eq(davAccounts.secretId, secretsMeta.id))
-			.orderBy(desc(davAccounts.createdAt))
+			.where(
+				and(
+					eq(davAccounts.workspaceId, workspaceId),
+					eq(davAccounts.ownerId, String(user?.id)),
+					eq(davAccounts.type, "user"),
+				),
+			)
 			.limit(1),
 	);
 
-	if (!row) throw new Error("No DAV account found");
-	const { vault } = await getSecret(session, String(row.metaId));
+	if (!row) return null;
+
+	const { vault } = await getSecret(session, String(row.metaId), workspaceId);
+
 	return {
 		...row.account,
-		vault: vault?.decrypted_secret || null,
+		password: vault?.decrypted_secret || null,
 	};
 };
 
-export const regenerateDavPassword = async () => {
-	const user = await isSignedIn();
-	if (!user?.id) throw new Error("Please sign in first.");
-	const result = await addJobAndWait("dav-worker", "dav:update-password", {
-		userId: user.id,
+
+
+export async function fetchGoogleAccounts() {
+	await requireWorkspaceAdmin();
+	const rls = await rlsClient();
+	return rls((tx) =>
+		tx
+			.select()
+			.from(googleAccounts)
+			.orderBy(desc(googleAccounts.createdAt)),
+	);
+}
+export type FetchGoogleAccountsResult = Awaited<
+	ReturnType<typeof fetchGoogleAccounts>
+>;
+export type FetchGoogleAccountsResultRow = FetchGoogleAccountsResult[number];
+
+
+export const verifyGoogleAccount = async (googleAccountId: string) => {
+	return handleAction(async () => {
+		await requireWorkspaceAdmin();
+		const rls = await rlsClient();
+		const [ownAccount] = await rls((tx) =>
+			tx
+				.select({ id: googleAccounts.id })
+				.from(googleAccounts)
+				.where(eq(googleAccounts.id, String(googleAccountId)))
+				.limit(1),
+		);
+		if (!ownAccount) {
+			return { success: false, error: "dashboard.googleAccountNotFound" };
+		}
+		try {
+			const { gmail, googleAccount, markConnected } =
+				await gmailClientForGoogleAccount(ownAccount.id);
+
+			const profile = await gmail.users.getProfile({ userId: "me" });
+
+			await markConnected();
+
+			return {
+				success: true,
+				message: "Google account connected",
+				data: {
+					ok: true,
+					status: "connected",
+					message: "Google account connected",
+					meta: {
+						email: profile.data.emailAddress ?? googleAccount.email,
+						historyId: profile.data.historyId ?? null,
+						messagesTotal: profile.data.messagesTotal ?? null,
+						threadsTotal: profile.data.threadsTotal ?? null,
+					},
+				} as VerifyResult & { status: "connected" },
+			};
+		} catch (err: any) {
+			const message = err?.message ?? "Google verification failed";
+
+			return {
+				success: false,
+				error: message,
+				data: {
+					ok: false,
+					status: "revoked",
+					message,
+					meta: {
+						code: err?.code,
+						status: err?.status,
+					},
+				} as VerifyResult & { status: "revoked" },
+			};
+		}
 	});
-	revalidatePath("/dashboard/platform/sync-services");
-	return result;
 };
 
-export async function addNewVolume(_prev: FormState, formData: FormData) {
+
+// Providers whose identities are simple "one email value, one provider row
+// per workspace" records with no domain/OAuth flow of their own — currently
+// `inbound` (generates a `slug@inbound.kurrier` address from a label) and
+// `mailtrap` (takes a real external address as-is). Shared by the three
+// functions below instead of duplicating near-identical CRUD per provider.
+const SIMPLE_EMAIL_IDENTITY_PROVIDERS = ["inbound", "mailtrap"] as const;
+type SimpleEmailIdentityProvider = (typeof SIMPLE_EMAIL_IDENTITY_PROVIDERS)[number];
+
+function isSimpleEmailIdentityProvider(
+	v: unknown,
+): v is SimpleEmailIdentityProvider {
+	return SIMPLE_EMAIL_IDENTITY_PROVIDERS.includes(
+		v as SimpleEmailIdentityProvider,
+	);
+}
+
+export async function createProviderIdentity(
+	_prev: FormState,
+	formData: FormData,
+): Promise<FormState> {
 	return handleAction(async () => {
-		const rls = await rlsClient();
+		await requireWorkspaceAdmin();
 		const data = decode(formData);
-		const [secret] = await fetchDecryptedSecrets({
+		const providerType = data.providerType;
+
+		if (!isSimpleEmailIdentityProvider(providerType)) {
+			return { success: false, error: "Unknown provider type" };
+		}
+
+		let value: string;
+		let displayName: string;
+
+		if (providerType === "inbound") {
+			const label = String(data.label || "").trim();
+			if (!label) {
+				return { success: false, error: "Identity label is required" };
+			}
+			const slug = slugify(label);
+			if (!slug) {
+				return { success: false, error: "Invalid identity label" };
+			}
+			value = `${slug}@inbound.kurrier`;
+			displayName = label;
+		} else {
+			value = String(data.value || "").trim().toLowerCase();
+			if (!value || !value.includes("@")) {
+				return { success: false, error: "A valid email address is required" };
+			}
+			displayName = value;
+		}
+
+		const workspaceId = await getWorkspaceId();
+		const user = await isSignedIn();
+		const userId = String(user?.id || "");
+
+		if (!userId) {
+			return {
+				success: false,
+				error: "Not signed in",
+			};
+		}
+
+		const rls = await rlsClient();
+
+		const [provider] = await rls((tx) =>
+			tx
+				.select()
+				.from(providers)
+				.where(
+					and(
+						eq(providers.workspaceId, workspaceId),
+						eq(providers.ownerId, userId),
+						eq(providers.type, providerType),
+					),
+				)
+				.limit(1),
+		);
+
+		if (!provider) {
+			return {
+				success: false,
+				error: `${providerType} provider is not initialized`,
+			};
+		}
+
+		const [existingIdentity] = await rls((tx) =>
+			tx
+				.select({ id: identities.id })
+				.from(identities)
+				.where(
+					and(
+						eq(identities.workspaceId, workspaceId),
+						eq(identities.kind, "email"),
+						eq(identities.value, value),
+					),
+				)
+				.limit(1),
+		);
+
+		if (existingIdentity) {
+			return {
+				success: false,
+				error: `Identity ${value} already exists`,
+			};
+		}
+
+		const identityData = IdentityInsertSchema.parse({
+			workspaceId,
+			ownerId: userId,
+			kind: "email",
+			value,
+			displayName,
+			providerId: provider.id,
+			status: "verified",
+			sharedWithWorkspace: true,
+			metaData: {
+				provider: providerType,
+			},
+		});
+
+		const [identity] = await rls((tx) =>
+			tx
+				.insert(identities)
+				.values(identityData as IdentityCreate)
+				.returning(),
+		);
+		await assignIdentityToAllWorkspaceMembers(identity);
+		await initializeMailboxes(identity, userId, workspaceId);
+
+		revalidatePath(DASHBOARD_PATH);
+		return {
+			success: true,
+			message: `Created ${value}`,
+		};
+	});
+}
+
+
+export const fetchProviderIdentities = async (
+	providerType: SimpleEmailIdentityProvider,
+) => {
+	await requireWorkspaceAdmin();
+	const rls = await rlsClient();
+	return rls((tx) =>
+		tx
+			.select({
+				identity: identities,
+				provider: providers,
+			})
+			.from(identities)
+			.innerJoin(providers, eq(identities.providerId, providers.id))
+			.where(
+				and(
+					eq(identities.kind, "email"),
+					eq(providers.type, providerType),
+				),
+			)
+			.orderBy(desc(identities.createdAt)),
+	);
+};
+
+export type FetchProviderIdentitiesResult = Awaited<ReturnType<typeof fetchProviderIdentities>>;
+export type FetchProviderIdentitiesResultRow = FetchProviderIdentitiesResult[number];
+
+
+export const deleteProviderIdentity = async (
+	identityId: string,
+	providerType: SimpleEmailIdentityProvider,
+): Promise<FormState> => {
+	return handleAction(async () => {
+		await requireWorkspaceAdmin();
+		const rls = await rlsClient();
+		const workspaceId = await getWorkspaceId();
+
+		const [identity] = await rls((tx) =>
+			tx
+				.select({
+					identity: identities,
+					provider: providers,
+				})
+				.from(identities)
+				.innerJoin(providers, eq(identities.providerId, providers.id))
+				.where(
+					and(
+						eq(identities.id, identityId),
+						eq(providers.type, providerType),
+					),
+				)
+				.limit(1),
+		);
+
+		if (!identity) {
+			return {
+				success: false,
+				error: `${providerType} identity not found`,
+			};
+		}
+
+		await enqueueIdentityCleanup(
+			identity.identity.id,
+			workspaceId,
+		);
+
+		await rls((tx) =>
+			tx
+				.delete(identities)
+				.where(eq(identities.id, identity.identity.id)),
+		);
+
+		revalidatePath(DASHBOARD_PATH);
+		revalidatePath("/w/[workspaceId]/dashboard/platform/identities");
+
+		return {
+			success: true,
+			message: "Identity deleted",
+		};
+	});
+};
+
+
+// Back-compat wrappers around the generic functions above, keeping the
+// original "inbound"-specific names/signatures so InboundCard/
+// InboundIdentityCard/NewInboundIdentityForm stay untouched (smaller diff
+// against upstream, which also edits these files).
+export async function createInboundIdentity(
+	_prev: FormState,
+	formData: FormData,
+): Promise<FormState> {
+	const fd = new FormData();
+	formData.forEach((v, k) => fd.append(k, v));
+	fd.set("providerType", "inbound");
+	return createProviderIdentity(_prev, fd);
+}
+
+export const fetchInboundIdentities = async () =>
+	fetchProviderIdentities("inbound");
+export type FetchInboundIdentitiesResult = FetchProviderIdentitiesResult;
+export type FetchInboundIdentitiesResultRow = FetchProviderIdentitiesResultRow;
+
+export const deleteInboundIdentity = async (identityId: string) =>
+	deleteProviderIdentity(identityId, "inbound");
+
+
+export type GoogleOAuthConfig = {
+	clientId: string;
+	clientSecret: string;
+};
+
+const GOOGLE_MAIL_OAUTH_SECRET_NAME = "GOOGLE_MAIL_OAUTH_CONFIG";
+const CUSTOM_EMAIL_PROVIDERS_SECRET_NAME = "CUSTOM_EMAIL_PROVIDERS";
+
+export async function fetchCustomEmailProviders() {
+	const { workspaceId } = await requireWorkspaceAdmin();
+	const rls = await rlsClient();
+	const session = await currentSession();
+
+	const [row] = await rls((tx) =>
+		tx
+			.select({
+				id: secretsMeta.id,
+			})
+			.from(secretsMeta)
+			.where(
+				and(
+					eq(secretsMeta.workspaceId, workspaceId),
+					eq(secretsMeta.name, CUSTOM_EMAIL_PROVIDERS_SECRET_NAME),
+					eq(secretsMeta.managedBy, "user"),
+				),
+			)
+			.limit(1),
+	);
+
+	if (!row) {
+		return getCustomEmailProviders();
+	}
+
+	const { vault } = await getSecret(session, row.id, workspaceId);
+
+	if (!vault?.decrypted_secret) {
+		return getCustomEmailProviders();
+	}
+
+	return parseCustomEmailProvidersValue(vault.decrypted_secret);
+}
+
+export async function fetchGoogleOAuthConfig(): Promise<GoogleOAuthConfig | null> {
+	// Contains the OAuth client secret: owners/admins only.
+	const { workspaceId } = await requireWorkspaceAdmin();
+	const rls = await rlsClient();
+	const session = await currentSession();
+
+	const [row] = await rls((tx) =>
+		tx
+			.select({
+				id: secretsMeta.id,
+			})
+			.from(secretsMeta)
+			.where(
+				and(
+					eq(secretsMeta.workspaceId, workspaceId),
+					eq(secretsMeta.name, GOOGLE_MAIL_OAUTH_SECRET_NAME),
+					eq(secretsMeta.managedBy, "user"),
+				),
+			)
+			.limit(1),
+	);
+
+	if (!row) return null;
+
+	const { vault } = await getSecret(session, row.id, workspaceId);
+
+	if (!vault?.decrypted_secret) return null;
+
+	try {
+		const parsed = JSON.parse(vault.decrypted_secret);
+
+		if (!parsed?.clientId || !parsed?.clientSecret) {
+			return null;
+		}
+
+		return {
+			clientId: String(parsed.clientId),
+			clientSecret: String(parsed.clientSecret),
+		};
+	} catch {
+		return null;
+	}
+}
+
+export async function hasGoogleOAuthConfig(): Promise<boolean> {
+	const config = await fetchGoogleOAuthConfig();
+
+	if (config) {
+		return true;
+	}
+
+	return Boolean(
+		process.env.GOOGLE_MAIL_CLIENT_ID &&
+		process.env.GOOGLE_MAIL_CLIENT_SECRET,
+	);
+}
+
+export async function saveGoogleOAuthConfig(
+	_prev: FormState,
+	formData: FormData,
+): Promise<FormState> {
+	return handleAction(async () => {
+		await requireWorkspaceAdmin();
+		const data = decode(formData);
+
+		const clientId = String(data.clientId ?? "").trim();
+		const clientSecret = String(data.clientSecret ?? "").trim();
+
+		if (!clientId || !clientSecret) {
+			return {
+				success: false,
+				error: "Google Client ID and Client Secret are required.",
+			};
+		}
+
+		const session = await currentSession();
+		const workspaceId = await getWorkspaceId();
+
+		const { canCreateProvider, reason } = await access("canCreateProvider");
+		if (!canCreateProvider) {
+			return {
+				success: false,
+				error:
+					reason ??
+					"dashboard.providerCreationDisabled",
+			};
+		}
+
+
+		const rls = await rlsClient();
+
+		const [existing] = await rls((tx) =>
+			tx
+				.select()
+				.from(secretsMeta)
+				.where(
+					and(
+						eq(secretsMeta.workspaceId, workspaceId),
+						eq(secretsMeta.name, GOOGLE_MAIL_OAUTH_SECRET_NAME),
+						eq(secretsMeta.managedBy, "user"),
+					),
+				)
+				.limit(1),
+		);
+
+		const value = JSON.stringify({
+			clientId,
+			clientSecret,
+		});
+
+		if (existing) {
+			await updateSecret(session, workspaceId, existing.id, {
+				value,
+				description: "Google Mail OAuth credentials"
+			});
+		} else {
+			await createSecret(session, workspaceId, {
+				name: GOOGLE_MAIL_OAUTH_SECRET_NAME,
+				value,
+				description: "Google Mail OAuth credentials",
+				managedBy: "user",
+			});
+		}
+
+		revalidatePath(DASHBOARD_PATH);
+
+		return {
+			success: true,
+			message: "Google Mail OAuth configuration saved."
+		};
+	});
+}
+
+
+export async function saveMailtrapCredentials(
+	_prev: FormState,
+	formData: FormData,
+): Promise<FormState> {
+	return handleAction(async () => {
+		await requireWorkspaceAdmin();
+		const data = decode(formData);
+
+		const providerId = String(data.providerId || "").trim();
+		const apiToken = String(data.apiToken || "").trim();
+		const webhookSecret = String(data.webhookSecret || "").trim();
+
+		if (!providerId) {
+			return { success: false, error: "Missing provider id" };
+		}
+
+		if (!apiToken || !webhookSecret) {
+			return {
+				success: false,
+				error: "Mailtrap API token and webhook secret are required",
+			};
+		}
+
+		const session = await currentSession();
+		const workspaceId = await getWorkspaceId();
+
+		const { canCreateProvider, reason } = await access("canCreateProvider");
+		if (!canCreateProvider) {
+			return {
+				success: false,
+				error:
+					reason ??
+					"dashboard.providerCreationDisabled",
+			};
+		}
+
+
+		// The provider id comes from the form: it must be ours.
+		await requireWorkspaceProvider(providerId);
+
+		const rls = await rlsClient();
+
+		const value = JSON.stringify({
+			MAILTRAP_API_TOKEN: apiToken,
+			MAILTRAP_WEBHOOK_SECRET: webhookSecret,
+		});
+
+		const [existing] = await rls((tx) =>
+			tx
+				.select()
+				.from(providerSecrets)
+				.where(eq(providerSecrets.providerId, providerId)),
+		);
+
+		if (existing) {
+			await updateSecret(session, workspaceId, existing.secretId, { value });
+		} else {
+			const secret = await createSecret(session, workspaceId, {
+				name: `mailtrap-${providerId}`,
+				value,
+				description: "Mailtrap API token and webhook signing secret",
+			});
+
+			await rls((tx) =>
+				tx.insert(providerSecrets).values({
+					providerId,
+					secretId: secret.id,
+				}),
+			);
+		}
+
+		revalidatePath(DASHBOARD_PATH);
+
+		return {
+			success: true,
+			message: "Mailtrap credentials saved",
+		};
+	});
+}
+
+
+// Mailtrap API helpers for verifying the connection and listing inboxes
+const MAILTRAP_TIMEOUT_MS = 10_000; // 10 seconds
+const MAILTRAP_MAX_FOLDERS_CHECKED = 5; // Limit the number of folders to check
+
+async function mailtrapGet(url: string, apiToken: string) {
+	const response = await fetch(url, {
+		headers: { "Api-Token": apiToken },
+		signal: AbortSignal.timeout(MAILTRAP_TIMEOUT_MS),
+	});
+
+	if (!response.ok) {
+		throw new Error(`Mailtrap API error: HTTP ${response.status}`);
+	}
+
+	return response.json();
+}
+
+// List all inboxes in the Mailtrap account,
+// up to MAILTRAP_MAX_FOLDERS_CHECKED number of folders checked
+// (to avoid excessive API calls).
+// Returns a `truncated` flag if there are more folders than checked.
+async function listMailtrapInboxAddresses(apiToken: string): Promise<{
+	inboxes: { name: string; address: string }[];
+	truncated: boolean;
+}> {
+	const folders: { id: number }[] = await mailtrapGet(
+		"https://mailtrap.io/api/inbound/folders",
+		apiToken,
+	);
+
+	const checkedFolders = folders.slice(0, MAILTRAP_MAX_FOLDERS_CHECKED);
+
+	const inboxesByFolder = await Promise.all(
+		checkedFolders.map((folder) =>
+			mailtrapGet(
+				`https://mailtrap.io/api/inbound/folders/${folder.id}/inboxes`,
+				apiToken,
+			),
+		),
+	);
+
+	return {
+		inboxes: inboxesByFolder.flat(),
+		truncated: folders.length > checkedFolders.length,
+	};
+}
+
+export const verifyMailtrapConnection = async (
+	_prev: FormState,
+	formData: FormData,
+): Promise<FormState<VerifyResult>> => {
+	return handleAction(async () => {
+		await requireWorkspaceAdmin();
+		const providerId = String(formData.get("providerId") || "").trim();
+
+		if (!providerId) {
+			return { success: false, error: "Missing provider id" };
+		}
+
+		const [providerSecret] = await fetchDecryptedSecrets({
 			linkTable: providerSecrets,
 			foreignCol: providerSecrets.providerId,
 			secretIdCol: providerSecrets.secretId,
-			parentId: String(data.provider),
+			parentId: providerId,
 		});
 
-		// We assume S3 for now since we only have S3 volumes
-		const providerType = "s3" as Providers;
-		const store = createStore(providerType, secret.parsedSecret);
-		const bucket = await store.addBucket(String(data.provider), {
-			bucket: String(data.bucketName),
-		});
+		const credentials = providerSecret?.parsedSecret;
+		const apiToken = credentials?.MAILTRAP_API_TOKEN;
 
-		if (bucket.ok) {
-			const user = await isSignedIn();
-			await rls((tx) =>
-				tx.insert(driveVolumes).values({
-					ownerId: String(user?.id),
-					label: String(data.bucketName),
-					kind: "cloud",
-					code: String(data.bucketName)?.toLowerCase(),
-					providerId: String(data.provider),
-					metaData: bucket.meta,
-				}),
-			);
+		let res: VerifyResult;
+
+		if (!apiToken) {
+			res = { ok: false, message: "No Mailtrap API token configured" };
 		} else {
-			throw new Error(`Failed to create volume: ${bucket.message}`);
+			try {
+				const { inboxes, truncated } =
+					await listMailtrapInboxAddresses(apiToken);
+
+				res = inboxes.length
+					? {
+						ok: true,
+						message: `Found ${inboxes.length} inbound inbox(es)${
+							truncated ? " (showing the first few folders)" : ""
+						}: ${inboxes.map((i) => `${i.address} (${i.name})`).join(", ")}`,
+						meta: { inboxes },
+					}
+					: {
+						ok: true,
+						message: truncated
+							? `Token is valid, but no inbound inboxes were found in the first ${MAILTRAP_MAX_FOLDERS_CHECKED} folders; additional folders were not checked.`
+							: "Token is valid, but no inbound inboxes exist on this account yet.",
+						meta: { inboxes: [] },
+					};
+			} catch (err: any) {
+				res = {
+					ok: false,
+					message: err?.message ?? "Could not reach the Mailtrap API",
+				};
+			}
 		}
 
-		// The drive volume list is cached per user.
-		await invalidateServerCache((await isSignedIn())?.id);
-		revalidatePath("/dashboard/platform/storage");
+		if (providerSecret) {
+			const session = await currentSession();
+			const workspaceId = await getWorkspaceId();
+
+			await updateSecret(session, workspaceId, providerSecret.metaId, {
+				value: JSON.stringify({ ...credentials, verified: res.ok }),
+			});
+		}
+
+		revalidatePath(DASHBOARD_PATH);
+
+		return res.ok
+			? { success: true, message: res.message, data: res }
+			: { success: false, error: res.message, data: res };
+	});
+};
+
+export async function saveCustomEmailProvider(
+	_prev: FormState,
+	formData: FormData,
+): Promise<FormState> {
+	return handleAction(async () => {
+		await requireWorkspaceAdmin();
+		const data = decode(formData);
+
+		const name = String(data.name ?? "").trim();
+		const description = String(data.description ?? "").trim();
+		const credentialMode = String(data.credentialMode ?? "shared");
+
+		const smtpHost = String(data.smtpHost ?? "").trim();
+		const smtpPort = Number(data.smtpPort);
+		const smtpSecure = data.smtpSecure === "true";
+		const smtpPool = data.smtpPool === "true";
+
+		const imapHost = String(data.imapHost ?? "").trim();
+		const imapPort = Number(data.imapPort);
+		const imapSecure = data.imapSecure === "true";
+
+		if (!name || !smtpHost || !smtpPort) {
+			return {
+				success: false,
+				error: "Provider name, SMTP host and SMTP port are required.",
+			};
+		}
+
+		const id = name
+			.toLowerCase()
+			.trim()
+			.replace(/[^a-z0-9_-]+/g, "-")
+			.replace(/^-+|-+$/g, "");
+
+		if (!id) {
+			return {
+				success: false,
+				error: "Could not create a valid provider id from the name.",
+			};
+		}
+
+		const provider = CustomEmailProviderSchema.parse({
+			id,
+			name,
+			description: description || undefined,
+			credentialMode,
+			smtp: {
+				host: smtpHost,
+				port: smtpPort,
+				secure: smtpSecure,
+				pool: smtpPool,
+			},
+			...(imapHost
+				? {
+					imap: {
+						host: imapHost,
+						port: imapPort,
+						secure: imapSecure,
+					},
+				}
+				: {}),
+		});
+
+		const existingProviders = await fetchCustomEmailProviders();
+
+		if (existingProviders.some((item) => item.id === provider.id)) {
+			return {
+				success: false,
+				error: "An email provider with this name already exists.",
+			};
+		}
+
+		const providers = [...existingProviders, provider];
+
+		const session = await currentSession();
+		const workspaceId = await getWorkspaceId();
+
+		const { canCreateProvider, reason } = await access("canCreateProvider");
+
+		if (!canCreateProvider) {
+			return {
+				success: false,
+				error: reason ?? "dashboard.providerCreationDisabled",
+			};
+		}
+
+		const rls = await rlsClient();
+
+		const [existing] = await rls((tx) =>
+			tx
+				.select()
+				.from(secretsMeta)
+				.where(
+					and(
+						eq(secretsMeta.workspaceId, workspaceId),
+						eq(
+							secretsMeta.name,
+							CUSTOM_EMAIL_PROVIDERS_SECRET_NAME,
+						),
+						eq(secretsMeta.managedBy, "user"),
+					),
+				)
+				.limit(1),
+		);
+
+		const value = JSON.stringify(providers);
+
+		if (existing) {
+			await updateSecret(session, workspaceId, existing.id, {
+				value,
+				description: "Configured email provider presets",
+			});
+		} else {
+			await createSecret(session, workspaceId, {
+				name: CUSTOM_EMAIL_PROVIDERS_SECRET_NAME,
+				value,
+				description: "Configured email provider presets",
+				managedBy: "user",
+			});
+		}
+
+		revalidatePath(DASHBOARD_PATH);
+
 		return {
 			success: true,
-			message: "Added new volume",
+			message: "Email provider added.",
+		};
+	});
+}
+
+
+export async function deleteCustomEmailProvider(
+	providerId: string,
+): Promise<FormState> {
+	return handleAction(async () => {
+		await requireWorkspaceAdmin();
+		const providers = await fetchCustomEmailProviders();
+
+		const nextProviders = providers.filter(
+			(provider) => provider.id !== providerId,
+		);
+
+		if (nextProviders.length === providers.length) {
+			return {
+				success: false,
+				error: "Email provider not found.",
+			};
+		}
+
+		const session = await currentSession();
+		const workspaceId = await getWorkspaceId();
+		const rls = await rlsClient();
+
+		const [existing] = await rls((tx) =>
+			tx
+				.select()
+				.from(secretsMeta)
+				.where(
+					and(
+						eq(secretsMeta.workspaceId, workspaceId),
+						eq(
+							secretsMeta.name,
+							CUSTOM_EMAIL_PROVIDERS_SECRET_NAME,
+						),
+						eq(secretsMeta.managedBy, "user"),
+					),
+				)
+				.limit(1),
+		);
+
+		if (!existing) {
+			return {
+				success: false,
+				error: "Configured email provider secret not found.",
+			};
+		}
+
+		if (nextProviders.length === 0) {
+			await deleteSecretAdmin(existing.id);
+		} else {
+			await updateSecret(session, workspaceId, existing.id, {
+				value: JSON.stringify(nextProviders),
+				description: "Configured email provider presets",
+			});
+		}
+
+		revalidatePath(DASHBOARD_PATH);
+
+		return {
+			success: true,
+			message: "Email provider removed.",
 		};
 	});
 }

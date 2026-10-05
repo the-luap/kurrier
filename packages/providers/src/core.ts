@@ -1,5 +1,5 @@
-import type { IdentityStatus } from "@schema";
 import { z } from "zod";
+import { IdentityStatus } from "@schema";
 
 export type VerifyResult = {
 	ok: boolean;
@@ -133,14 +133,15 @@ export interface Mailer {
 	sendEmail(
 		to: string[],
 		opts: {
+			cc?: string[];
+			bcc?: string[];
 			subject: string;
 			text: string;
 			html: string;
 			from: string;
-			cc?: string[];
-			bcc?: string[];
 			inReplyTo: string;
 			references: string[];
+			headers?: Record<string, string>;
 			attachments?: { name: string; content: Blob; contentType: string }[];
 		},
 	): Promise<{ success: boolean; MessageId?: string; error?: string }>;
@@ -270,3 +271,43 @@ export interface StorageProvider {
 		input: { bucket: string; path: string },
 	): Promise<AddFolderResult>;
 }
+
+export const RawGoogleConfigSchema = z
+	.union([
+		z.string(),
+		z.object({
+			GOOGLE_IDENTITY_ID: z.string().optional(),
+			identityId: z.string().optional(),
+		}),
+	])
+	.transform((r) => {
+		if (typeof r === "string") return { identityId: r };
+
+		return {
+			identityId: r.identityId ?? r.GOOGLE_IDENTITY_ID ?? "",
+		};
+	})
+	.refine((r) => r.identityId.length > 0, {
+		message: "Google identityId is required",
+	});
+
+export type GoogleConfig = z.infer<typeof RawGoogleConfigSchema>;
+
+export const RawJmapConfigSchema = z
+	.object({
+		token: z.string(),
+		sessionUrl: z.string().url(),
+		accountId: z.string(),
+		username: z.string(),
+	})
+	.refine((r) => r.token.length > 0, {
+		message: "JMAP token is required",
+	})
+	.refine((r) => r.accountId.length > 0, {
+		message: "JMAP accountId is required",
+	})
+	.refine((r) => r.username.length > 0, {
+		message: "JMAP username is required",
+	});
+
+export type JmapConfig = z.infer<typeof RawJmapConfigSchema>;

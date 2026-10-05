@@ -1,47 +1,47 @@
-import { generateSnippet, upsertMailboxThreadItem } from "@common";
-import { getMessageAddress, getMessageName } from "@common/mail-client";
-import {
-	type AddressObjectJSON,
-	type ComposeMode,
-	getPublicEnv,
-	getServerEnv,
-	type MailComposeInput,
-} from "@schema";
 import { defineNitroPlugin } from "nitropack/runtime";
-
+import {
+	AddressObjectJSON,
+	ComposeMode,
+	getServerEnv,
+	MailComposeInput,
+} from "@schema";
+import { getMessageAddress, getMessageName } from "@common/mail-client";
+import { generateSnippet, upsertMailboxThreadItem } from "@common";
 const serverConfig = getServerEnv();
-const publicConfig = getPublicEnv();
-
+import { Worker } from "bullmq";
 import {
 	db,
 	decryptAdminSecrets,
 	draftMessages,
 	identities,
-	MessageAttachmentInsertSchema,
-	type MessageCreate,
-	MessageInsertSchema,
 	mailboxes,
+	MessageAttachmentInsertSchema,
 	messageAttachments,
+	MessageCreate,
+	MessageInsertSchema,
 	messages,
-	providerSecrets,
 	providers,
-	smtpAccountSecrets,
+	providerSecrets,
 	smtpAccounts,
+	smtpAccountSecrets,
 	threads,
+	getSecretAdmin,
+	jmapAccounts,
+	workspaceMembers,
+	workspaces,
 } from "@db";
 import { createMailer } from "@providers";
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { Worker } from "bullmq";
 import { and, eq, inArray, isNotNull } from "drizzle-orm";
-
-const supabase = createClient(
-	publicConfig.API_URL,
-	serverConfig.SERVICE_ROLE_KEY,
-);
-
+import { randomUUID } from "node:crypto";
 import addressparser from "addressparser";
-import type { PgTransaction } from "drizzle-orm/pg-core";
 import { getRedis, workerOptions } from "../../lib/get-redis";
+import {GetObjectCommand, PutObjectCommand} from "@aws-sdk/client-s3";
+import {s3} from "../../lib/create-s3-client";
+import MailComposer from "nodemailer/lib/mail-composer/index.js";
+
+type DbTransaction = Parameters<
+	Parameters<typeof db.transaction>[0]
+>[0];
 
 type AttachmentDownload = {
 	item: ReturnType<typeof MessageAttachmentInsertSchema.parse>;
@@ -49,6 +49,9 @@ type AttachmentDownload = {
 	name: string;
 	sizeBytes: number;
 	contentType?: string;
+	/** Attachment of the forwarded original (stored under its own key). */
+	forwarded?: boolean;
+	buffer?: Buffer;
 };
 
 export default defineNitroPlugin(async (nitroApp) => {
@@ -59,9 +62,18 @@ export default defineNitroPlugin(async (nitroApp) => {
 				case "send-scheduled-draft":
 					await processDraft(job.data);
 					return { success: true };
-				case "send-and-reconcile":
-					// Propagate provider errors to the UI instead of reporting success.
-					return (await send(job.data)) ?? { success: true };
+				// case "send-and-reconcile":
+				// 	await send(job.data);
+				// 	return { success: true };
+				case "send-and-reconcile": {
+					const result = await send(job.data);
+					if (!result.success) {
+						throw new Error(
+							result.error ?? "Failed to send email",
+						);
+					}
+					return result;
+				}
 				default:
 					return { success: true };
 			}
@@ -76,7 +88,12 @@ export default defineNitroPlugin(async (nitroApp) => {
 		console.error(`[send-mail] ${job?.id} failed: ${err?.message}`);
 	});
 
-	const getOriginalMessage = async (decodedForm: Record<any, any>) => {
+	// Only messages of the sending identity's workspace may be quoted or
+	// replied to (the id comes from the client).
+	const getOriginalMessage = async (
+		decodedForm: Record<any, any>,
+		workspaceId: string,
+	) => {
 		const [message] = await db
 			.select({
 				message: messages,
@@ -90,27 +107,34 @@ export default defineNitroPlugin(async (nitroApp) => {
 			.leftJoin(identities, eq(mailboxes.identityId, identities.id))
 			.leftJoin(providers, eq(identities.providerId, providers.id))
 			.leftJoin(smtpAccounts, eq(identities.smtpAccountId, smtpAccounts.id))
-			.where(eq(messages.id, String(decodedForm.originalMessageId)));
+			.where(
+				and(
+					eq(messages.id, String(decodedForm.originalMessageId)),
+					eq(messages.workspaceId, workspaceId),
+				),
+			);
 
 		return message;
 	};
 
 	type GetOriginalMessageType = Awaited<ReturnType<typeof getOriginalMessage>>;
 
-	async function ensureThreadId(ownerId: string, tx: PgTransaction<any>) {
+	async function ensureThreadId(ownerId: string, workspaceId: string, tx: DbTransaction) {
 		const [t] = await tx
 			.insert(threads)
 			.values({
 				ownerId,
+				workspaceId,
 				lastMessageDate: new Date(),
 			})
 			.returning({ id: threads.id });
 		return t.id;
 	}
 
-	// Form fields arrive as comma separated strings (Mantine TagsInput) or arrays.
-	// Parse them with addressparser so "Name, Jr. <a@b.c>" stays one recipient.
-	// Only bare addresses go to the providers (some reject unencoded names).
+	// Form fields arrive as comma separated strings (Mantine TagsInput) or
+	// arrays. Parse them with addressparser so "Name, Jr. <a@b.c>" stays one
+	// recipient and missing cc/bcc become [] instead of [undefined]. Only bare
+	// addresses go to the providers (some reject unencoded names).
 	function toArray(input: unknown): string[] {
 		const list = Array.isArray(input) ? input : [input];
 		const out: string[] = [];
@@ -165,8 +189,8 @@ export default defineNitroPlugin(async (nitroApp) => {
 	}
 
 	const processDraft = async ({
-		draftMessageId,
-	}: {
+									draftMessageId,
+								}: {
 		draftMessageId: string;
 	}) => {
 		const [draft] = await db
@@ -188,12 +212,36 @@ export default defineNitroPlugin(async (nitroApp) => {
 			)
 			.returning({ id: draftMessages.id });
 
-		if (claimed.length === 0) return;
+		if (claimed.length === 0) {
+			// A worker that died mid-send leaves the draft in "sending" and the
+			// stalled job comes back here. Whether the mail went out is unknown:
+			// do not send it again, but do not leave it hanging either.
+			if (draft.status === "sending") {
+				await db
+					.update(draftMessages)
+					.set({
+						status: "failed",
+						payload: {
+							...draft.payload,
+							__error:
+								"Sending was interrupted. Check the Sent folder before retrying.",
+						},
+						updatedAt: new Date(),
+					})
+					.where(
+						and(
+							eq(draftMessages.id, draft.id),
+							eq(draftMessages.status, "sending"),
+						),
+					);
+			}
+			return;
+		}
 
 		try {
 			const result = await send(draft.payload);
-			if (result && result.success === false) {
-				throw new Error(result.error || "Failed to send email");
+			if (!result.success) {
+				throw new Error(result.error ?? "Failed to send email");
 			}
 
 			await db
@@ -217,7 +265,9 @@ export default defineNitroPlugin(async (nitroApp) => {
 		}
 	};
 
-	const send = async (decodedForm: Record<any, unknown>) => {
+	const send = async (
+		decodedForm: Record<any, unknown>,
+	): Promise<{ success: boolean; error?: string }> => {
 		let indexMessageId: string | null = null;
 		const result = await db.transaction(async (tx) => {
 			const [mailbox] = await tx
@@ -233,39 +283,112 @@ export default defineNitroPlugin(async (nitroApp) => {
 				.leftJoin(smtpAccounts, eq(identities.smtpAccountId, smtpAccounts.id))
 				.where(eq(mailboxes.id, String(decodedForm.sentMailboxId)));
 
-			if (!mailbox) {
+			if (!mailbox?.identity) {
 				throw new Error("Mailbox not found");
 			}
 
-			const [secrets] = mailbox.identity.providerId
-				? await decryptAdminSecrets({
+			// Routing comes from the DB, not from the payload: the sent mailbox
+			// must belong to the sending identity (when the payload names one)
+			// and to the identity's workspace. Sender address, owner and
+			// workspace are always the identity's (see below).
+			if (
+				decodedForm.identityId !== undefined &&
+				decodedForm.identityId !== null &&
+				decodedForm.identityId !== "" &&
+				String(decodedForm.identityId) !== mailbox.identity.id
+			) {
+				throw new Error("Sent mailbox does not belong to the sending identity");
+			}
+			if (mailbox.mailbox.workspaceId !== mailbox.identity.workspaceId) {
+				throw new Error("Sent mailbox is not in the identity's workspace");
+			}
+
+			const providerType =
+				mailbox.provider?.type ?? "smtp";
+
+			let credentials: Record<string, unknown>;
+
+			if (providerType === "jmap") {
+				const [jmapAccount] = await tx
+					.select()
+					.from(jmapAccounts)
+					.where(
+						and(
+							eq(
+								jmapAccounts.identityId,
+								mailbox.identity.id,
+							),
+							eq(
+								jmapAccounts.workspaceId,
+								mailbox.identity.workspaceId,
+							),
+						),
+					)
+					.limit(1);
+
+				if (!jmapAccount) {
+					throw new Error(
+						"JMAP account not found for identity",
+					);
+				}
+
+				const { vault } = await getSecretAdmin(
+					jmapAccount.tokenSecretId,
+				);
+
+				credentials = {
+					token: vault.decrypted_secret,
+					sessionUrl: jmapAccount.sessionUrl,
+					accountId: jmapAccount.accountId,
+					username: jmapAccount.username,
+				};
+			} else {
+				const [secrets] = mailbox.identity.providerId
+					? await decryptAdminSecrets({
 						linkTable: providerSecrets,
 						foreignCol: providerSecrets.providerId,
 						secretIdCol: providerSecrets.secretId,
 						ownerId: mailbox.identity.ownerId,
-						parentId: String(mailbox.identity.providerId),
+						parentId: String(
+							mailbox.identity.providerId,
+						),
 					})
-				: await decryptAdminSecrets({
+					: await decryptAdminSecrets({
 						linkTable: smtpAccountSecrets,
 						foreignCol: smtpAccountSecrets.accountId,
 						secretIdCol: smtpAccountSecrets.secretId,
 						ownerId: mailbox.identity.ownerId,
-						parentId: String(mailbox.identity.smtpAccountId),
+						parentId: String(
+							mailbox.identity.smtpAccountId,
+						),
 					});
 
-			const credentials = secrets?.vault?.decrypted_secret
-				? JSON.parse(secrets.vault.decrypted_secret)
-				: {};
+				credentials =
+					secrets?.vault?.decrypted_secret
+						? JSON.parse(
+							secrets.vault.decrypted_secret,
+						)
+						: {};
+			}
 
 			const mailer = createMailer(
-				mailbox.provider ? mailbox.provider.type : "smtp",
+				providerType,
 				credentials,
 			);
 
+			//
+
+
 			const attachmentBlobs = await fetchAttachmentBlobs(
-				supabase,
 				decodedForm.attachments as string,
-				mailbox.identity.ownerId,
+				{
+					identityOwnerId: mailbox.identity.ownerId,
+					workspaceId: mailbox.identity.workspaceId,
+				},
+				// Forwarding may include the original's attachments.
+				decodedForm.mode === "forward" && decodedForm.originalMessageId
+					? String(decodedForm.originalMessageId)
+					: null,
 			);
 
 			const data: MailComposeInput = {
@@ -284,34 +407,20 @@ export default defineNitroPlugin(async (nitroApp) => {
 				(data.mode === "reply" || data.mode === "forward") &&
 				decodedForm.originalMessageId
 			) {
-				origRow = await getOriginalMessage(decodedForm);
+				origRow =
+					(await getOriginalMessage(
+						decodedForm,
+						mailbox.identity.workspaceId,
+					)) ?? null;
 			}
 
 			const { subject, text, html } = await generateMailAttrs({
 				data,
 				orig: origRow,
-				ownerId: mailbox.identity.ownerId,
+				workspaceId: mailbox.identity.workspaceId,
 			});
 
-			// Forwarding: include the attachments of the original message the
-			// user kept in the editor.
-			if (data.mode === "forward" && origRow?.message) {
-				const forwardIds = String(decodedForm.forwardAttachmentIds ?? "")
-					.split(",")
-					.map((v) => v.trim())
-					.filter(Boolean);
-				if (forwardIds.length > 0) {
-					attachmentBlobs.push(
-						...(await fetchForwardedAttachments(
-							origRow.message.id,
-							forwardIds,
-							mailbox.identity.ownerId,
-						)),
-					);
-				}
-			}
-
-			const mailboxIdForMessage = String(decodedForm.sentMailboxId);
+			const mailboxIdForMessage = mailbox.mailbox.id;
 
 			let threadIdForMessage: string;
 
@@ -321,7 +430,8 @@ export default defineNitroPlugin(async (nitroApp) => {
 			} else {
 				threadIdForMessage = await ensureThreadId(
 					mailbox.identity.ownerId,
-					tx as PgTransaction<any>,
+					mailbox.mailbox.workspaceId,
+					tx,
 				);
 			}
 
@@ -333,19 +443,20 @@ export default defineNitroPlugin(async (nitroApp) => {
 			const references =
 				data.mode === "reply" && origRow?.message
 					? Array.from(
-							new Set(
-								[
-									...(Array.isArray(origRow.message.references)
-										? origRow.message.references
-										: []),
-									origRow.message.messageId ?? null,
-								].filter(Boolean),
-							),
-						).slice(-30)
+						new Set(
+							[
+								...(Array.isArray(origRow.message.references)
+									? origRow.message.references
+									: []),
+								origRow.message.messageId ?? null,
+							].filter(Boolean),
+						),
+					).slice(-30)
 					: [];
 
 			const newMessageBody = MessageInsertSchema.parse({
 				mailboxId: mailboxIdForMessage,
+				workspaceId: mailbox.mailbox.workspaceId,
 				threadId: threadIdForMessage,
 				messageId: "PLACEHOLDER",
 				inReplyTo: inReplyTo ?? undefined,
@@ -362,6 +473,14 @@ export default defineNitroPlugin(async (nitroApp) => {
 				ownerId: mailbox.identity.ownerId,
 				seen: true,
 			});
+			if (
+				typeof decodedForm.apiMessageId === "string" &&
+				/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+					decodedForm.apiMessageId,
+				)
+			) {
+				newMessageBody.id = decodedForm.apiMessageId;
+			}
 
 			const mailerResponse = await mailer.sendEmail(data.to, {
 				from: mailbox.identity.value,
@@ -380,29 +499,104 @@ export default defineNitroPlugin(async (nitroApp) => {
 			});
 
 			if (mailerResponse.success) {
+				// String(undefined) is "undefined": every send through a provider
+				// that returns no id collided on (mailbox_id, message_id).
+				const sentMessageId = mailerResponse.MessageId
+					? String(mailerResponse.MessageId)
+					: `<${randomUUID()}@kurrier.local>`;
+				// The mail is out. Store the sent copy in a savepoint: a DB error
+				// here must not roll back / fail the job (the user or a retry
+				// would send the mail a second time).
+				try {
+				await tx.transaction(async (sp) => {
 				const parsedMessage = MessageInsertSchema.parse({
 					...newMessageBody,
-					messageId: String(mailerResponse.MessageId) || `msg-${Date.now()}`,
+					messageId: sentMessageId,
 				});
 
-				const [newMessage] = await tx
+				const [newMessage] = await sp
 					.insert(messages)
 					.values(parsedMessage as MessageCreate)
 					.returning();
 
-				if (attachmentBlobs.length) {
-					await tx.insert(messageAttachments).values(
-						attachmentBlobs.map((attachmentBlob) => ({
-							...attachmentBlob.item,
-							ownerId: newMessage.ownerId,
-							messageId: newMessage.id,
-						})),
+
+				// The mail is already sent: a failed EML build/upload must not roll
+				// back the stored message (the user would send it again).
+				try {
+					const emlBuffer = await buildEmlBuffer({
+						messageId: sentMessageId,
+						from: mailbox.identity.value,
+						to: data.to || [],
+						cc: data.cc || [],
+						bcc: data.bcc || [],
+						subject: String(newMessage.subject || "(no subject)"),
+						text: newMessage.text,
+						html: newMessage.html,
+						inReplyTo,
+						references,
+						attachments: attachmentBlobs,
+					});
+					const rawStorageKey = `eml/${newMessage.ownerId}/${newMessage.mailboxId}/${newMessage.id}.eml`;
+					await s3.send(
+						new PutObjectCommand({
+							Bucket: serverConfig.S3_BUCKET,
+							Key: rawStorageKey,
+							Body: emlBuffer,
+							ContentType: "message/rfc822",
+						}),
 					);
+					await sp
+						.update(messages)
+						.set({
+							rawStorageKey,
+							sizeBytes: emlBuffer.length,
+						})
+						.where(eq(messages.id, newMessage.id));
+				} catch (error) {
+					console.error("[send-mail] failed to store sent EML", error);
 				}
 
-				await upsertMailboxThreadItem(newMessage.id, tx);
+
+
+
+				if (attachmentBlobs.length) {
+					// Forwarded attachments get their own copy: (bucket, path) is
+					// unique and the original may be deleted independently.
+					const items = (
+						await Promise.all(
+							attachmentBlobs.map(async (attachmentBlob) => {
+								if (!attachmentBlob.forwarded) return attachmentBlob.item;
+								const path = await storeForwardedCopy(
+									attachmentBlob,
+									newMessage.ownerId,
+									newMessage.id,
+								);
+								return path ? { ...attachmentBlob.item, path } : null;
+							}),
+						)
+					).filter((item) => item !== null);
+					if (items.length) {
+						await sp.insert(messageAttachments).values(
+							items.map((item) => ({
+								...item,
+								ownerId: newMessage.ownerId,
+								workspaceId: mailbox.mailbox.workspaceId,
+								messageId: newMessage.id,
+							})),
+						);
+					}
+				}
+
+				await upsertMailboxThreadItem(newMessage.id, sp);
 
 				indexMessageId = newMessage.id;
+				});
+				} catch (error) {
+					console.error(
+						"[send-mail] mail was sent but storing the sent copy failed",
+						error,
+					);
+				}
 			} else {
 				// Some providers only return { success: false } without details.
 				return {
@@ -416,9 +610,10 @@ export default defineNitroPlugin(async (nitroApp) => {
 		});
 
 		// Enqueue indexing only after the transaction committed: from inside it
-		// the search worker could run before the message row was visible.
-		// The mail is already sent at this point: a failed enqueue must not turn
-		// the result into an error (the user would send it again).
+		// a Redis error rolled back the row of a mail that was already sent, and
+		// the search worker could run before the row was visible. The mail is
+		// sent at this point, so a failed enqueue must not turn the result into
+		// an error (the user would send it again).
 		if (indexMessageId) {
 			try {
 				const { searchIngestQueue } = await getRedis();
@@ -435,13 +630,13 @@ export default defineNitroPlugin(async (nitroApp) => {
 	};
 
 	const generateMailAttrs = async ({
-		data,
-		orig,
-		ownerId,
-	}: {
+										 data,
+										 orig,
+										 workspaceId,
+									 }: {
 		data: MailComposeInput;
 		orig: GetOriginalMessageType | null;
-		ownerId: string;
+		workspaceId: string;
 	}) => {
 		if (!orig) {
 			return {
@@ -470,30 +665,31 @@ export default defineNitroPlugin(async (nitroApp) => {
 		// Human-friendly fallback
 		const origDateLabel = rawDate
 			? new Date(rawDate).toLocaleString(undefined, {
-					year: "numeric",
-					month: "short",
-					day: "2-digit",
-					hour: "2-digit",
-					minute: "2-digit",
-				})
+				year: "numeric",
+				month: "short",
+				day: "2-digit",
+				hour: "2-digit",
+				minute: "2-digit",
+			})
 			: "";
 
 		const origHtml = hasOrig
 			? await inlineCidImages(
-					origMsg!.html || origMsg!.textAsHtml || "",
-					origMsg!.id,
-					ownerId,
-				)
+				origMsg!.html || origMsg!.textAsHtml || "",
+				origMsg!.id,
+				workspaceId,
+			)
 			: "";
 		const origText = hasOrig ? origMsg!.text || "" : "";
 
 		// Subject
-		// The compose form pre-fills "Re:"/"Fwd:" subjects; honour user edits.
+		// The composer pre-fills "Re:"/"Fwd:" subjects; honour user edits and
+		// only derive one from the original when the subject is empty.
 		const baseSubj = (data.subject ?? "").trim();
 		let subject = baseSubj;
 		if (!baseSubj && isReply && hasOrig) {
 			const s = (origMsg!.subject ?? "").trim();
-			subject = /^re\s*:/i.test(s) ? s : `Re: ${s || "(no subject)"}`;
+			subject = /^(re|aw)\s*:/i.test(s) ? s : `Re: ${s || "(no subject)"}`;
 		} else if (!baseSubj && isForward && hasOrig) {
 			const s = (origMsg!.subject ?? "").trim();
 			subject = /^(fwd?|wg)\s*:/i.test(s) ? s : `Fwd: ${s || "(no subject)"}`;
@@ -505,11 +701,13 @@ export default defineNitroPlugin(async (nitroApp) => {
 		const attribution = `On ${origDateLabel}, ${fromNameStr ? `${fromNameStr} ` : ""}<${fromAddrStr}> wrote:`;
 		const quotedText = hasOrig
 			? `${attribution}\n${origText
-					.split(/\r?\n/)
-					.map((line: string) => (line ? `> ${line}` : ">"))
-					.join("\n")}`
+				.split(/\r?\n/)
+				.map((line: string) => (line ? `> ${line}` : ">"))
+				.join("\n")}`
 			: "";
 
+		// The attribution and plain text come from the original sender: escape
+		// them. Only the <body> content of the original HTML is nested.
 		const quotedHtml = hasOrig
 			? `<br><div class="kurrier_quote">
 <p>${escapeHtml(attribution)}</p>
@@ -535,13 +733,24 @@ ${origHtml ? extractBodyHtml(origHtml) : `<pre style="white-space:pre-wrap;margi
 		return { subject, text, html };
 	};
 
-	// Inline images of stored messages reference their attachment via "cid:".
-	// Quoted in a reply/forward those references would break, so embed them
-	// as data URIs (bounded, so huge mails do not explode).
+
+	async function streamToBuffer(stream: any): Promise<Buffer> {
+		return await new Promise((resolve, reject) => {
+			const chunks: any[] = [];
+			stream.on("data", (chunk: any) => chunks.push(chunk));
+			stream.on("error", reject);
+			stream.on("end", () => resolve(Buffer.concat(chunks)));
+		});
+	}
+
+	// Inline images of stored messages reference their attachment via "cid:"
+	// (messages are parsed with keepCidLinks). Quoted in a reply/forward those
+	// references would break, so embed them as data URIs (bounded, so huge
+	// mails do not explode).
 	async function inlineCidImages(
 		html: string,
 		messageId: string,
-		ownerId: string,
+		workspaceId: string,
 	): Promise<string> {
 		if (!html || !/cid:/i.test(html)) return html;
 		const rows = await db
@@ -550,7 +759,7 @@ ${origHtml ? extractBodyHtml(origHtml) : `<pre style="white-space:pre-wrap;margi
 			.where(
 				and(
 					eq(messageAttachments.messageId, messageId),
-					eq(messageAttachments.ownerId, ownerId),
+					eq(messageAttachments.workspaceId, workspaceId),
 					isNotNull(messageAttachments.cid),
 				),
 			);
@@ -558,126 +767,260 @@ ${origHtml ? extractBodyHtml(origHtml) : `<pre style="white-space:pre-wrap;margi
 		let out = html;
 		for (const row of rows) {
 			const cid = String(row.cid).replace(/^<|>$/g, "");
-			if (!cid || !(row.sizeBytes ?? 0) || (row.sizeBytes ?? 0) > budget)
-				continue;
-			const { data: blob } = await supabase.storage
-				.from(String(row.bucketId || "attachments"))
-				.download(String(row.path));
-			if (!blob) continue;
-			budget -= blob.size;
-			const b64 = Buffer.from(await blob.arrayBuffer()).toString("base64");
-			const uri = `data:${row.contentType || "application/octet-stream"};base64,${b64}`;
-			const escaped = cid.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-			out = out.replace(new RegExp(`cid:${escaped}`, "gi"), uri);
+			const size = Number(row.sizeBytes ?? 0);
+			if (!cid || !size || size > budget) continue;
+			try {
+				const response = await s3.send(
+					new GetObjectCommand({
+						Bucket: serverConfig.S3_BUCKET,
+						Key: String(row.path),
+					}),
+				);
+				if (!response.Body) continue;
+				const buffer = await streamToBuffer(response.Body);
+				budget -= buffer.length;
+				const uri = `data:${row.contentType || "application/octet-stream"};base64,${buffer.toString("base64")}`;
+				const escaped = cid.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+				out = out.replace(new RegExp(`cid:${escaped}`, "gi"), uri);
+			} catch (err) {
+				console.warn("[send-mail] could not inline quoted cid image", {
+					messageId,
+					path: row.path,
+					error: (err as Error)?.message,
+				});
+			}
 		}
 		return out;
 	}
 
-	async function fetchForwardedAttachments(
+	/**
+	 * Users whose upload folder (`private/<userId>/`) the sender may attach
+	 * from: the identity owner and the members of the identity's workspace.
+	 */
+	async function allowedUploadOwners(opts: {
+		identityOwnerId: string;
+		workspaceId: string;
+	}) {
+		const allowed = new Set<string>([opts.identityOwnerId]);
+		const [workspace] = await db
+			.select({ ownerId: workspaces.ownerId })
+			.from(workspaces)
+			.where(eq(workspaces.id, opts.workspaceId))
+			.limit(1);
+		if (workspace?.ownerId) allowed.add(workspace.ownerId);
+		const members = await db
+			.select({ userId: workspaceMembers.userId })
+			.from(workspaceMembers)
+			.where(eq(workspaceMembers.workspaceId, opts.workspaceId));
+		for (const m of members) allowed.add(m.userId);
+		return allowed;
+	}
+
+	/**
+	 * Attachments of the forwarded original, by storage path. Only messages of
+	 * the sending identity's workspace (the id comes from the client).
+	 */
+	async function forwardableAttachments(
 		originalMessageId: string,
-		ids: string[],
-		ownerId: string,
-	): Promise<AttachmentDownload[]> {
+		workspaceId: string,
+		paths: string[],
+	) {
+		if (paths.length === 0) return new Map<string, typeof messageAttachments.$inferSelect>();
 		const rows = await db
 			.select()
 			.from(messageAttachments)
 			.where(
 				and(
 					eq(messageAttachments.messageId, originalMessageId),
-					eq(messageAttachments.ownerId, ownerId),
-					inArray(messageAttachments.id, ids),
+					eq(messageAttachments.workspaceId, workspaceId),
+					inArray(messageAttachments.path, paths),
 				),
 			);
-		return Promise.all(
-			rows.map(async (row): Promise<AttachmentDownload> => {
-				const { data: blob, error } = await supabase.storage
-					.from(String(row.bucketId || "attachments"))
-					.download(String(row.path));
-				if (error || !blob) {
-					throw new Error(
-						`Could not load attachment "${row.filenameOriginal ?? row.path}" to forward`,
-					);
-				}
-				const item = MessageAttachmentInsertSchema.parse({
-					bucketId: row.bucketId,
-					path: row.path,
-					filenameOriginal: row.filenameOriginal,
-					contentType: row.contentType,
-					sizeBytes: row.sizeBytes,
-					checksum: row.checksum,
-					disposition: "attachment",
-				});
-				return {
-					item,
-					blob,
-					name: String(row.filenameOriginal || "attachment"),
-					sizeBytes: Number(row.sizeBytes ?? blob.size),
-				};
-			}),
-		);
+		return new Map(rows.map((row) => [row.path, row]));
+	}
+
+	/** Copies a forwarded attachment under the sent message; null on failure. */
+	async function storeForwardedCopy(
+		attachment: AttachmentDownload,
+		ownerId: string,
+		messageId: string,
+	): Promise<string | null> {
+		const safeName =
+			attachment.name.replace(/[^\w.-]+/g, "_").slice(-120) || "attachment";
+		const key = `private/${ownerId}/${messageId}/${randomUUID()}-${safeName}`;
+		try {
+			await s3.send(
+				new PutObjectCommand({
+					Bucket: serverConfig.S3_BUCKET,
+					Key: key,
+					Body:
+						attachment.buffer ??
+						Buffer.from(await attachment.blob.arrayBuffer()),
+					ContentType: String(
+						attachment.item.contentType || "application/octet-stream",
+					),
+				}),
+			);
+			return key;
+		} catch (error) {
+			// The mail is already sent; only the stored copy is missing.
+			console.error("[send-mail] could not store forwarded attachment", {
+				messageId,
+				error: (error as Error)?.message,
+			});
+			return null;
+		}
 	}
 
 	async function fetchAttachmentBlobs(
-		supabase: SupabaseClient,
 		attachmentsString: string,
-		ownerId: string,
+		owner: { identityOwnerId: string; workspaceId: string },
+		forwardedFromMessageId: string | null = null,
 	): Promise<AttachmentDownload[]> {
 		let attachments: unknown = [];
 		try {
 			attachments = attachmentsString ? JSON.parse(attachmentsString) : [];
 		} catch {
-			return [];
+			throw new Error("Invalid attachments payload");
 		}
 
 		const list = Array.isArray(attachments) ? attachments : [];
-		const candidates = list.filter((a: any) => a && a.bucketId && a.path);
+		const candidates = list.filter((a: any) => a && a.path);
 
 		if (candidates.length === 0) return [];
 
-		// The list comes from the browser and is downloaded with the service
-		// role: only allow files from the sender's own upload folder.
-		const ownPrefix = `private/${ownerId}/`;
+		// The list comes from the browser (or API caller) and is downloaded with
+		// the worker's bucket credentials: only allow files from the upload
+		// folder of a user of the sending identity's workspace
+		// (`private/<userId>/...`), never other users' EMLs or attachments.
+		// When forwarding, attachments of the original message (same
+		// workspace, verified against message_attachments) are allowed too.
+		const allowed = await allowedUploadOwners(owner);
+		const forwarded = forwardedFromMessageId
+			? await forwardableAttachments(
+					forwardedFromMessageId,
+					owner.workspaceId,
+					(candidates as any[]).map((a) => String(a.path)),
+				)
+			: new Map<string, typeof messageAttachments.$inferSelect>();
 		for (const a of candidates as any[]) {
 			const path = String(a.path);
+			if (forwarded.has(path)) continue;
+			const [prefix, userId, ...rest] = path.split("/");
 			if (
-				String(a.bucketId) !== "attachments" ||
-				!path.startsWith(ownPrefix) ||
-				path.includes("..")
+				prefix !== "private" ||
+				!userId ||
+				!allowed.has(userId) ||
+				rest.length === 0 ||
+				path.includes("..") ||
+				path.includes("//")
 			) {
 				throw new Error("Invalid attachment");
 			}
 		}
 
-		{
-			const downloads = await Promise.all(
-				candidates.map(async (attachment: any): Promise<AttachmentDownload> => {
-					const { data: blob, error } = await supabase.storage
-						.from(String(attachment.bucketId))
-						.download(String(attachment.path));
+		// A failed download aborts sending instead of silently sending the
+		// mail without its attachments.
+		return await Promise.all(
+			candidates.map(async (attachment: any): Promise<AttachmentDownload> => {
+				const original = forwarded.get(String(attachment.path));
+				const command = new GetObjectCommand({
+					// Stored attachments all live in S3_BUCKET; message_attachments
+					// rows of received mail carry a logical bucketId ("attachments").
+					Bucket: serverConfig.S3_BUCKET,
+					Key: String(attachment.path),
+				});
 
-					if (error || !blob) {
-						throw new Error(
-							`Failed to download "${attachment.path}": ${error?.message ?? "unknown error"}`,
-						);
-					}
+				const response = await s3.send(command);
 
-					const sizeBytes = Number(attachment.sizeBytes ?? blob.size);
+				if (!response.Body) {
+					throw new Error(`Failed to download "${attachment.path}"`);
+				}
 
-					const item = MessageAttachmentInsertSchema.parse(attachment);
+				const buffer = await streamToBuffer(response.Body);
 
+				if (original) {
+					// Name and type from the stored original, not the client.
+					const contentType =
+						original.contentType || "application/octet-stream";
+					const name = original.filenameOriginal || "attachment";
 					return {
-						item,
-						blob,
-						name: String(attachment.filenameOriginal || "attachment"),
-						sizeBytes,
-						// contentType,
+						item: MessageAttachmentInsertSchema.parse({
+							messageId: original.messageId,
+							bucketId: serverConfig.S3_BUCKET,
+							path: original.path,
+							filenameOriginal: name,
+							contentType,
+							sizeBytes: buffer.length,
+							checksum: original.checksum,
+						}),
+						blob: new Blob([new Uint8Array(buffer)], { type: contentType }),
+						name,
+						sizeBytes: buffer.length,
+						forwarded: true,
+						buffer,
 					};
-				}),
-			);
+				}
 
-			// A failed download aborts sending instead of silently dropping it.
-			return downloads;
-		}
+				const item = MessageAttachmentInsertSchema.parse(attachment);
+				const uint8 = new Uint8Array(buffer);
+
+				return {
+					item,
+					blob: new Blob([uint8], {
+						type: String(attachment.contentType || "application/octet-stream"),
+					}),
+					name: String(attachment.filenameOriginal || "attachment"),
+					sizeBytes: buffer.length,
+				};
+			}),
+		);
+	}
+
+
+	async function blobToBuffer(blob: Blob) {
+		return Buffer.from(await blob.arrayBuffer());
+	}
+
+	async function buildEmlBuffer(opts: {
+		messageId: string;
+		from: string;
+		to: string[];
+		cc?: string[];
+		bcc?: string[];
+		subject: string;
+		text?: string | null;
+		html?: string | null;
+		inReplyTo?: string | null;
+		references?: string[];
+		attachments: AttachmentDownload[];
+	}) {
+		const composer = new MailComposer({
+			messageId: opts.messageId,
+			from: opts.from,
+			to: opts.to,
+			cc: opts.cc,
+			bcc: opts.bcc,
+			subject: opts.subject,
+			text: opts.text || "",
+			html: opts.html || "",
+			inReplyTo: opts.inReplyTo || undefined,
+			references: opts.references?.length ? opts.references : undefined,
+			attachments: await Promise.all(
+				opts.attachments.map(async (att) => ({
+					filename: att.name,
+					content: await blobToBuffer(att.blob),
+					contentType: String(att.item.contentType || "application/octet-stream"),
+				})),
+			),
+		});
+
+		return await new Promise<Buffer>((resolve, reject) => {
+			composer.compile().build((err, message) => {
+				if (err) reject(err);
+				else resolve(message);
+			});
+		});
 	}
 
 	nitroApp.hooks.hookOnce("close", async () => {

@@ -1,8 +1,14 @@
 "use client";
 
-import * as React from "react";
-import { cn } from "@/lib/utils";
-import { Button } from "@/components/ui/button";
+import { Button } from "@mantine/core";
+import type { FormState } from "@schema";
+import { IconBrandGoogle, IconLogin2 } from "@tabler/icons-react";
+import { Loader2Icon } from "lucide-react";
+import Form from "next/form";
+import Link from "next/link";
+import type * as React from "react";
+import { useActionState } from "react";
+import { useSiteFeatures } from "@/components/providers/site-features-provider";
 import {
 	Card,
 	CardContent,
@@ -13,18 +19,24 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { login } from "@/lib/actions/auth";
-import Link from "next/link";
-import { useActionState } from "react";
-import Form from "next/form";
-import { Loader2Icon } from "lucide-react";
-import { FormState } from "@schema";
-import { useConfigContext } from "@/components/providers/config-provider";
+import type { Dictionary } from "@/lib/dictionaries";
+import { resolveDictMessage } from "@/lib/resolve-dict-message";
+import { cn } from "@/lib/utils";
 
 export function LoginForm({
 	className,
+	oidc,
+	dict,
 	...props
-}: React.ComponentProps<"div">) {
-	const config = useConfigContext();
+}: React.ComponentProps<"div"> & {
+	oidc?: {
+		googleEnabled?: boolean;
+		genericEnabled?: boolean;
+		genericName?: string;
+	};
+} & { dict: Dictionary }) {
+	const { localLogin } = useSiteFeatures();
+	const oidcEnabled = Boolean(oidc?.googleEnabled || oidc?.genericEnabled);
 	const [formState, formAction, isPending] = useActionState<
 		FormState,
 		FormData
@@ -34,12 +46,49 @@ export function LoginForm({
 		<div className={cn("flex flex-col gap-6", className)} {...props}>
 			<Card>
 				<CardHeader className="text-center">
-					<CardTitle className="text-xl">Welcome back</CardTitle>
-					{/*<CardDescription>Login with your Google account</CardDescription>*/}
+					<CardTitle className="text-xl">{dict.auth.welcomeBack}</CardTitle>
+					{oidcEnabled && (
+						<CardDescription>
+							{dict.auth.loginWithExistingAccount}
+						</CardDescription>
+					)}
+					{oidc?.googleEnabled && (
+						<Button
+							fullWidth
+							variant="default"
+							className="w-full"
+							href={"/api/auth/oidc/google"}
+							component="a"
+							leftSection={<IconBrandGoogle />}
+						>
+							{dict.auth.loginWithGoogle}
+						</Button>
+					)}
+					{oidc?.genericEnabled && (
+						<Button
+							fullWidth
+							variant="default"
+							className="w-full"
+							href={"/api/auth/oidc/generic"}
+							component="a"
+							leftSection={<IconLogin2 />}
+						>
+							{dict.auth.loginWithProviderPrefix}
+							{oidc?.genericName || "SSO"}
+						</Button>
+					)}
+					{!oidcEnabled && (
+						<div className={"text-sm text-center"}>
+							{localLogin
+								? dict.auth.noOidcEnabled
+								: dict.auth.noLoginMethodsEnabled}
+						</div>
+					)}
 				</CardHeader>
 
-				<CardContent>
+				<CardContent hidden={!localLogin}>
 					<Form action={formAction}>
+						<input type="hidden" name="locale" value={dict.locale} />
 						<div className="grid gap-6">
 							{/*TODO Google Login*/}
 							{/*<div className="flex flex-col gap-4">*/}
@@ -62,7 +111,7 @@ export function LoginForm({
 
 							<div className="grid gap-6">
 								<div className="grid gap-3">
-									<Label htmlFor="email">Email</Label>
+									<Label htmlFor="email">{dict.auth.email}</Label>
 									<Input
 										id="email"
 										type="email"
@@ -75,7 +124,7 @@ export function LoginForm({
 
 								<div className="grid gap-3">
 									<div className="flex items-center">
-										<Label htmlFor="password">Password</Label>
+										<Label htmlFor="password">{dict.auth.password}</Label>
 										{/*<a*/}
 										{/*	href="#"*/}
 										{/*	className="ml-auto text-sm underline-offset-4 hover:underline"*/}
@@ -96,14 +145,14 @@ export function LoginForm({
 								{formState?.error && (
 									<div className="text-center">
 										<span className="text-sm text-red-600">
-											{formState.error}
+											{resolveDictMessage(dict.actions, formState.error)}
 										</span>
 									</div>
 								)}
 								{formState?.message && !formState.error && (
 									<div className="text-center">
 										<span className="text-sm text-green-600">
-											{formState.message}
+											{resolveDictMessage(dict.actions, formState.message)}
 										</span>
 									</div>
 								)}
@@ -112,21 +161,19 @@ export function LoginForm({
 									{isPending && (
 										<Loader2Icon className="mr-2 h-4 w-4 animate-spin" />
 									)}
-									Login
+									{dict.auth.login}
 								</Button>
 							</div>
 
-							{!config.DISABLE_SIGNUP && (
-								<div className="text-center text-sm">
-									Don&apos;t have an account?{" "}
-									<Link
-										href="/auth/signup"
-										className="underline underline-offset-4"
-									>
-										Sign up
-									</Link>
-								</div>
-							)}
+							<div className="text-center text-sm">
+								{dict.auth.noAccount}{" "}
+								<Link
+									href={`/${dict.locale}/auth/signup`}
+									className="underline underline-offset-4"
+								>
+									{dict.auth.signUp}
+								</Link>
+							</div>
 						</div>
 					</Form>
 				</CardContent>

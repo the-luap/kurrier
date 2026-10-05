@@ -1,5 +1,5 @@
-import React, { useCallback, useSyncExternalStore } from "react";
-import { Dayjs } from "dayjs";
+import { useCallback, useSyncExternalStore } from "react";
+import type { Dayjs } from "dayjs";
 
 /*
  * One shared 10s ticker for every hour box. The week view renders 168 boxes;

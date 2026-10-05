@@ -1,21 +1,24 @@
 "use client";
-import React from "react";
-import { Plus } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { ActionIcon, Modal } from "@mantine/core";
-import { useIsMobile } from "@/hooks/use-mobile";
-import { useDynamicContext } from "@/hooks/use-dynamic-context";
 import { getDayjsTz } from "@common/day-js-extended";
-import { CalendarState } from "@schema";
+import { Modal } from "@mantine/core";
 import { useDisclosure } from "@mantine/hooks";
+import type { CalendarState } from "@schema";
+import { Plus } from "lucide-react";
 import NewCalendarEventForm from "@/components/dashboard/calendars/new-calendar-event-form";
+import { useOptionalDictionary } from "@/components/providers/dictionary-provider";
+import { Button } from "@/components/ui/button";
+import { useDynamicContext } from "@/hooks/use-dynamic-context";
+import { cn } from "@/lib/utils";
 
 export default function NewEventButton({
-	hideOnMobile,
+	compact = false,
+	className,
 }: {
-	hideOnMobile?: boolean;
+	workspacePublicId: string;
+	compact?: boolean;
+	className?: string;
 }) {
-	const isMobile = useIsMobile();
+	const dict = useOptionalDictionary();
 	const { state } = useDynamicContext<CalendarState>();
 
 	const dayjsTz = getDayjsTz(state.defaultCalendar.timezone);
@@ -34,25 +37,23 @@ export default function NewEventButton({
 				onClose={close}
 				title={
 					<span className={"font-bold dark:text-brand-foreground text-brand"}>
-						New Event
+						{dict?.calendar?.newEvent ?? "New Event"}
 					</span>
 				}
 			>
 				<NewCalendarEventForm start={start} end={end} onCompleted={close} />
 			</Modal>
 
-			{isMobile ? (
-				<ActionIcon onClick={open} aria-label="Create event">
-					<Plus className="h-4 w-4" />
-				</ActionIcon>
-			) : (
-				<>
-					<Button hidden={!hideOnMobile} size="lg" onClick={open}>
-						<Plus className={"h-4 w-4"} />
-						Create Event
-					</Button>
-				</>
-			)}
+			<Button
+				size={compact ? "icon" : "lg"}
+				onClick={open}
+				className={cn(!compact && "w-full", className)}
+			>
+				<Plus />
+				<span className={compact ? "sr-only" : ""}>
+					{dict?.calendar?.createEvent ?? "Create Event"}
+				</span>
+			</Button>
 		</>
 	);
 }

@@ -1,7 +1,8 @@
-import React, { useSyncExternalStore } from "react";
-import { IconMoonStars, IconSun } from "@tabler/icons-react";
 import { Switch } from "@mantine/core";
+import { IconMoonStars, IconSun } from "@tabler/icons-react";
+import { useSyncExternalStore } from "react";
 import { useAppearance } from "@/components/providers/appearance-provider";
+import { useOptionalDictionary } from "@/components/providers/dictionary-provider";
 
 const DARK_QUERY = "(prefers-color-scheme: dark)";
 
@@ -11,8 +12,8 @@ function subscribePrefersDark(onChange: () => void) {
 	return () => mq.removeEventListener("change", onChange);
 }
 
-// Hydration-safe (server snapshot = false) and follows OS changes, unlike the
-// previous render-time `window.matchMedia` read inside useMemo.
+// Hydration-safe (server snapshot = false) and follows OS changes, unlike a
+// one-off `window.matchMedia` read memoized on mount.
 function usePrefersDark() {
 	return useSyncExternalStore(
 		subscribePrefersDark,
@@ -23,6 +24,7 @@ function usePrefersDark() {
 
 function ThemeSwitch({ onComplete }: { onComplete?: () => void }) {
 	const { mode, setMode } = useAppearance();
+	const dict = useOptionalDictionary();
 	const prefersDark = usePrefersDark();
 
 	const isDark =
@@ -34,11 +36,15 @@ function ThemeSwitch({ onComplete }: { onComplete?: () => void }) {
 			checked={!isDark}
 			onChange={(e) => {
 				setMode(e.currentTarget.checked ? "light" : "dark");
-				onComplete && onComplete();
+				onComplete?.();
 			}}
 			onLabel={<IconSun size={16} stroke={2.5} />}
 			offLabel={<IconMoonStars size={16} stroke={2.5} />}
-			aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
+			aria-label={
+				isDark
+					? (dict?.common?.switchToLightMode ?? "Switch to light mode")
+					: (dict?.common?.switchToDarkMode ?? "Switch to dark mode")
+			}
 		/>
 	);
 }

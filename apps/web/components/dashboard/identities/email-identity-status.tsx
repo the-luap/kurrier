@@ -1,4 +1,6 @@
-import React from "react";
+"use client";
+
+import { useOptionalDictionary } from "@/components/providers/dictionary-provider";
 import IsVerifiedStatus from "../providers/is-verified-status";
 
 /**
@@ -6,10 +8,18 @@ import IsVerifiedStatus from "../providers/is-verified-status";
  * list it already has, instead of one client->server action call per row.
  */
 function EmailIdentityStatus({ incoming }: { incoming: boolean }) {
+	const dict = useOptionalDictionary();
+
 	return (
 		<>
-			<IsVerifiedStatus verified={true} statusName="Outgoing" />
-			<IsVerifiedStatus verified={incoming} statusName="Incoming" />
+			<IsVerifiedStatus
+				verified={true}
+				statusName={dict?.platform?.outgoing ?? "Outgoing"}
+			/>
+			<IsVerifiedStatus
+				verified={incoming}
+				statusName={dict?.platform?.incoming ?? "Incoming"}
+			/>
 		</>
 	);
 }

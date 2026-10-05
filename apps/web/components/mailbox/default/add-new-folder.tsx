@@ -1,12 +1,13 @@
+import { ActionIcon, Modal } from "@mantine/core";
 import { useDisclosure } from "@mantine/hooks";
-import { Modal, ActionIcon } from "@mantine/core";
 import { Plus } from "lucide-react";
 import { ReusableForm } from "@/components/common/reusable-form";
+import { useOptionalDictionary } from "@/components/providers/dictionary-provider";
+import { useMailboxOptions } from "@/hooks/use-mailbox-options";
 import {
 	addNewMailboxFolder,
 	type FetchIdentityMailboxListResult,
 } from "@/lib/actions/mailbox";
-import { useMailboxOptions } from "@/hooks/use-mailbox-options";
 
 export default function AddNewFolder({
 	mailboxes,
@@ -15,6 +16,7 @@ export default function AddNewFolder({
 	mailboxes: FetchIdentityMailboxListResult[number]["mailboxes"];
 	identity: FetchIdentityMailboxListResult[number]["identity"];
 }) {
+	const dict = useOptionalDictionary();
 	const [opened, { open, close }] = useDisclosure(false);
 
 	const { options: mailboxOptions } = useMailboxOptions({
@@ -25,7 +27,7 @@ export default function AddNewFolder({
 	const fields = [
 		{
 			name: "name",
-			label: "Folder Name",
+			label: dict?.mailbox?.folderName ?? "Folder Name",
 			wrapperClasses: "col-span-12",
 			props: {},
 		},
@@ -41,7 +43,7 @@ export default function AddNewFolder({
 		},
 		{
 			name: "parentId",
-			label: "Nest Folder Under (Optional)",
+			label: dict?.mailbox?.nestFolderUnder ?? "Nest Folder Under (Optional)",
 			kind: "select" as const,
 			options: mailboxOptions,
 			wrapperClasses: "col-span-12",
@@ -56,7 +58,11 @@ export default function AddNewFolder({
 
 	return (
 		<>
-			<Modal opened={opened} onClose={close} title="New folder">
+			<Modal
+				opened={opened}
+				onClose={close}
+				title={dict?.mailbox?.newFolder ?? "New folder"}
+			>
 				<ReusableForm
 					fields={fields}
 					onSuccess={close}
@@ -65,12 +71,13 @@ export default function AddNewFolder({
 			</Modal>
 
 			<ActionIcon
-				size="sm"
 				variant="subtle"
-				className="shrink-0"
+				size={44}
 				onClick={open}
+				aria-label={dict?.mailbox?.newFolder ?? "New folder"}
+				title={dict?.mailbox?.newFolder ?? "New folder"}
 			>
-				<Plus className="h-3.5 w-3.5" />
+				<Plus size={18} />
 			</ActionIcon>
 		</>
 	);
