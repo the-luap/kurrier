@@ -62,6 +62,8 @@ export type FetchWorkspaceIdentitiesResult = Awaited<
 >;
 
 export const workspaceIdentityAssignments = async () => {
+    // Lists every member's identity assignments: owner/admin only.
+    await requireWorkspaceAdmin();
     const workspace = await fetchWorkspace();
 
     return await db

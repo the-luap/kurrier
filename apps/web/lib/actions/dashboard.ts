@@ -1242,21 +1242,27 @@ export const deleteEmailIdentity = async (
 				})
 				.where(eq(googleAccounts.identityId, identity.id));
 		} else if (!userIdentity.smtp_accounts) {
-			const [secret] = await fetchDecryptedSecrets({
-				linkTable: providerSecrets,
-				foreignCol: providerSecrets.providerId,
-				secretIdCol: providerSecrets.secretId,
-				parentId: String(identity.providerId),
-			});
-
+			// Only SES needs provider-side cleanup (receipt rules). The other
+			// providers' removeEmail is a no-op, and inbound/mailtrap/JMAP
+			// identities have no provider secret row at all: for those the
+			// cleanup + delete below is exactly what deleteProviderIdentity
+			// does on the platform identities page.
 			const providerType = userIdentity.providers?.type as Providers;
-			const mailer = createMailer(providerType, secret.parsedSecret);
-
-			if (providerType === "ses") {
-				await mailer.removeEmail(identity.value, {
-					ruleSetName: identity.metaData?.ruleSetName,
-					ruleName: identity.metaData?.ruleName,
+			if (providerType === "ses" && identity.providerId) {
+				const [secret] = await fetchDecryptedSecrets({
+					linkTable: providerSecrets,
+					foreignCol: providerSecrets.providerId,
+					secretIdCol: providerSecrets.secretId,
+					parentId: String(identity.providerId),
 				});
+
+				if (secret?.parsedSecret) {
+					const mailer = createMailer(providerType, secret.parsedSecret);
+					await mailer.removeEmail(identity.value, {
+						ruleSetName: identity.metaData?.ruleSetName,
+						ruleName: identity.metaData?.ruleName,
+					});
+				}
 			}
 		} else {
 			await queueStopIdle(identity.id);
@@ -1922,6 +1928,7 @@ export const fetchUserDavAccountForWorkspace = async () => {
 
 
 export async function fetchGoogleAccounts() {
+	await requireWorkspaceAdmin();
 	const rls = await rlsClient();
 	return rls((tx) =>
 		tx

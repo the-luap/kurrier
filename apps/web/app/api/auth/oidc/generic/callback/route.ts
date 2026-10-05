@@ -4,16 +4,17 @@ import crypto from "node:crypto";
 import { cookies } from "next/headers";
 import { connection, NextRequest, NextResponse } from "next/server";
 import { and, eq, sql } from "drizzle-orm";
+import { getPublicEnv } from "@schema";
 import {
 	authAccounts,
 	authProviders,
 	db,
 	users,
-	workspaces,
 } from "@db";
 import {
 	createSessionForUser,
 	createUserWithWorkspace,
+	findLandingWorkspace,
 	getWorkspaceRedirectUrl,
 } from "@/lib/auth-session";
 import {
@@ -169,6 +170,12 @@ export async function GET(request: NextRequest) {
 			.limit(1);
 
 		if (!existingUser) {
+			// Honour DISABLE_SIGNUP: existing users may still sign in, but
+			// the IdP must not be able to provision new Kurrier users.
+			if (getPublicEnv().DISABLE_SIGNUP) {
+				return NextResponse.redirect(new URL("/auth/login", baseUrl));
+			}
+
 			const passwordHash = await argon2.hash(crypto.randomUUID());
 
 			const createdUser = await createUserWithWorkspace({
@@ -187,11 +194,7 @@ export async function GET(request: NextRequest) {
 		user = existingUser;
 	}
 
-	const [workspace] = await db
-		.select()
-		.from(workspaces)
-		.where(eq(workspaces.ownerId, user.id))
-		.limit(1);
+	const workspace = await findLandingWorkspace(user.id);
 
 	if (!workspace) {
 		return NextResponse.redirect(new URL("/auth/login", baseUrl));

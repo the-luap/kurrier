@@ -30,7 +30,11 @@ import { and, eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { decode } from "decode-formdata";
 import { getQueue } from "@/lib/actions/get-redis";
-import { isWorkspaceAdminRole, requireWorkspaceMember } from "@/lib/actions/authz";
+import {
+    isWorkspaceAdminRole,
+    requireWorkspaceAdmin,
+    requireWorkspaceMember,
+} from "@/lib/actions/authz";
 
 const PROVIDERS_PATH =
     "/w/[workspaceId]/dashboard/platform/providers";
@@ -94,6 +98,8 @@ export async function connectJmap(
     formData: FormData,
 ): Promise<FormState> {
     return handleAction(async () => {
+        // Connecting a workspace mail provider is an owner/admin operation.
+        await requireWorkspaceAdmin();
         const data = decode(formData) as Record<string, unknown>;
 
         const presetKey = String(

@@ -2,7 +2,12 @@ import { identities } from "@db";
 import { eq } from "drizzle-orm";
 import DeleteIdentityButton from "@/components/mailbox/settings/delete-identity-button";
 import SectionCard from "@/components/mailbox/settings/settings-section-card";
-import { getWorkspacePublicId, rlsClient } from "@/lib/actions/clients";
+import { isWorkspaceAdminRole } from "@/lib/actions/authz";
+import {
+	getWorkspacePublicId,
+	getWorkspaceRole,
+	rlsClient,
+} from "@/lib/actions/clients";
 import { getDictionary, type Locale } from "@/lib/dictionaries";
 
 async function Page({
@@ -11,11 +16,15 @@ async function Page({
 	params: Promise<{ locale: Locale; identityPublicId: string }>;
 }) {
 	const { locale, identityPublicId } = await params;
-	const [dict, rls, workspacePublicId] = await Promise.all([
+	const [dict, rls, workspacePublicId, workspaceRole] = await Promise.all([
 		getDictionary(locale),
 		rlsClient(),
 		getWorkspacePublicId(),
+		getWorkspaceRole(),
 	]);
+	// Deleting an identity is an owner/admin operation (deleteEmailIdentity
+	// enforces it); don't offer the button to plain members.
+	const canDelete = isWorkspaceAdminRole(workspaceRole);
 
 	const [identity] = await rls((tx) =>
 		tx
@@ -30,7 +39,7 @@ async function Page({
 			title={dict.mailbox.dangerZoneTitle}
 			description={dict.mailbox.dangerZoneDescription}
 			footer={
-				identity ? (
+				identity && canDelete ? (
 					<div className="flex items-center justify-end">
 						<DeleteIdentityButton
 							identityId={identity.id}

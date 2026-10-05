@@ -7,7 +7,7 @@ import "server-only";
 import { APP_VERSION } from "@common";
 import { db, identities, users, workspaceMembers, workspaces } from "@db";
 import { getServerEnv } from "@schema";
-import { eq, sql } from "drizzle-orm";
+import { asc, eq, sql } from "drizzle-orm";
 import { type JWTPayload, jwtVerify, SignJWT } from "jose";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
@@ -175,13 +175,33 @@ export async function createSessionForUser(userId: string) {
 	});
 }
 
+/**
+ * The workspace a user lands in after sign-in: the one they own, otherwise
+ * the first workspace they were invited to (members own no workspace).
+ */
+export async function findLandingWorkspace(userId: string) {
+	const [owned] = await db
+		.select()
+		.from(workspaces)
+		.where(eq(workspaces.ownerId, userId))
+		.orderBy(asc(workspaces.createdAt))
+		.limit(1);
+	if (owned) return owned;
+
+	const [member] = await db
+		.select({ workspace: workspaces })
+		.from(workspaceMembers)
+		.innerJoin(workspaces, eq(workspaces.id, workspaceMembers.workspaceId))
+		.where(eq(workspaceMembers.userId, userId))
+		.orderBy(asc(workspaceMembers.createdAt))
+		.limit(1);
+	return member?.workspace ?? null;
+}
+
 export async function getWorkspaceRedirectUrl(
 	user: Pick<typeof users.$inferSelect, "id">,
 ) {
-	const [workspace] = await db
-		.select()
-		.from(workspaces)
-		.where(eq(workspaces.ownerId, user.id));
+	const workspace = await findLandingWorkspace(user.id);
 
 	if (!workspace) {
 		return "/auth/login";

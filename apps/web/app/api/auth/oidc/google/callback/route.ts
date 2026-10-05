@@ -10,11 +10,11 @@ import {
     authProviders,
     db,
     users,
-    workspaces,
 } from "@db";
 import {
     createSessionForUser,
     createUserWithWorkspace,
+    findLandingWorkspace,
     getWorkspaceRedirectUrl,
 } from "@/lib/auth-session";
 
@@ -165,11 +165,7 @@ export async function GET(request: NextRequest) {
         user = existingUser;
     }
 
-    const [workspace] = await db
-        .select()
-        .from(workspaces)
-        .where(eq(workspaces.ownerId, user.id))
-        .limit(1);
+    const workspace = await findLandingWorkspace(user.id);
 
     if (!workspace) {
         return NextResponse.redirect(new URL("/auth/login", baseUrl));

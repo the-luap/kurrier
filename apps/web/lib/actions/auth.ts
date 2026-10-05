@@ -1,7 +1,7 @@
 "use server";
 
 import * as crypto from "node:crypto";
-import { db, identities, users, workspaces } from "@db";
+import { db, identities, users } from "@db";
 import { type FormState, getPublicEnv, handleAction } from "@schema";
 import argon2 from "argon2";
 import bcrypt from "bcryptjs";
@@ -13,6 +13,7 @@ import { cache } from "react";
 import { DISTRIBUTION_CONFIG } from "@distribution/config";
 import {
 	createUserWithWorkspace,
+	findLandingWorkspace,
 	normalizeEmail,
 	SESSION_COOKIE,
 	signInUserAndRedirect,
@@ -235,10 +236,7 @@ export async function getDefaultWorkspacePath(user: { id: string }) {
 	if (!me?.id || String(user?.id) !== me.id) {
 		return "/auth/login";
 	}
-	const [workspace] = await db
-		.select()
-		.from(workspaces)
-		.where(eq(workspaces.ownerId, user.id));
+	const workspace = await findLandingWorkspace(me.id);
 
 	if (!workspace) {
 		return "/auth/login";

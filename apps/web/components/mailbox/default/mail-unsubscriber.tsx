@@ -9,7 +9,7 @@ import { usePathname } from "next/navigation";
 import {Badge} from "@mantine/core";
 import { useOptionalDictionary } from "@/components/providers/dictionary-provider";
 
-function MailUnsubscriber({ mailSubscription }: {
+function MailUnsubscriber({ message, mailSubscription }: {
     message: MessageEntity;
     mailSubscription: MailSubscriptionEntity | null;
 }) {
@@ -47,6 +47,7 @@ function MailUnsubscriber({ mailSubscription }: {
                     buttonProps={{ size: "compact-xs", variant: "light" }}
                 >
                     <input type="hidden" name="mailSubscriptionId" value={mailSubscription.id} />
+                    <input type="hidden" name="messageId" value={message.id} />
                     <input type="hidden" name="pathname" value={pathname} />
                 </ReusableFormButton>
             ) : url ? (

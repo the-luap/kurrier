@@ -2374,21 +2374,40 @@ export async function fetchThreadMailSubscriptions(opts: {
 	messages: Array<{ id: string; headersJson: any }>;
 }) {
 	const keysByMessageId = new Map<string, string>();
+	const empty = () => ({
+		byMessageId: new Map<string, MailSubscriptionEntity | null>(),
+		keysByMessageId,
+	});
 
-	for (const m of opts.messages ?? []) {
+	// The messages come from the caller: reload them (and their headers)
+	// and keep only messages of identities visible to the caller, so a
+	// member can't read subscriptions of identities restricted to others.
+	const messageIds = Array.from(
+		new Set((opts.messages ?? []).map((m) => String(m?.id ?? "")).filter(Boolean)),
+	);
+	if (!messageIds.length) return empty();
+
+	const rls = await rlsClient();
+	const visibleMessages = await rls((tx) =>
+		tx
+			.select({ id: messages.id, headersJson: messages.headersJson })
+			.from(messages)
+			.where(
+				and(
+					inArray(messages.id, messageIds),
+					messageVisibleSql(messages.id),
+				),
+			),
+	);
+
+	for (const m of visibleMessages) {
 		const key = subscriptionKeyFromHeadersJson(m.headersJson);
 		if (key) keysByMessageId.set(m.id, key);
 	}
 
 	const uniqueKeys = Array.from(new Set(keysByMessageId.values()));
-	if (!uniqueKeys.length) {
-		return {
-			byMessageId: new Map<string, MailSubscriptionEntity | null>(),
-			keysByMessageId,
-		};
-	}
+	if (!uniqueKeys.length) return empty();
 
-	const rls = await rlsClient();
 	const rows = await rls((tx) =>
 		tx
 			.select()
@@ -2430,6 +2449,29 @@ export async function oneClickUnsubscribe(
 				.limit(1),
 		).catch(() => []);
 		if (!sub?.unsubscribeHttpUrl) return { success: false, error: "mailbox.subscriptionNotFound" };
+
+		// mail_subscriptions is only workspace scoped: require a message of
+		// an identity visible to the caller that carries this subscription.
+		const messageId = String(decodedForm.messageId ?? "");
+		if (!messageId) return { success: false, error: "mailbox.subscriptionNotFound" };
+		const [message] = await rls((tx) =>
+			tx
+				.select({ headersJson: messages.headersJson })
+				.from(messages)
+				.where(
+					and(
+						eq(messages.id, messageId),
+						messageVisibleSql(messages.id),
+					),
+				)
+				.limit(1),
+		).catch(() => []);
+		if (
+			!message ||
+			subscriptionKeyFromHeadersJson(message.headersJson) !== sub.subscriptionKey
+		) {
+			return { success: false, error: "mailbox.subscriptionNotFound" };
+		}
 
 		// The URL comes from a received mail: no private/internal targets,
 		// no credentials, no redirects (RFC 8058 one-click is a single POST).

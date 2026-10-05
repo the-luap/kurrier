@@ -164,6 +164,8 @@ export type SafeHttpResponse = {
 	status: number;
 	headers: http.IncomingHttpHeaders;
 	body: Buffer;
+	/** The response exceeded maxResponseBytes and was cut off (truncateOk). */
+	truncated: boolean;
 };
 
 /**
@@ -179,6 +181,13 @@ export function safeHttpRequest(
 		body?: string | Buffer;
 		timeoutMs?: number;
 		maxResponseBytes?: number;
+		/**
+		 * On a response larger than maxResponseBytes, stop reading and
+		 * resolve with the status and the truncated body (`truncated: true`)
+		 * instead of rejecting. For callers that only need the status
+		 * (e.g. webhook delivery); leave off when the body must be complete.
+		 */
+		truncateOk?: boolean;
 		policy?: AddressPolicy;
 	} = {},
 ): Promise<SafeHttpResponse> {
@@ -186,7 +195,21 @@ export function safeHttpRequest(
 	const timeoutMs = opts.timeoutMs ?? 15_000;
 	const maxBytes = opts.maxResponseBytes ?? 10 * 1024 * 1024;
 
-	return new Promise((resolve, reject) => {
+	return new Promise((resolvePromise, rejectPromise) => {
+		let settled = false;
+		const resolve = (value: SafeHttpResponse) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			resolvePromise(value);
+		};
+		const reject = (err: unknown) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			rejectPromise(err);
+		};
+		let timer: ReturnType<typeof setTimeout> | undefined;
 		let url: URL;
 		try {
 			url = new URL(rawUrl);
@@ -197,6 +220,11 @@ export function safeHttpRequest(
 			return reject(new OutboundBlockedError("Only http(s) URLs are allowed"));
 		}
 		const headers: Record<string, string> = { ...(opts.headers ?? {}) };
+		if (opts.body !== undefined) {
+			// Explicit length: no chunked transfer-encoding, which some
+			// webhook receivers reject.
+			headers["content-length"] = String(Buffer.byteLength(opts.body));
+		}
 		if (url.username || url.password) {
 			// https://user:pass@host/ → Basic auth header (as fetch would do).
 			headers.authorization = `Basic ${Buffer.from(
@@ -226,39 +254,43 @@ export function safeHttpRequest(
 			(res) => {
 				const chunks: Buffer[] = [];
 				let size = 0;
-				res.on("data", (chunk: Buffer) => {
-					size += chunk.length;
-					if (size > maxBytes) {
-						req.destroy(new Error("Response too large"));
-						return;
-					}
-					chunks.push(chunk);
-				});
-				res.on("end", () => {
-					clearTimeout(timer);
+				const done = (truncated: boolean) =>
 					resolve({
 						status: res.statusCode ?? 0,
 						headers: res.headers,
 						body: Buffer.concat(chunks),
+						truncated,
 					});
+				res.on("data", (chunk: Buffer) => {
+					if (settled) return;
+					size += chunk.length;
+					if (size > maxBytes) {
+						if (opts.truncateOk) {
+							// Status is known: stop reading, keep what fits.
+							const room = maxBytes - (size - chunk.length);
+							if (room > 0) chunks.push(chunk.subarray(0, room));
+							done(true);
+							res.destroy();
+						} else {
+							reject(new Error("Response too large"));
+							req.destroy();
+						}
+						return;
+					}
+					chunks.push(chunk);
 				});
-				res.on("error", (err) => {
-					clearTimeout(timer);
-					reject(err);
-				});
+				res.on("end", () => done(false));
+				res.on("error", (err) => reject(err));
 			},
 		);
 
-		const timer = setTimeout(() => {
+		timer = setTimeout(() => {
 			req.destroy(new Error(`Request timed out after ${timeoutMs} ms`));
 		}, timeoutMs);
 
-		req.on("error", (err) => {
-			clearTimeout(timer);
-			reject(err);
-		});
+		req.on("error", (err) => reject(err));
 
-		if (opts.body !== undefined) req.write(opts.body);
-		req.end();
+		if (opts.body !== undefined) req.end(opts.body);
+		else req.end();
 	});
 }

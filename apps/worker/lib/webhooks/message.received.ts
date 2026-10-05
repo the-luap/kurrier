@@ -124,6 +124,10 @@ export const processWebhook = async ({
 					body,
 					timeoutMs: WEBHOOK_TIMEOUT_MS,
 					maxResponseBytes: 64 * 1024,
+					// Delivery is judged by the status only: a large
+					// response body must not turn a delivered hook into
+					// a failure.
+					truncateOk: true,
 				});
 				if (res.status >= 300) {
 					console.warn(
