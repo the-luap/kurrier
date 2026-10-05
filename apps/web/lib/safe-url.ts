@@ -77,6 +77,54 @@ export function isPrivateAddress(rawAddress: string) {
 	return false;
 }
 
+/** IPv4 dotted form of an IPv4-mapped/-compatible IPv6 address, if any. */
+function embeddedIpv4(address: string) {
+	const dotted = address.match(/(\d+\.\d+\.\d+\.\d+)$/)?.[1];
+	if (dotted && isIP(dotted) === 4) return dotted;
+	const mapped = address.match(/^(?:::ffff:|::)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+	if (mapped) {
+		const hi = Number.parseInt(mapped[1], 16);
+		const lo = Number.parseInt(mapped[2], 16);
+		return `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+	}
+	return null;
+}
+
+const METADATA_HOSTNAMES = new Set([
+	"metadata.google.internal",
+	"metadata.goog",
+	"metadata",
+	"instance-data",
+]);
+
+/**
+ * True for cloud metadata endpoints, link-local and unspecified addresses
+ * (and metadata hostnames). For features where LAN targets are legitimate
+ * (self-hosted AI, webhooks into the local network) this is the minimum
+ * that must still be blocked.
+ */
+export function isMetadataOrLinkLocalAddress(rawAddress: string) {
+	const address = rawAddress.replace(/^\[|\]$/g, "").toLowerCase().replace(/\.$/, "");
+	if (METADATA_HOSTNAMES.has(address)) return true;
+	const family = isIP(address);
+	const v4 = family === 4 ? address : family === 6 ? embeddedIpv4(address) : null;
+	if (v4) {
+		return (
+			v4.startsWith("169.254.") ||
+			v4.startsWith("0.") ||
+			v4 === "100.100.100.200" // Alibaba Cloud metadata
+		);
+	}
+	if (family === 6) {
+		return (
+			address === "::" ||
+			/^fe[89ab][0-9a-f]?:/.test(address) ||
+			address.startsWith("fd00:ec2:")
+		);
+	}
+	return false;
+}
+
 /** Parse and validate an http(s) URL from untrusted input. */
 export function parseSafeHttpUrl(rawUrl: string) {
 	let url: URL;

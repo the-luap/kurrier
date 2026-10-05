@@ -281,10 +281,17 @@ function EmailRenderer({
 	}, [showEditor]);
 
 	const downloadEml = async () => {
-		const { url } = await getRawMessageDownloadUrl(message.id);
+		try {
+			const { url } = await getRawMessageDownloadUrl(message.id);
 
-		if (url) {
-			window.open(url, "_blank");
+			if (url) {
+				window.open(url, "_blank", "noopener,noreferrer");
+			}
+		} catch (error) {
+			toast.error(dict?.mailbox?.actionFailed ?? "Action failed", {
+				description: error instanceof Error ? error.message : undefined,
+				position: "bottom-left",
+			});
 		}
 	};
 
@@ -295,14 +302,19 @@ function EmailRenderer({
 	useEffect(() => {
 		if (!opened) return;
 
-		getRawMessageDownloadUrl(message.id).then(({ url }) => {
-			if (!url) return;
-
-			fetch(url)
-				.then((res) => res.text())
-				.then((raw) => setEmailString(raw.slice(0, 10000)))
-				.catch(() => setEmailString(null));
-		});
+		let cancelled = false;
+		getRawMessageDownloadUrl(message.id)
+			.then(async ({ url }) => {
+				if (!url) return;
+				const raw = await (await fetch(url)).text();
+				if (!cancelled) setEmailString(raw.slice(0, 10000));
+			})
+			.catch(() => {
+				if (!cancelled) setEmailString(null);
+			});
+		return () => {
+			cancelled = true;
+		};
 	}, [opened, message.id]);
 
 	const activeIdentityPublicId = useMemo(() => {

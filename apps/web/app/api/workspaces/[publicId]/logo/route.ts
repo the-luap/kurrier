@@ -58,6 +58,7 @@ export async function GET(
                 "Content-Disposition": "inline",
                 "Cache-Control": "public, max-age=300",
                 "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
                 "Cross-Origin-Resource-Policy": "cross-origin",
                 "Access-Control-Allow-Origin": "*",
             },

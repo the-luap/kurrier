@@ -9,7 +9,11 @@ import {
     getSecretAdmin,
     db,
     googleAccounts,
+    workspaceMembers,
+    workspaces,
 } from "@db";
+import { isSignedIn } from "@/lib/actions/auth";
+import { isWorkspaceAdminRole } from "@/lib/actions/authz";
 
 function redirectWithError(workspacePublicId: string, message: string) {
     return NextResponse.redirect(
@@ -30,6 +34,36 @@ export async function GET(request: NextRequest) {
     const ownerId = cookieStore.get("google_provider_owner_id")?.value;
 
     if (!codeVerifier || !state || !workspaceId || !workspacePublicId || !ownerId) {
+        return NextResponse.redirect(new URL("/auth/login", process.env.WEB_URL));
+    }
+
+    // These cookies are client controlled: the signed-in user must be the
+    // one who started the flow and must manage that workspace.
+    const user = await isSignedIn();
+    if (!user?.id || user.id !== ownerId) {
+        return NextResponse.redirect(new URL("/auth/login", process.env.WEB_URL));
+    }
+    const [membership] = await db
+        .select({ role: workspaceMembers.role, ownerId: workspaces.ownerId })
+        .from(workspaces)
+        .leftJoin(
+            workspaceMembers,
+            and(
+                eq(workspaceMembers.workspaceId, workspaces.id),
+                eq(workspaceMembers.userId, user.id),
+            ),
+        )
+        .where(
+            and(
+                eq(workspaces.id, workspaceId),
+                eq(workspaces.publicId, workspacePublicId),
+            ),
+        )
+        .limit(1);
+    if (
+        !membership ||
+        !(membership.ownerId === user.id || isWorkspaceAdminRole(membership.role))
+    ) {
         return NextResponse.redirect(new URL("/auth/login", process.env.WEB_URL));
     }
 

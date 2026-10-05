@@ -15,7 +15,7 @@ import {
 	createSessionForUser,
 	createUserWithWorkspace,
 	getWorkspaceRedirectUrl,
-} from "@/lib/actions/auth";
+} from "@/lib/auth-session";
 import {
 	discoverGenericOidc,
 	getGenericOidcSettings,

@@ -80,7 +80,12 @@ function DraftListItem({ draft }: { draft: DraftRow }) {
 		.trim();
 
 	const open = () => {
-		if (isReply && payload.threadUrl) {
+		// Same-origin paths only ("//host" and "/\host" leave the app).
+		if (
+			isReply &&
+			payload.threadUrl &&
+			/^\/(?![\/\\])/.test(payload.threadUrl)
+		) {
 			// Reply/forward drafts are restored when the composer for the
 			// message is opened again.
 			router.push(payload.threadUrl);

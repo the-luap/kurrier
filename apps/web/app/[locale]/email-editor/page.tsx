@@ -636,6 +636,9 @@ export default function EmailEditorPage() {
 
                     <iframe
                         title="Email preview"
+                        // Template HTML (incl. raw HTML blocks) never runs
+                        // scripts in the app's origin.
+                        sandbox=""
                         className="h-[560px] w-full rounded-md border bg-white"
                         srcDoc={
                             renderedTemplate.html

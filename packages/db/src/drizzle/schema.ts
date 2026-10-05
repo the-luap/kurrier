@@ -716,6 +716,12 @@ export const messages = pgTable(
 		index("ix_messages_workspace").on(t.workspaceId),
 		// fork (db/init/migrations/fork_004_indexes.sql): dashboard counts per workspace
 		index("ix_messages_workspace_created").on(t.workspaceId, t.createdAt),
+		// fork (fork_006_message_lookup_indexes.sql): IMAP sync lookups
+		index("ix_messages_owner_message_id").on(t.ownerId, t.messageId),
+		index("ix_messages_mailbox_imap_uid").on(
+			t.mailboxId,
+			sql`((${t.metaData} -> 'imap' ->> 'uid')::bigint)`,
+		),
 
 
 		uniqueIndex("uniq_mailbox_message_id").on(t.mailboxId, t.messageId),
@@ -1663,6 +1669,14 @@ export const draftMessages = pgTable(
 		index("ix_draft_messages_status").on(t.status),
 		index("ix_draft_messages_scheduled_at").on(t.scheduledAt),
 		index("ix_draft_messages_updated_at").on(t.updatedAt),
+		// fork (fork_005_draft_messages_indexes.sql): draft lists and counts
+		index("ix_draft_messages_owner_status_updated").on(
+			t.ownerId,
+			t.status,
+			t.updatedAt,
+		),
+		index("ix_draft_messages_workspace_status").on(t.workspaceId, t.status),
+		index("ix_draft_messages_identity_status").on(t.identityId, t.status),
 		...workspaceCrudPolicies(t, "draft_messages"),
 	],
 ).enableRLS();

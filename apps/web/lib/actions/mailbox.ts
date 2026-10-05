@@ -74,6 +74,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { s3 } from "@/lib/create-s3-client";
 import { invalidateServerCache, withServerCache } from "@/lib/server-cache";
 import {access} from "@/lib/actions/shared";
+import {identityVisibleSql, mailboxVisibleSql, messageVisibleSql} from "@/lib/actions/authz";
 import {EmailDocument, renderEmailFragment, renderEmailText} from "@email-editor";
 
 let typeSenseClient: Client | null = null;
@@ -516,7 +517,14 @@ export const fetchMessageAttachments = cache(async (messageId: string) => {
 		tx
 			.select()
 			.from(messageAttachments)
-			.where(eq(messageAttachments.messageId, messageId))
+			.where(
+				and(
+					eq(messageAttachments.messageId, messageId),
+					// RLS on attachments is workspace-wide; also require an
+					// identity the caller may see.
+					messageVisibleSql(messageAttachments.messageId),
+				),
+			)
 			.orderBy(desc(messageAttachments.createdAt)),
 	);
 	return { attachments: attachmentsList };
@@ -529,7 +537,12 @@ export async function getSignedUrlsForMessage(messageId: string) {
 		tx
 			.select()
 			.from(messageAttachments)
-			.where(eq(messageAttachments.messageId, messageId)),
+			.where(
+				and(
+					eq(messageAttachments.messageId, messageId),
+					messageVisibleSql(messageAttachments.messageId),
+				),
+			),
 	);
 	const results = await Promise.all(
 		attachments.map(async (attachment) => {
@@ -552,6 +565,8 @@ export async function getSignedUrlsForMessage(messageId: string) {
 }
 
 export const revalidateMailbox = async (path: string) => {
+	const user = await isSignedIn();
+	if (!user?.id) throw new Error("Unauthorized");
 	await afterMailMutation();
 	revalidatePath(path);
 };
@@ -731,7 +746,12 @@ export async function sendMail(
 			tx
 				.select({ id: messages.id })
 				.from(messages)
-				.where(eq(messages.id, originalMessageId))
+				.where(
+					and(
+						eq(messages.id, originalMessageId),
+						mailboxVisibleSql(messages.mailboxId),
+					),
+				)
 				.limit(1),
 		).catch(() => [] as { id: string }[]);
 		if (!original) {
@@ -1233,12 +1253,17 @@ export const initSearch = async (
 	);
 	if (!scope) return empty;
 
+	// The slug goes into a Typesense filter expression: only plain slug
+	// characters, no filter syntax (quotes, backticks, &&, ||, ...).
+	const slug = String(mailboxSlug ?? "");
+	if (!/^[\p{L}\p{N}_.\-/ ]{0,200}$/u.test(slug)) return empty;
+
 	const client = getTypeSenseClient();
 
 	const filters = [
 		`workspacePublicId:=${JSON.stringify(scope.workspacePublicId)}`,
 		`identityPublicId:=${JSON.stringify(scope.identityPublicId)}`,
-		`mailboxSlug:=${JSON.stringify(String(mailboxSlug ?? ""))}`,
+		`mailboxSlug:=${JSON.stringify(slug)}`,
 	];
 
 	if (hasAttachment) filters.push("hasAttachment:=1");
@@ -1333,7 +1358,14 @@ export const fetchWebMailThreadDetail = cache(async (threadId: string) => {
 			})
 			.from(threads)
 			.innerJoin(messages, eq(messages.threadId, threads.id))
-			.where(eq(threads.id, threadId))
+			.where(
+				and(
+					eq(threads.id, threadId),
+					// threads/messages RLS is workspace-wide: only messages
+					// of identities the caller may see.
+					mailboxVisibleSql(messages.mailboxId),
+				),
+			)
 			.orderBy(asc(sql`coalesce(${messages.date}, ${messages.createdAt})`));
 
 		if (rows.length === 0) {
@@ -2069,7 +2101,10 @@ export const fetchScheduledDraftCounts = cache(async () => {
 			.select()
 			.from(draftMessages)
 			.where(
-				eq(draftMessages.status, "scheduled")
+				and(
+					eq(draftMessages.status, "scheduled"),
+					identityVisibleSql(draftMessages.identityId),
+				),
 			)
 	);
 
@@ -2194,6 +2229,7 @@ export async function deleteScheduledDraft(
 						// Only scheduled sends; autosaved drafts are private and
 						// RLS on this table is workspace-wide.
 						eq(draftMessages.status, "scheduled"),
+						identityVisibleSql(draftMessages.identityId),
 					),
 				)
 				.returning({ id: draftMessages.id }),
@@ -2216,12 +2252,15 @@ export async function snoozeThread(input: {
 	mailboxThreadId: string;
 	activeMailboxId: string;
 	snoozedUntil: string | null;
-}) {
-	return handleAction(async () => {
+}): Promise<FormState> {
+	return handleAction(async (): Promise<FormState> => {
 		const { mailboxThreadId, activeMailboxId, snoozedUntil } = input;
 
+		if (snoozedUntil && Number.isNaN(new Date(snoozedUntil).getTime())) {
+			return { success: false, error: "Invalid snooze time" };
+		}
 		const rls = await rlsClient();
-		await rls(async (tx) => {
+		const updated = await rls(async (tx) => {
 			return tx
 				.update(mailboxThreads)
 				.set({
@@ -2235,8 +2274,11 @@ export async function snoozeThread(input: {
 						eq(mailboxThreads.mailboxId, activeMailboxId),
 					),
 				)
-				.returning();
+				.returning({ threadId: mailboxThreads.threadId });
 		});
+		if (!updated.length) {
+			return { success: false, error: "Thread not found" };
+		}
 
 		await afterMailMutation();
 		revalidatePath("/dashboard/mail");

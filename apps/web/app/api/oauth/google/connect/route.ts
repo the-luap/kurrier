@@ -2,7 +2,8 @@ import * as client from "openid-client";
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { isSignedIn } from "@/lib/actions/auth";
-import {getWorkspaceId, getWorkspacePublicId} from "@/lib/actions/clients";
+import {getWorkspaceId, getWorkspacePublicId, getWorkspaceRole} from "@/lib/actions/clients";
+import { isWorkspaceAdminRole } from "@/lib/actions/authz";
 import { resolveGoogleOAuthConfig } from "@providers";
 
 export async function GET() {
@@ -16,6 +17,13 @@ export async function GET() {
 
     const workspaceId = await getWorkspaceId();
     const workspacePublicId = await getWorkspacePublicId();
+
+    // Connecting a Google mailbox provider is workspace administration.
+    if (!isWorkspaceAdminRole(await getWorkspaceRole())) {
+        return NextResponse.redirect(
+            new URL(`/w/${workspacePublicId}/dashboard/platform/overview`, process.env.WEB_URL),
+        );
+    }
 
     const { clientId, clientSecret } = await resolveGoogleOAuthConfig(workspaceId);
     const config = await client.discovery(
@@ -38,6 +46,7 @@ export async function GET() {
         {
             httpOnly: true,
             secure: process.env.NODE_ENV === "production",
+            sameSite: "lax",
             path: "/",
             maxAge: 60 * 10,
         },
@@ -49,6 +58,7 @@ export async function GET() {
         {
             httpOnly: true,
             secure: process.env.NODE_ENV === "production",
+            sameSite: "lax",
             path: "/",
             maxAge: 60 * 10,
         },
@@ -60,6 +70,7 @@ export async function GET() {
         {
             httpOnly: true,
             secure: process.env.NODE_ENV === "production",
+            sameSite: "lax",
             path: "/",
             maxAge: 60 * 10,
         },
@@ -71,6 +82,7 @@ export async function GET() {
         {
             httpOnly: true,
             secure: process.env.NODE_ENV === "production",
+            sameSite: "lax",
             path: "/",
             maxAge: 60 * 10,
         },

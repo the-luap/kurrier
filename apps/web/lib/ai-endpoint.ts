@@ -2,6 +2,7 @@ import "server-only";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { getServerEnv } from "@schema";
+import { isMetadataOrLinkLocalAddress } from "@/lib/safe-url";
 
 // AI endpoints are user supplied and fetched from the web server. Local and
 // LAN hosts are legitimate (Ollama / LM Studio usually run there), but
@@ -56,15 +57,10 @@ const BLOCKED_HOSTNAMES = new Set([
 	"metadata",
 ]);
 
-const isLinkLocalOrUnspecified = (address: string) => {
-	const ip = address.toLowerCase().replace(/^::ffff:/, "");
-	if (isIP(ip) === 4) {
-		return ip.startsWith("169.254.") || ip.startsWith("0.");
-	}
-	return (
-		ip === "::" || /^fe[89ab][0-9a-f]:/.test(ip) || ip.startsWith("fd00:ec2:")
-	);
-};
+// Also covers IPv4-mapped IPv6 in hex form ([::ffff:a9fe:a9fe] is how the
+// URL parser normalises [::ffff:169.254.169.254]).
+const isLinkLocalOrUnspecified = (address: string) =>
+	isMetadataOrLinkLocalAddress(address);
 
 const toComparableUrl = (url: URL) =>
 	`${url.origin}${url.pathname}`.replace(/\/+$/, "");

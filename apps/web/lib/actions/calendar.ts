@@ -10,7 +10,9 @@ import {
 	calendars,
 	contacts,
 	identities, MessageAttachmentEntity,
+	messageAttachments,
 } from "@db";
+import { messageVisibleSql } from "@/lib/actions/authz";
 import {
 	and,
 	eq,
@@ -87,7 +89,8 @@ export async function fetchEventAttendees(
 			.select()
 			.from(calendarEventAttendees)
 			.where(and(
-				inArray(calendarEventAttendees.eventId, eventIds)
+				inArray(calendarEventAttendees.eventId, eventIds),
+				attendeeVisibleSql(calendarEventAttendees.eventId),
 			)),
 	);
 	const result: Record<string, CalendarEventAttendeeEntity[]> = {};
@@ -282,6 +285,34 @@ async function syncEventAttendees({
 	}
 }
 
+const EDITABLE_EVENT_FIELDS = [
+	"calendarId",
+	"title",
+	"description",
+	"location",
+	"status",
+	"busyStatus",
+] as const;
+
+function pickEventFields(input: Record<string, unknown>) {
+	const out: Record<string, unknown> = {};
+	for (const key of EDITABLE_EVENT_FIELDS) {
+		if (input[key] !== undefined) out[key] = input[key];
+	}
+	return out;
+}
+
+/**
+ * calendar_events RLS is workspace-wide; inside an RLS transaction this
+ * keeps events whose calendar (identity) the caller may see.
+ */
+const calendarVisibleSql = (calendarIdColumn: unknown) =>
+	sql`exists (select 1 from calendars vc where vc.id = ${calendarIdColumn})`;
+
+/** Attendee rows of events the caller may see (RLS transaction only). */
+const attendeeVisibleSql = (eventIdColumn: unknown) =>
+	sql`exists (select 1 from calendar_events ve inner join calendars vc on vc.id = ve.calendar_id where ve.id = ${eventIdColumn})`;
+
 export async function upsertCalendarEvent(
 	_prev: FormState,
 	formData: FormData,
@@ -342,8 +373,22 @@ export async function upsertCalendarEvent(
 				.from(identities)
 				.where(eq(identities.id, String(decodedForm.organizerIdentityId)));
 
+			// Only editable event fields from the form (spreading it let callers
+			// set ownerId, davUri, rawIcs, icalUid, isExternal, ...).
+			const editable = pickEventFields(rest as Record<string, unknown>);
+			if (editable.calendarId !== undefined) {
+				// calendars RLS hides calendars of identities the caller may not see.
+				const [calendar] = await tx
+					.select({ id: calendars.id })
+					.from(calendars)
+					.where(eq(calendars.id, String(editable.calendarId)))
+					.limit(1);
+				if (!calendar) throw new Error("calendar.eventNotFound");
+			}
+
 			const payload: any = {
-				...rest,
+				...editable,
+				organizerIdentityId: identityExists ? identityExists.id : null,
 				tz: String(tz),
 				startsAt: startsAtDate,
 				endsAt: endsAtDate,
@@ -363,7 +408,12 @@ export async function upsertCalendarEvent(
 				const [updated] = await tx
 					.update(calendarEvents)
 					.set(parsedPayload)
-					.where(eq(calendarEvents.id, String(eventId)))
+					.where(
+						and(
+							eq(calendarEvents.id, String(eventId)),
+							calendarVisibleSql(calendarEvents.calendarId),
+						),
+					)
 					.returning({ id: calendarEvents.id });
 
 				if (!updated) throw new Error("calendar.eventNotFound");
@@ -378,7 +428,7 @@ export async function upsertCalendarEvent(
 
 				finalEventId = calendarEvent.id;
 
-				if (decodedForm.newOrganizerName) {
+				if (identityExists && decodedForm.newOrganizerName) {
 					await tx
 						.update(identities)
 						.set({ displayName: String(decodedForm.newOrganizerName) })
@@ -525,7 +575,14 @@ export const deleteCalendarEvent = async (id: string): Promise<FormState> => {
 	return handleAction(async () => {
 		const rls = await rlsClient();
 		await rls((tx) =>
-			tx.delete(calendarEvents).where(eq(calendarEvents.id, id)),
+			tx
+				.delete(calendarEvents)
+				.where(
+					and(
+						eq(calendarEvents.id, String(id)),
+						calendarVisibleSql(calendarEvents.calendarId),
+					),
+				),
 		);
 
 		revalidatePath("/dashboard/calendar");
@@ -617,7 +674,12 @@ export const getContactsForAttendeeIds = async (
 				email: calendarEventAttendees.email,
 			})
 			.from(calendarEventAttendees)
-			.where(inArray(calendarEventAttendees.id, attendeeIds)),
+			.where(
+				and(
+					inArray(calendarEventAttendees.id, attendeeIds),
+					attendeeVisibleSql(calendarEventAttendees.eventId),
+				),
+			),
 	);
 
 	if (!attendeesRows.length) return [];
@@ -733,6 +795,7 @@ async function sendItipReply(
 				and(
 					eq(calendarEventAttendees.id, attendeeId),
 					eq(calendarEvents.id, eventId),
+					calendarVisibleSql(calendarEvents.calendarId),
 				),
 			)
 			.limit(1),
@@ -981,6 +1044,7 @@ export async function fetchCalendarEventsForRange(
 			.where(
 				and(
 					eq(calendarEvents.calendarId, calendarId),
+					calendarVisibleSql(calendarEvents.calendarId),
 					or(
 						and(
 							isNull(calendarEvents.recurrenceRule),
@@ -1017,8 +1081,29 @@ export async function fetchEventPreviewItems(
 	attachments: MessageAttachmentEntity[],
 	identityPublicId: string,
 ) {
-	const messageAttachment = attachments?.find(isCalendar);
-	if (!messageAttachment) {
+	const clientAttachment = Array.isArray(attachments)
+		? attachments.find(isCalendar)
+		: undefined;
+	if (!clientAttachment) {
+		return { calendarEvent: null, attendees: null, identity: null };
+	}
+
+	const rls = await rlsClient();
+	// The attachment list comes from the browser: read the stored row (of a
+	// message the caller may see) and use its path, never the client's.
+	const [messageAttachment] = await rls((tx) =>
+		tx
+			.select({ path: messageAttachments.path })
+			.from(messageAttachments)
+			.where(
+				and(
+					eq(messageAttachments.id, String(clientAttachment.id ?? "")),
+					messageVisibleSql(messageAttachments.messageId),
+				),
+			)
+			.limit(1),
+	);
+	if (!messageAttachment?.path) {
 		return { calendarEvent: null, attendees: null, identity: null };
 	}
 
@@ -1032,13 +1117,20 @@ export async function fetchEventPreviewItems(
 		: null;
 
 	const uid = rawICS ? extractIcalUid(rawICS) : null;
-	const rls = await rlsClient();
+	if (!uid) {
+		return { calendarEvent: null, attendees: null, identity: null };
+	}
 
 	const [calendarEvent] = await rls((tx) =>
 		tx
 			.select()
 			.from(calendarEvents)
-			.where(eq(calendarEvents.icalUid, String(uid)),)
+			.where(
+				and(
+					eq(calendarEvents.icalUid, String(uid)),
+					calendarVisibleSql(calendarEvents.calendarId),
+				),
+			)
 	);
 
 	if (!calendarEvent) {

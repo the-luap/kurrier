@@ -144,6 +144,23 @@ They are mirrored in `schema.ts`.
 - `ix_mbth_workspace_snoozed_until` on `mailbox_threads(workspace_id, snoozed_until) WHERE snoozed_until IS NOT NULL`: account-wide snoozed view.
 - `ix_calendar_events_workspace_ical_uid` on `calendar_events(workspace_id, ical_uid) WHERE ical_uid IS NOT NULL`: invitation lookup by UID across calendars.
 
+### `fork_005_draft_messages_indexes.sql`
+
+Composite indexes for the draft queries of the ports, mirrored in `schema.ts`.
+
+- `ix_draft_messages_owner_status_updated` on `draft_messages(owner_id, status, updated_at)`: autosaved drafts of a user, newest first.
+- `ix_draft_messages_workspace_status` on `draft_messages(workspace_id, status)`: RLS filter plus the scheduled / draft counts.
+- `ix_draft_messages_identity_status` on `draft_messages(identity_id, status)`: scheduled sends of one identity.
+
+### `fork_006_message_lookup_indexes.sql`
+
+Indexes for the per-message lookups of the IMAP sync worker, mirrored in
+`schema.ts`. Plain `CREATE INDEX`: on a large `messages` table writes to it
+wait while the indexes build.
+
+- `ix_messages_owner_message_id` on `messages(owner_id, message_id)`: delta sync looks up every fetched envelope, and thread assignment every In-Reply-To / References id, by owner and Message-ID.
+- `ix_messages_mailbox_imap_uid` on `messages(mailbox_id, ((meta->'imap'->>'uid')::bigint))`: IDLE flag / expunge events resolve the message by mailbox and IMAP UID.
+
 ## Upgrading the deployed (v3 fork) database
 
 The deployed database is upstream v3.0.11 (`001`–`003`) plus the fork's
@@ -196,10 +213,10 @@ Things to look at in the results:
    contain the old fork files `018_migration.sql`, `019_migration.sql` or
    `020_migration.sql`.
 3. The bootstrap runs `000_fork_…`, skips `001`–`003`, runs upstream `004`–`011`,
-   then `fork_001`…`fork_004`.
+   then `fork_001`…`fork_006`.
 4. Check the result:
    ```sql
-   SELECT version FROM public.migrations ORDER BY 1;  -- 000_fork…, 001–011, fork_001–fork_004
+   SELECT version FROM public.migrations ORDER BY 1;  -- 000_fork…, 001–011, fork_001–fork_006
    SELECT policyname, roles FROM pg_policies WHERE tablename = 'user_ai_settings';
    SELECT identity_id, name, is_default_for_new, is_default_for_reply_forward
    FROM email_signatures WHERE meta->>'migratedFrom' = 'identities.signature_html';

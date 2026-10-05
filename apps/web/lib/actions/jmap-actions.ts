@@ -11,10 +11,8 @@ import {
     workspaceIdentityMembers,
 } from "@db";
 
-import {
-    currentSession,
-    isSignedIn,
-} from "@/lib/actions/auth";
+import { isSignedIn } from "@/lib/actions/auth";
+import { readSessionToken as currentSession } from "@/lib/auth-session";
 
 import {
     getWorkspaceId,
@@ -32,6 +30,7 @@ import { and, eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { decode } from "decode-formdata";
 import { getQueue } from "@/lib/actions/get-redis";
+import { isWorkspaceAdminRole, requireWorkspaceMember } from "@/lib/actions/authz";
 
 const PROVIDERS_PATH =
     "/w/[workspaceId]/dashboard/platform/providers";
@@ -509,6 +508,13 @@ export async function updateJmapToken(
         );
 
         if (!account) {
+            throw new Error("JMAP account not found");
+        }
+
+        // The shared token belongs to whoever connected the account; other
+        // members may only replace it when they manage the workspace.
+        const { userId, role } = await requireWorkspaceMember();
+        if (String(account.ownerId) !== userId && !isWorkspaceAdminRole(role)) {
             throw new Error("JMAP account not found");
         }
 

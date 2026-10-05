@@ -13,8 +13,10 @@ import {
 import type { FormState } from "@schema";
 import { and, desc, eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
-import { currentSession, isSignedIn } from "@/lib/actions/auth";
+import { isSignedIn } from "@/lib/actions/auth";
+import { readSessionToken as currentSession } from "@/lib/auth-session";
 import { getWorkspaceId, rlsClient } from "@/lib/actions/clients";
+import { mailboxVisibleSql } from "@/lib/actions/authz";
 import {
 	AiError,
 	type AiModelInfo,
@@ -444,7 +446,12 @@ export async function generateAiReplySuggestion(
 					from: messages.from,
 				})
 				.from(messages)
-				.where(eq(messages.id, originalMessageId))
+				.where(
+					and(
+						eq(messages.id, originalMessageId),
+						mailboxVisibleSql(messages.mailboxId),
+					),
+				)
 				.limit(1);
 			return { settings, original };
 		});

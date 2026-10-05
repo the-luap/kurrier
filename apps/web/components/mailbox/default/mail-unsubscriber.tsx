@@ -17,7 +17,10 @@ function MailUnsubscriber({ mailSubscription }: {
     const pathname = usePathname();
     if (!mailSubscription) return null;
 
-    const url = mailSubscription.unsubscribeHttpUrl;
+    // The URL comes from the mail's List-Unsubscribe header: only ever link
+    // to http(s), never javascript:/data: or other schemes.
+    const rawUrl = mailSubscription.unsubscribeHttpUrl?.trim() ?? "";
+    const url = /^https?:\/\//i.test(rawUrl) ? rawUrl : null;
 
     if (mailSubscription.status === "unsubscribed") {
         return (

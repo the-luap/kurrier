@@ -22,10 +22,8 @@ import Form from "next/form";
 import { getCountryDataList, TCountryCode } from "countries-list";
 import ContactListAvatar from "@/components/dashboard/contacts/contact-list-avatar";
 import {getRedis} from "@/lib/actions/get-redis";
-import {isSignedIn} from "@/lib/actions/auth";
 import {generateSignedUrl} from "@common";
 import { getI18n } from "@/lib/dictionaries";
-import { cookies } from "next/headers";
 
 // Static country -> dialing-code lookup, built once per server instance
 // instead of on every request.
@@ -36,13 +34,10 @@ const phoneByCountry = new Map<string, string>(
 async function Page({
 	params,
 }: {
-	params: Promise<{ contactsPublicId: string }>;
+	params: Promise<{ contactsPublicId: string; locale: string }>;
 }) {
-	const { contactsPublicId } = await params;
-	const cookieStore = await cookies();
-	const { dict, format } = await getI18n(
-		cookieStore.get("locale")?.value ?? "en",
-	);
+	const { contactsPublicId, locale } = await params;
+	const { dict, format } = await getI18n(locale);
 	const c = dict.contacts;
 
 	const rls = await rlsClient();
@@ -64,14 +59,33 @@ async function Page({
 
 	const onDeleteAction = async (id: string) => {
 		"use server";
-		const { davQueue } = await getRedis();
-		const user = await isSignedIn();
-		await davQueue.add("dav:delete-contact", {
-			contactId: id,
-			ownerId: user?.id,
-		});
+		// The id comes from the client: resolve it through RLS first.
 		const rls = await rlsClient();
-		await rls((tx) => tx.delete(contacts).where(eq(contacts.id, id)));
+		const [owned] = await rls((tx) =>
+			tx
+				.select({
+					id: contacts.id,
+					ownerId: contacts.ownerId,
+					davUri: contacts.davUri,
+				})
+				.from(contacts)
+				.where(eq(contacts.id, id))
+				.limit(1),
+		);
+		if (!owned) return { success: false };
+
+		if (owned.davUri) {
+			// Synced card: the worker deletes it on the DAV server and then
+			// the row. Deleting the row here first would race the job (it
+			// looks the row up) and the card would come back on next sync.
+			const { davQueue } = await getRedis();
+			await davQueue.add("dav:delete-contact", {
+				contactId: owned.id,
+				ownerId: owned.ownerId,
+			});
+		} else {
+			await rls((tx) => tx.delete(contacts).where(eq(contacts.id, owned.id)));
+		}
 
 		revalidatePath("/dashboard/contacts");
 		return { success: true };

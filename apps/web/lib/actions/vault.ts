@@ -8,15 +8,16 @@ import {
     updateSecret,
 } from "@db";
 
-import { currentSession } from "@/lib/actions/auth";
-import { getWorkspaceId } from "@/lib/actions/clients";
+import { readSessionToken as currentSession } from "@/lib/auth-session";
+import { requireWorkspaceAdmin } from "@/lib/actions/authz";
 import { revalidatePath } from "next/cache";
 
 const VAULT_PATH = "/w/[workspaceId]/dashboard/platform/vault";
 
 export async function fetchVaultSecrets() {
+    // Vault: owners/admins only.
+    const { workspaceId } = await requireWorkspaceAdmin();
     const session = await currentSession();
-    const workspaceId = await getWorkspaceId();
 
     const rows = await listUserManagedSecrets(session, workspaceId);
 
@@ -33,8 +34,9 @@ export type FetchVaultSecretsResult = Awaited<
 >;
 
 export async function revealVaultSecret(id: string) {
+    // Vault: owners/admins only.
+    const { workspaceId } = await requireWorkspaceAdmin();
     const session = await currentSession();
-    const workspaceId = await getWorkspaceId();
 
     const { vault } = await getUserManagedSecret(
         session,
@@ -48,8 +50,9 @@ export async function revealVaultSecret(id: string) {
 }
 
 export async function createVaultSecret(formData: FormData) {
+    // Vault: owners/admins only.
+    const { workspaceId } = await requireWorkspaceAdmin();
     const session = await currentSession();
-    const workspaceId = await getWorkspaceId();
 
     const name = String(formData.get("name") ?? "").trim();
     const value = String(formData.get("value") ?? "");
@@ -76,8 +79,9 @@ export async function updateVaultSecret(
     id: string,
     formData: FormData,
 ) {
+    // Vault: owners/admins only.
+    const { workspaceId } = await requireWorkspaceAdmin();
     const session = await currentSession();
-    const workspaceId = await getWorkspaceId();
 
     await getUserManagedSecret(session, id, workspaceId);
 
@@ -101,8 +105,9 @@ export async function updateVaultSecret(
 }
 
 export async function deleteVaultSecret(id: string) {
+    // Vault: owners/admins only.
+    const { workspaceId } = await requireWorkspaceAdmin();
     const session = await currentSession();
-    const workspaceId = await getWorkspaceId();
 
     await getUserManagedSecret(session, id, workspaceId);
 

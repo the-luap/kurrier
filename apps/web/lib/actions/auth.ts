@@ -1,72 +1,28 @@
 "use server";
 
 import * as crypto from "node:crypto";
-import { APP_VERSION } from "@common";
-import { db, identities, users, workspaceMembers, workspaces } from "@db";
-import {type FormState, getPublicEnv, getServerEnv, handleAction} from "@schema";
+import { db, identities, users, workspaces } from "@db";
+import { type FormState, getPublicEnv, handleAction } from "@schema";
 import argon2 from "argon2";
 import bcrypt from "bcryptjs";
 import { decode } from "decode-formdata";
 import { eq, sql } from "drizzle-orm";
-import { type JWTPayload, jwtVerify, SignJWT } from "jose";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { cache } from "react";
-import { getQueue } from "@/lib/actions/get-redis";
-import { updateWorkSpaceContext } from "@/lib/actions/workspace";
 import { DISTRIBUTION_CONFIG } from "@distribution/config";
-import { withLocale } from "@/lib/utils";
-import { kurrierServer } from "@distribution/kurrier-server";
+import {
+	createUserWithWorkspace,
+	normalizeEmail,
+	SESSION_COOKIE,
+	signInUserAndRedirect,
+	type TokenClaims as SessionTokenClaims,
+	verifyAndDecode,
+} from "@/lib/auth-session";
 
-const initProviders = async (userId: string, workspaceId: string) => {
-	// Shared per-process queue: a new Queue + QueueEvents per signup leaked
-	// two Redis connections each time.
-	await getQueue("common-worker").add(
-		"sync-providers",
-		{ userId, workspaceId },
-		{ removeOnComplete: true, removeOnFail: { age: 7 * 24 * 3600 } },
-	);
-};
-
-/** Emails are stored and looked up lower-cased and trimmed. */
-const normalizeEmail = (email: string) => String(email ?? "").trim().toLowerCase();
-
-const createUserWorkspace = async (userId: string, name?: string) => {
-	await kurrierServer.hooks.run("workspace.beforeCreate", {
-		userId,
-	});
-	const [workspace] = await db
-		.insert(workspaces)
-		.values({
-			name: name ?? "Default Workspace",
-			ownerId: userId,
-			storageBytesUsed: 0,
-		})
-		.returning();
-
-	return workspace;
-};
-
-const applyPendingMigrations = async (
-	userId: string,
-	workspaceId: string,
-	email: string,
-) => {
-	await getQueue("migration-worker").add(
-		"migration:run-for-user-after-signup",
-		{ userId, workspaceId, email },
-		{
-			attempts: 3,
-			backoff: {
-				type: "exponential",
-				delay: 3000,
-			},
-			removeOnComplete: { age: 60 },
-			removeOnFail: false,
-			jobId: `migration:${userId}:${APP_VERSION}`,
-		},
-	);
-};
+// Every export of this "use server" module is a public endpoint. Session,
+// account and redirect primitives that take user ids live in
+// lib/auth-session.ts (server-only) and must not be re-exported here.
 
 /**
  * Users imported from the old Supabase-based fork have no argon2 hash yet,
@@ -106,78 +62,11 @@ async function verifyLegacySupabasePassword(userId: string, password: string) {
 	return true;
 }
 
-async function signToken(userId: string) {
-	const { JWT_SECRET } = getServerEnv();
-
-	return new SignJWT({})
-		.setProtectedHeader({ alg: "HS256" })
-		.setSubject(userId)
-		.setIssuedAt()
-		.setExpirationTime("30d")
-		.sign(new TextEncoder().encode(JWT_SECRET));
-}
-
-async function setAuthToken(token: string) {
-	const cookieStore = await cookies();
-
-	cookieStore.set("session", token, {
-		httpOnly: true,
-		secure: process.env.NODE_ENV === "production",
-		sameSite: "lax",
-		path: "/",
-		maxAge: 60 * 60 * 24 * 30,
-	});
-}
-
-export async function createUserWithWorkspace(opts: {
-	email: string;
-	passwordHash: string;
-	workspaceName?: string;
-}) {
-	const email = normalizeEmail(opts.email);
-	const [existing] = await db
-		.select()
-		.from(users)
-		.where(sql`lower(${users.email}) = ${email}`)
-		.limit(1);
-
-	if (existing) {
-		return { error: "auth.accountAlreadyExists" };
-	}
-
-	const [user] = await db
-		.insert(users)
-		.values({
-			email,
-			passwordHash: opts.passwordHash,
-		})
-		.returning();
-
-	const workspace = await createUserWorkspace(user.id, opts.workspaceName);
-
-	await db
-		.insert(workspaceMembers)
-		.values({
-			workspaceId: workspace.id,
-			userId: user.id,
-			role: "owner",
-		})
-		.onConflictDoNothing();
-
-	await initProviders(user.id, workspace.id);
-	await applyPendingMigrations(user.id, workspace.id, email);
-
-	return user;
-}
-
-export async function signInUserAndRedirect(
-	user: typeof users.$inferSelect,
-	locale?: string,
-) {
-	await createSessionForUser(user.id);
-	const target = await getWorkspaceRedirectUrl(user);
-	redirect(locale ? withLocale(locale, target) : target);
-}
+let dummyHash: Promise<string> | null = null;
+const getDummyHash = () => {
+	dummyHash ??= argon2.hash(crypto.randomUUID());
+	return dummyHash;
+};
 
 export async function login(
 	_prev: FormState,
@@ -213,6 +102,9 @@ export async function login(
 	}
 
 	if (!user) {
+		// Same work as a real check, so response timing does not reveal
+		// which emails have an account.
+		await argon2.verify(await getDummyHash(), password).catch(() => false);
 		return { error: "auth.invalidCredentials" };
 	}
 
@@ -274,38 +166,13 @@ export async function signup(
 
 }
 
-export type TokenClaims = JWTPayload & {
-	sub: string;
-	workspace_id?: string;
-};
-
-export async function verifyAndDecode(
-	token?: string,
-): Promise<TokenClaims | null> {
-	if (!token) return null;
-
-	try {
-		const { JWT_SECRET } = getServerEnv();
-		const { payload } = await jwtVerify<TokenClaims>(
-			token,
-			new TextEncoder().encode(JWT_SECRET),
-		);
-
-		if (!payload.sub) {
-			return null;
-		}
-
-		return payload;
-	} catch {
-		return null;
-	}
-}
+export type TokenClaims = SessionTokenClaims;
 
 // Deduplicated per request: every rlsClient() call used to verify the JWT
 // and select the user again.
 const isSignedInCached = cache(async () => {
 	const cookieStore = await cookies();
-	const token = cookieStore.get("session")?.value;
+	const token = cookieStore.get(SESSION_COOKIE)?.value;
 
 	if (!token) {
 		return null;
@@ -335,53 +202,26 @@ export async function isSignedIn() {
 
 export type FetchIsSignedInResult = Awaited<ReturnType<typeof isSignedIn>>;
 
-export const currentSession = async () => {
-	const cookieStore = await cookies();
-	return String(cookieStore.get("session")?.value);
-};
-
 export const signOut = async (redirectUrl?: string) => {
 	const cookieStore = await cookies();
-	cookieStore.delete("session");
-	redirect(redirectUrl ? redirectUrl : "/auth/login");
+	cookieStore.delete(SESSION_COOKIE);
+	// Same-origin paths only: the argument is caller controlled.
+	const target =
+		typeof redirectUrl === "string" &&
+		redirectUrl.startsWith("/") &&
+		!redirectUrl.startsWith("//") &&
+		!redirectUrl.startsWith("/\\")
+			? redirectUrl
+			: "/auth/login";
+	redirect(target);
 };
 
 export const getGravatarUrl = async (email: string, size = 80) => {
-	const trimmedEmail = email.trim().toLowerCase();
+	const trimmedEmail = String(email ?? "").trim().toLowerCase();
 	const hash = crypto.createHash("sha256").update(trimmedEmail).digest("hex");
-	return `https://www.gravatar.com/avatar/${hash}?s=${size}&d=identicon`;
+	const px = Math.min(512, Math.max(1, Math.floor(Number(size) || 80)));
+	return `https://www.gravatar.com/avatar/${hash}?s=${px}&d=identicon`;
 };
-
-export async function createSessionForUser(userId: string) {
-	const token = await signToken(userId);
-	await setAuthToken(token);
-}
-
-export async function getWorkspaceRedirectUrl(user: typeof users.$inferSelect) {
-	const [workspace] = await db
-		.select()
-		.from(workspaces)
-		.where(eq(workspaces.ownerId, user.id));
-
-	if (!workspace) {
-		return "/auth/login";
-	}
-
-	await updateWorkSpaceContext(workspace.publicId, workspace.id, user);
-
-	if (workspace.defaultIdentityId) {
-		const [defaultIdentity] = await db
-			.select()
-			.from(identities)
-			.where(eq(identities.id, workspace.defaultIdentityId));
-
-		if (defaultIdentity) {
-			return `/w/${workspace.publicId}/dashboard/mail/${defaultIdentity.publicId}/inbox`;
-		}
-	}
-
-	return `/w/${workspace.publicId}/dashboard/platform/overview`;
-}
 
 /**
  * Read-only counterpart to getWorkspaceRedirectUrl: same target resolution,
@@ -390,6 +230,11 @@ export async function getWorkspaceRedirectUrl(user: typeof users.$inferSelect) {
  * render to figure out where to redirect an already-signed-in user.
  */
 export async function getDefaultWorkspacePath(user: { id: string }) {
+	// Public endpoint: only ever resolve the signed-in user's own workspace.
+	const me = await isSignedIn();
+	if (!me?.id || String(user?.id) !== me.id) {
+		return "/auth/login";
+	}
 	const [workspace] = await db
 		.select()
 		.from(workspaces)

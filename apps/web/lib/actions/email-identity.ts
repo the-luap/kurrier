@@ -11,13 +11,28 @@ import {
     defaultImapQuota,
     FormState, handleAction,
 } from "@schema";
-import {currentSession, isSignedIn} from "@/lib/actions/auth";
+import { readSessionToken as currentSession } from "@/lib/auth-session";
 import {getWorkspaceId, rlsClient} from "@/lib/actions/clients";
 import { checkDefaultWorkspaceIdentity } from "@/lib/actions/workspace";
 import {assignIdentityToAllWorkspaceMembers, fetchDecryptedSecrets, initializeMailboxes} from "@/lib/actions/dashboard";
 import {createMailer, VerifyResult} from "@providers";
 import {eq} from "drizzle-orm";
 import {access} from "@/lib/actions/shared";
+import {requireWorkspaceAdmin} from "@/lib/actions/authz";
+import {isMetadataOrLinkLocalAddress} from "@/lib/safe-url";
+
+/**
+ * SMTP/IMAP hosts are admin supplied and may legitimately be on the LAN
+ * (self-hosted mail servers); cloud metadata / link-local targets are not.
+ */
+function assertAllowedMailHosts(config: Record<string, unknown>) {
+    for (const key of ["SMTP_HOST", "IMAP_HOST"]) {
+        const host = config[key];
+        if (typeof host === "string" && host.trim() && isMetadataOrLinkLocalAddress(host.trim())) {
+            throw new Error(`${key} is not allowed`);
+        }
+    }
+}
 
 export type CreateEmailIdentityInput = {
     email: string;
@@ -29,14 +44,20 @@ export type CreateEmailIdentityInput = {
 export async function createEmailIdentity(
     input: CreateEmailIdentityInput,
 ): Promise<FormState> {
-    const workspaceId = await getWorkspaceId();
-    const userId = String((await isSignedIn())?.id ?? "");
+    // Public endpoint: owners/admins only, and the SMTP account must be one
+    // of this workspace (the identity is inserted with the admin client).
+    const { workspaceId, userId } = await requireWorkspaceAdmin();
 
-    if (!userId) {
-        return {
-            success: false,
-            error: "dashboard.notSignedIn",
-        };
+    const rls = await rlsClient();
+    const [smtpAccount] = await rls((tx) =>
+        tx
+            .select({ id: smtpAccounts.id })
+            .from(smtpAccounts)
+            .where(eq(smtpAccounts.id, String(input?.smtpAccountId ?? "")))
+            .limit(1),
+    );
+    if (!smtpAccount) {
+        return { success: false, error: "SMTP account not found" };
     }
 
     const identityData = IdentityInsertSchema.parse({
@@ -72,6 +93,7 @@ export async function verifySMTPAccount(
     smtpAccountId: string,
 ): Promise<FormState<VerifyResult>> {
     return handleAction(async () => {
+        await requireWorkspaceAdmin();
         const [smtpSecret] = await fetchDecryptedSecrets({
             linkTable: smtpAccountSecrets,
             foreignCol: smtpAccountSecrets.accountId,
@@ -116,8 +138,8 @@ export async function createSMTPAccount(
     input: CreateSMTPAccountInput,
 ): Promise<FormState<{ accountId: string }>> {
     return handleAction(async () => {
+        const { workspaceId } = await requireWorkspaceAdmin();
         const session = await currentSession();
-        const workspaceId = await getWorkspaceId();
 
         const { canCreateProvider, reason } = await access("canCreateProvider");
         if (!canCreateProvider) {
@@ -138,6 +160,7 @@ export async function createSMTPAccount(
             ...input.required,
             ...input.optional,
         };
+        assertAllowedMailHosts(smtpConfig);
 
         const secretMeta = await createSecret(session, workspaceId, {
             name: input.ulid,
@@ -203,8 +226,8 @@ export async function updateSMTPAccount(
     input: UpdateSMTPAccountInput,
 ): Promise<FormState<{ accountId: string }>> {
     return handleAction(async () => {
+        const { workspaceId } = await requireWorkspaceAdmin();
         const session = await currentSession();
-        const workspaceId = await getWorkspaceId();
 
         const { canCreateProvider, reason } = await access("canCreateProvider");
         if (!canCreateProvider) {
@@ -215,8 +238,6 @@ export async function updateSMTPAccount(
                     "dashboard.providerCreationDisabled",
             };
         }
-
-        const rls = await rlsClient();
 
         const [smtpSecret] = await fetchDecryptedSecrets({
             linkTable: smtpAccountSecrets,
@@ -240,6 +261,7 @@ export async function updateSMTPAccount(
             ...input.required,
             ...input.optional,
         };
+        assertAllowedMailHosts(smtpConfig);
 
         await updateSecret(session, workspaceId, smtpSecret.metaId, {
             name: input.ulid,

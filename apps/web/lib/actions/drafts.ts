@@ -10,6 +10,7 @@ import {
 import { and, desc, eq, sql } from "drizzle-orm";
 import { isSignedIn } from "@/lib/actions/auth";
 import { rlsClient } from "@/lib/actions/clients";
+import { mailboxVisibleSql } from "@/lib/actions/authz";
 import { invalidateServerCache } from "@/lib/server-cache";
 
 /**
@@ -272,7 +273,12 @@ export async function fetchForwardableAttachments(
 		const [message] = await tx
 			.select({ id: messages.id })
 			.from(messages)
-			.where(eq(messages.id, String(messageId)))
+			.where(
+				and(
+					eq(messages.id, String(messageId)),
+					mailboxVisibleSql(messages.mailboxId),
+				),
+			)
 			.limit(1);
 		if (!message) return [];
 		return tx

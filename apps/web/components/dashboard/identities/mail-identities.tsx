@@ -151,18 +151,23 @@ export default function MailIdentities({
 	) => {
 		// setSendTesting(true);
 		setSendingEmailId(userIdentity.identities.id);
-		const res = await testSendingEmail(userIdentity, decryptedSecrets);
-		if (res.success) {
-			toast.success(res.message, {
-				description: res.message,
-			});
-		} else {
-			toast.error(res.error, {
-				description: res.message,
-			});
+		try {
+			const res = await testSendingEmail(userIdentity, decryptedSecrets);
+			if (res.success) {
+				toast.success(res.message);
+			} else {
+				toast.error(res.error, {
+					description: res.message,
+				});
+			}
+		} catch (error) {
+			// A thrown action must not leave the button spinning forever.
+			toast.error(
+				error instanceof Error ? error.message : "Failed to send test email.",
+			);
+		} finally {
+			setSendingEmailId(null);
 		}
-		// setSendTesting(false);
-		setSendingEmailId(null);
 	};
 
 	const openAddEmailForm = async () => {

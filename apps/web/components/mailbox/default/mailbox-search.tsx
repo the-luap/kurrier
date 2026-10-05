@@ -4,7 +4,7 @@ import type { ThreadHit } from "@schema";
 import { IconStar, IconStarFilled } from "@tabler/icons-react";
 import { Paperclip, Search } from "lucide-react";
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { useRouter } from "next/navigation";
 import * as React from "react";
 import { useOptionalDictionary } from "@/components/providers/dictionary-provider";
 import { Badge } from "@/components/ui/badge";
@@ -108,12 +108,9 @@ export default function MailboxSearch({
 	const toggle = (setter: React.Dispatch<React.SetStateAction<boolean>>) =>
 		setter((v) => !v);
 
-	const pathName = usePathname();
-	const inDashboard = pathName.includes("/dashboard/mail");
-
-	const threadBase = inDashboard
-		? `/w/${workspacePublicId}/dashboard/mail/${publicId}/${mailboxSlug}/threads`
-		: `/w/${workspacePublicId}/mail/${publicId}/${mailboxSlug}/threads`;
+	// Mail only lives under /dashboard/mail (there is no /w/<id>/mail route).
+	const mailboxBase = `/w/${workspacePublicId}/dashboard/mail/${publicId}/${mailboxSlug}`;
+	const threadBase = `${mailboxBase}/threads`;
 
 	const router = useRouter();
 
@@ -144,7 +141,7 @@ export default function MailboxSearch({
 						e.preventDefault();
 						setOpen(false);
 						router.push(
-							`/w/${workspacePublicId}/${pathName.match("/dashboard/mail") ? "/dashboard" : ""}/mail/${publicId}/${mailboxSlug}/search?q=${encodeURIComponent(query)}&has=${hasAttachment ? "1" : "0"}&unread=${onlyUnread ? "1" : "0"}&starred=${isStarred ? "1" : "0"}`,
+							`${mailboxBase}/search?q=${encodeURIComponent(query)}&has=${hasAttachment ? "1" : "0"}&unread=${onlyUnread ? "1" : "0"}&starred=${isStarred ? "1" : "0"}`,
 						);
 					}}
 				/>

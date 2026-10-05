@@ -15,6 +15,7 @@ import { isSignedIn } from "@/lib/actions/auth";
 import { getWorkspacePublicId, rlsClient } from "@/lib/actions/clients";
 import { getRedis } from "@/lib/actions/get-redis";
 import { s3 } from "@/lib/create-s3-client";
+import { isOwnUploadKey } from "@/lib/upload-keys";
 import { getDictionary, type Locale } from "@/lib/dictionaries";
 
 async function Page({
@@ -65,8 +66,32 @@ async function Page({
 			if (!parsed.success) {
 				return { success: false, error: parsed.error.message };
 			}
-			const { publicId, ownerId, createdAt, ...updateValues } =
-				parsed.data as ContactCreate;
+			const {
+				publicId,
+				ownerId,
+				createdAt,
+				id: _id,
+				workspaceId: _workspaceId,
+				addressBookId: _addressBookId,
+				davUri: _davUri,
+				davEtag: _davEtag,
+				...updateValues
+			} = parsed.data as ContactCreate;
+
+			// Picture keys come from the form and are signed for display
+			// later: keep the stored ones or accept the caller's own uploads.
+			const user = await isSignedIn();
+			const contactsPrefix = `private/${user?.id}/contacts/`;
+			for (const field of ["profilePicture", "profilePictureXs"] as const) {
+				const value = updateValues[field];
+				if (
+					value &&
+					value !== contact[field] &&
+					!(user?.id && isOwnUploadKey(value, user.id) && value.startsWith(contactsPrefix))
+				) {
+					return { success: false, error: "Invalid profile picture" };
+				}
+			}
 
 			updateValues.updatedAt = new Date();
 

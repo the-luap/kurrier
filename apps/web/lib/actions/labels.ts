@@ -3,7 +3,7 @@
 import { PAGE_SIZE } from "@common/mail-client";
 import {
 	contactLabels,
-	db,
+	contacts,
 	identities,
 	type LabelCreate,
 	type LabelEntity,
@@ -21,6 +21,21 @@ import { getWorkspaceId, rlsClient } from "@/lib/actions/clients";
 import { addBulkAndWait, addJobAndWait } from "@/lib/actions/get-redis";
 import { isGmailMetaData } from "@/lib/mail-jobs";
 import type { FetchMailboxThreadsResult } from "@/lib/actions/mailbox";
+import { mailboxVisibleSql } from "@/lib/actions/authz";
+
+/** Contacts are private to their address book owner (contacts RLS). */
+async function requireVisibleContact(contactId: string) {
+	const rls = await rlsClient();
+	const [contact] = await rls((tx) =>
+		tx
+			.select({ id: contacts.id })
+			.from(contacts)
+			.where(eq(contacts.id, String(contactId ?? "")))
+			.limit(1),
+	);
+	if (!contact) throw new Error("Contact not found");
+	return contact;
+}
 
 const DEFAULT_JOB_OPTS = {
 	attempts: 3,
@@ -62,13 +77,18 @@ export const fetchLabels = async (
 	const selectedScope = scope ?? "thread";
 	const workspaceId = await getWorkspaceId();
 
-	const rows = await db
-		.select()
-		.from(labels)
-		.where(
-			and(eq(labels.scope, selectedScope), eq(labels.workspaceId, workspaceId)),
-		)
-		.orderBy(asc(labels.name));
+	// Through RLS: labels of identities restricted to other members stay
+	// hidden (the admin client returned every label of the workspace).
+	const rls = await rlsClient();
+	const rows = await rls((tx) =>
+		tx
+			.select()
+			.from(labels)
+			.where(
+				and(eq(labels.scope, selectedScope), eq(labels.workspaceId, workspaceId)),
+			)
+			.orderBy(asc(labels.name)),
+	);
 
 	return rows as LabelEntity[];
 };
@@ -362,6 +382,7 @@ export async function removeLabelFromThread({
 						eq(mailboxThreadLabels.threadId, threadId),
 						eq(mailboxThreadLabels.mailboxId, mailboxId),
 						eq(mailboxThreadLabels.labelId, labelId),
+						mailboxVisibleSql(mailboxThreadLabels.mailboxId),
 					),
 				)
 				.returning({ labelId: mailboxThreadLabels.labelId }),
@@ -391,6 +412,9 @@ export async function addLabelToContact({
 	labelId: string;
 }): Promise<FormState> {
 	return handleAction(async () => {
+		await requireVisibleContact(contactId);
+		const [owned] = await fetchOwnedLabels([labelId]);
+		if (!owned) throw new Error("Label not found");
 		const rls = await rlsClient();
 
 		await rls((tx) =>
@@ -413,6 +437,7 @@ export async function removeLabelFromContact({
 	labelId: string;
 }): Promise<FormState> {
 	return handleAction(async () => {
+		await requireVisibleContact(contactId);
 		const rls = await rlsClient();
 
 		await rls((tx) =>
@@ -447,7 +472,12 @@ export const fetchMailboxThreadLabels = async (
 			})
 			.from(mailboxThreadLabels)
 			.innerJoin(labels, eq(mailboxThreadLabels.labelId, labels.id))
-			.where(inArray(mailboxThreadLabels.threadId, threadIds)),
+			.where(
+				and(
+					inArray(mailboxThreadLabels.threadId, threadIds),
+					mailboxVisibleSql(mailboxThreadLabels.mailboxId),
+				),
+			),
 	);
 
 	const byThreadId: Record<string, any[]> = {};
@@ -719,6 +749,7 @@ export async function toggleFavoriteContact(formData: FormData) {
 	await handleAction(async () => {
 		const decodedForm = decode(formData);
 		const contactId = String(decodedForm.contactId);
+		await requireVisibleContact(contactId);
 		const rls = await rlsClient();
 		const workspaceId = await getWorkspaceId();
 

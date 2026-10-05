@@ -3,6 +3,7 @@
 import { Tooltip } from "@mantine/core";
 import { Clock4 } from "lucide-react";
 import dynamic from "next/dynamic";
+import type { FormState } from "@schema";
 import { useState } from "react";
 import { toast } from "sonner";
 import { useOptionalI18n } from "@/components/providers/dictionary-provider";
@@ -53,11 +54,15 @@ export default function SnoozeMail({
 
 		setSaving(true);
 		try {
-			await snoozeThread({
+			// handleAction reports failures in the result instead of throwing.
+			const result: FormState = await snoozeThread({
 				mailboxThreadId,
 				activeMailboxId,
 				snoozedUntil: next ? next.toISOString() : null,
 			});
+			if (!result?.success) {
+				throw new Error(result?.error);
+			}
 
 			setSnoozedUntil(next);
 			setDialogOpen(false);

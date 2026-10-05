@@ -13,6 +13,7 @@ import { Dayjs } from "dayjs";
 import { ActionIcon, Alert, Checkbox, Divider, Select } from "@mantine/core";
 import { CalendarEventEntity } from "@db";
 import { Trash } from "lucide-react";
+import { toast } from "sonner";
 import { getDayjsTz, getWallTimeDate } from "@common/day-js-extended";
 import { IconAlertCircle, IconX } from "@tabler/icons-react";
 import { usePathname } from "next/navigation";
@@ -52,6 +53,24 @@ function NewCalendarEventForm({
 		);
 	const pathname = usePathname();
 	const [allDay, setIsAllDay] = useState<boolean>(!!editEvent?.isAllDay);
+	const [deleting, setDeleting] = useState(false);
+
+	// deleteCalendarEvent reports failures in its result (handleAction).
+	const deleteEvent = async (id: string) => {
+		if (deleting) return;
+		setDeleting(true);
+		try {
+			const result = await deleteCalendarEvent(id);
+			if (!result?.success) throw new Error(result?.error);
+			onCompleted([]);
+		} catch (error) {
+			toast.error(dict?.common?.error ?? "Error", {
+				description: error instanceof Error ? error.message : undefined,
+			});
+		} finally {
+			setDeleting(false);
+		}
+	};
 
 	const fields: BaseFormProps["fields"] = [
 		{
@@ -237,11 +256,8 @@ function NewCalendarEventForm({
 								tabIndex={-1}
 								variant={"light"}
 								color={"red"}
-								onClick={() =>
-									deleteCalendarEvent(editEvent.id).then(() => {
-										onCompleted([]);
-									})
-								}
+								loading={deleting}
+								onClick={() => void deleteEvent(editEvent.id)}
 							>
 								<Trash size={12} />
 							</ActionIcon>

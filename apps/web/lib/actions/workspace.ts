@@ -5,7 +5,6 @@ import {and, eq} from "drizzle-orm";
 import {
     db,
     identities,
-    UserEntity,
     workspaceIdentityMembers, workspaceMembers, workspaces,
 } from "@db";
 import {FormState, getServerEnv, handleAction, ThemeNameSchema, WORKSPACE_THEME_COOKIE} from "@schema";
@@ -16,6 +15,8 @@ import {createHash, randomUUID} from "node:crypto";
 import {isSignedIn} from "@/lib/actions/auth";
 import {cookies} from "next/headers";
 import {redirect} from "next/navigation";
+import {setWorkspaceContextCookies} from "@/lib/workspace-context";
+import {isWorkspaceAdminRole, requireUser, requireWorkspaceAdmin, requireWorkspaceMember} from "@/lib/actions/authz";
 
 import {
     fetchWorkspace as fetchWorkspaceShared,
@@ -35,10 +36,17 @@ export async function fetchWorkspace() {
 }
 
 export async function fetchWorkspaceMembers(id: string) {
-    return fetchWorkspaceMembersShared(id);
+    // Public endpoint: only the members of the caller's current workspace
+    // (the shared helper reads with the admin client).
+    const workspaceId = await getWorkspaceId();
+    if (String(id) !== workspaceId) {
+        throw new Error("Workspace not found or no access");
+    }
+    return fetchWorkspaceMembersShared(workspaceId);
 }
 
 export const refreshView = async (path: string) => {
+    await requireUser();
     return refreshViewShared(path);
 };
 
@@ -257,26 +265,45 @@ export type FetchWorkspacesResult = Awaited<
 >;
 
 export const setWorkspaceDefaultIdentity = async (identityId: string) => {
-    const workspace = await fetchWorkspace();
-    if (!workspace) return { success: false };
+    // Workspace setting: owners/admins only, and only an identity of the
+    // current workspace.
+    const { workspaceId } = await requireWorkspaceAdmin();
+
+    const [identity] = await db
+        .select({ id: identities.id })
+        .from(identities)
+        .where(
+            and(
+                eq(identities.id, String(identityId)),
+                eq(identities.workspaceId, workspaceId),
+            ),
+        )
+        .limit(1);
+    if (!identity) return { success: false };
 
     const rls = await rlsClient();
     await rls(async (tx) => {
-        await tx.update(identities).set({ sharedWithWorkspace: true }).where(eq(identities.id, identityId));
+        await tx
+            .update(identities)
+            .set({ sharedWithWorkspace: true })
+            .where(
+                and(
+                    eq(identities.id, identity.id),
+                    eq(identities.workspaceId, workspaceId),
+                ),
+            );
         await tx
             .update(workspaces)
-            .set({ defaultIdentityId: null });
-        await tx
-            .update(workspaces)
-            .set({ defaultIdentityId: identityId })
-            .where(eq(workspaces.id, workspace.id));
+            .set({ defaultIdentityId: identity.id })
+            .where(eq(workspaces.id, workspaceId));
     });
 
     return { success: true };
 };
 
 export const checkDefaultWorkspaceIdentity = async () => {
-    const workspaceId = await getWorkspaceId();
+    const { workspaceId, role } = await requireWorkspaceMember();
+    if (!isWorkspaceAdminRole(role)) return;
     const userId = String((await isSignedIn())?.id);
     const userIdentities = await db.select().from(identities).where(and(
         eq(identities.sharedWithWorkspace, true),
@@ -295,7 +322,10 @@ export async function toggleDefaultIdentity(
 ): Promise<FormState> {
     return handleAction(async () => {
         const decodedForm = decode(formData) as Record<string, unknown>;
-        await setWorkspaceDefaultIdentity(String(decodedForm.identityId));
+        const result = await setWorkspaceDefaultIdentity(String(decodedForm.identityId));
+        if (!result.success) {
+            return { success: false, error: "Identity not found." };
+        }
         revalidatePath("/w/[wPublicId]/dashboard/platform/identities", "page");
         return { success: true };
     });
@@ -316,7 +346,8 @@ export async function updateWorkspace(
             return { success: false, error: "Workspace name is required." };
         }
 
-        const workspaceId = await getWorkspaceId();
+        // Workspace settings: owners/admins only.
+        const { workspaceId } = await requireWorkspaceAdmin();
         const rls = await rlsClient();
 
         const [updated] = await rls((tx) =>
@@ -358,69 +389,16 @@ export const switchWorkSpace = async (workspacePublicId: string, id: string) => 
 export const updateWorkSpaceContext = async (
     workspacePublicId: string,
     id: string,
-    user?: UserEntity
 ) => {
-    const currentUser = user ?? (await isSignedIn());
+    // Public endpoint: always the signed-in user (never a caller-supplied
+    // user object). Membership is checked in setWorkspaceContextCookies.
+    const currentUser = await isSignedIn();
 
     if (!currentUser?.id) {
         throw new Error("Not authenticated.");
     }
 
-    const [[member], [workspace]] = await Promise.all([
-        db
-            .select({ role: workspaceMembers.role })
-            .from(workspaceMembers)
-            .where(
-                and(
-                    eq(workspaceMembers.workspaceId, id),
-                    eq(workspaceMembers.userId, currentUser.id)
-                )
-            )
-            .limit(1),
-        db
-            .select({ theme: workspaces.theme })
-            .from(workspaces)
-            .where(
-                and(eq(workspaces.id, id), eq(workspaces.publicId, workspacePublicId))
-            )
-            .limit(1),
-    ]);
-
-    if (!member || !workspace) {
-        throw new Error("Workspace not found.");
-    }
-
-    const cookieStore = await cookies();
-
-    cookieStore.set({
-        name: "workspaceId",
-        value: id,
-        httpOnly: true,
-        path: "/",
-    });
-
-    cookieStore.set({
-        name: "workspacePublicId",
-        value: workspacePublicId,
-        httpOnly: true,
-        path: "/",
-    });
-
-    cookieStore.set({
-        name: "workspaceRole",
-        value: member.role,
-        httpOnly: true,
-        path: "/",
-    });
-
-    cookieStore.set({
-        name: WORKSPACE_THEME_COOKIE,
-        value: ThemeNameSchema.catch("indigo").parse(workspace.theme),
-        httpOnly: true,
-        sameSite: "lax",
-        path: "/",
-        maxAge: 60 * 60 * 24 * 365,
-    });
+    await setWorkspaceContextCookies(workspacePublicId, id, currentUser.id);
 };
 
 export async function updateWorkspaceLogo(

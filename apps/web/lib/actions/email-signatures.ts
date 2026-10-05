@@ -24,6 +24,7 @@ import {
     getWorkspaceId,
     rlsClient,
 } from "@/lib/actions/clients";
+import { identityVisibleSql } from "@/lib/actions/authz";
 
 const isUuid = (value: string) =>
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
@@ -167,10 +168,7 @@ export async function getEmailSignature(
                 .select()
                 .from(emailSignatures)
                 .where(
-                    eq(
-                        emailSignatures.publicId,
-                        publicId,
-                    ),
+                    and(eq(emailSignatures.publicId, publicId), identityVisibleSql(emailSignatures.identityId)),
                 )
                 .limit(1),
     );
@@ -393,10 +391,7 @@ async function updateSignature(input: {
                 .select()
                 .from(emailSignatures)
                 .where(
-                    eq(
-                        emailSignatures.publicId,
-                        input.publicId,
-                    ),
+                    and(eq(emailSignatures.publicId, input.publicId), identityVisibleSql(emailSignatures.identityId)),
                 )
                 .limit(1);
 
@@ -593,10 +588,7 @@ export async function deleteEmailSignatureAction(
                 tx
                     .delete(emailSignatures)
                     .where(
-                        eq(
-                            emailSignatures.publicId,
-                            publicId,
-                        ),
+                        and(eq(emailSignatures.publicId, publicId), identityVisibleSql(emailSignatures.identityId)),
                     )
                     .returning({
                         publicId:

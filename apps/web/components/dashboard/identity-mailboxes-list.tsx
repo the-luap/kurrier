@@ -517,7 +517,8 @@ export default function IdentityMailboxesList({
 							`/w/${workspacePublicId}/dashboard/mail/${publicId}/inbox`,
 						);
 					}}
-					value={params.identityPublicId}
+					// null (not undefined) keeps the Select controlled on the overview.
+					value={params.identityPublicId ?? null}
 					data={identityMailboxes.map((id) => {
 						return { value: id.identity.publicId, label: id.identity.value };
 					})}

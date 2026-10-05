@@ -55,6 +55,14 @@ async function CalendarViewContent({
 		month: resolvedParams.month ? Number(resolvedParams.month) : undefined,
 		day: resolvedParams.day ? Number(resolvedParams.day) : undefined,
 	};
+	// /calendar/<id>/week/abc/... would otherwise build an invalid range.
+	if (
+		Object.values(viewParams).some(
+			(value) => value !== undefined && !Number.isInteger(value),
+		)
+	) {
+		notFound();
+	}
 
 	const { from, to } = await getRangeForCalendarView(
 		defaultCalendar.timezone,

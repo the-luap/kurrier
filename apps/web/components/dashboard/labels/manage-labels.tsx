@@ -67,16 +67,24 @@ export default function ManageLabels({
 
 		setIsSubmitting(true);
 		try {
-			await updateLabel({
+			const res = await updateLabel({
 				id: editLabelId,
 				name: trimmed,
 				parentId: editParentId || null,
 				color: editColor,
 			});
+			if (!res?.success) {
+				toast.error(dict?.mailbox?.actionFailed ?? "Action failed", {
+					description: res?.error,
+				});
+				return;
+			}
 			close();
+			toast.success(dict?.mailbox?.labelUpdated ?? "Label updated");
+		} catch {
+			toast.error(dict?.mailbox?.actionFailed ?? "Action failed");
 		} finally {
 			setIsSubmitting(false);
-			toast.success(dict?.mailbox?.labelUpdated ?? "Label updated");
 		}
 	};
 
@@ -89,9 +97,17 @@ export default function ManageLabels({
 
 		setIsSubmitting(true);
 		try {
-			await deleteLabel({ id: editLabelId });
+			const res = await deleteLabel({ id: editLabelId });
+			if (!res?.success) {
+				toast.error(dict?.mailbox?.actionFailed ?? "Action failed", {
+					description: res?.error,
+				});
+				return;
+			}
 			setEditLabelId(null);
 			toast.success(dict?.mailbox?.labelDeleted ?? "Label deleted");
+		} catch {
+			toast.error(dict?.mailbox?.actionFailed ?? "Action failed");
 		} finally {
 			setIsSubmitting(false);
 		}

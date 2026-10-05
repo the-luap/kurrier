@@ -3,6 +3,7 @@ import React, {use, useEffect, useState} from "react";
 import { Pagination } from "@mantine/core";
 import { useParams, usePathname, useRouter } from "next/navigation";
 import {FetchMailboxResult} from "@/lib/actions/mailbox";
+import { PAGE_SIZE } from "@common/mail-client";
 
 function MailPagination({
 	// count,
@@ -45,7 +46,7 @@ function MailPagination({
 			<Pagination
 				value={activePage}
 				onChange={updatePageNumber}
-				total={count > 0 ? count / 50 : 0}
+				total={count > 0 ? Math.ceil(count / PAGE_SIZE) : 0}
 			/>
 		</div>
 	);

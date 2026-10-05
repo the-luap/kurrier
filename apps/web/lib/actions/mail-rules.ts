@@ -3,7 +3,8 @@
 import { rlsClient } from "@/lib/actions/clients";
 import {mailRules, mailRuleActions, labels, identities} from "@db";
 import { handleAction, mailRulesActionsList, mailRulesFieldsList, mailRulesOpsList } from "@schema";
-import {asc, eq, ne, not} from "drizzle-orm";
+import {and, asc, eq, ne, not} from "drizzle-orm";
+import { identityVisibleSql } from "@/lib/actions/authz";
 import { revalidatePath } from "next/cache";
 import { decode } from "decode-formdata";
 
@@ -15,7 +16,13 @@ export async function fetchMailRules(identityId: string) {
             .select({ rule: mailRules, action: mailRuleActions })
             .from(mailRules)
             .leftJoin(mailRuleActions, eq(mailRuleActions.ruleId, mailRules.id))
-            .where(eq(mailRules.identityId, identityId))
+            .where(
+                and(
+                    eq(mailRules.identityId, String(identityId)),
+                    // mail_rules RLS is workspace-wide.
+                    identityVisibleSql(mailRules.identityId),
+                ),
+            )
             .orderBy(asc(mailRules.priority), asc(mailRuleActions.order));
 
         const byId = new Map<
@@ -284,7 +291,9 @@ export async function deleteRule(_prev: any, formData: FormData) {
 
         const rls = await rlsClient();
         await rls(async (tx) => {
-            await tx.delete(mailRules).where(eq(mailRules.id, ruleId));
+            await tx
+                .delete(mailRules)
+                .where(and(eq(mailRules.id, ruleId), identityVisibleSql(mailRules.identityId)));
         });
 
         revalidatePath("/dashboard/mail");
@@ -302,7 +311,12 @@ export async function toggleRule(_prev: any, formData: FormData) {
             tx
                 .update(mailRules)
                 .set({ enabled: not(mailRules.enabled) })
-                .where(eq(mailRules.id, String(decodedForm.ruleId)))
+                .where(
+                    and(
+                        eq(mailRules.id, String(decodedForm.ruleId)),
+                        identityVisibleSql(mailRules.identityId),
+                    ),
+                )
                 .returning({ id: mailRules.id }),
         );
         if (!updated.length) throw new Error("Rule not found");

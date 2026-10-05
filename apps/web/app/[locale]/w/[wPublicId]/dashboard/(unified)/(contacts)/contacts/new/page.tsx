@@ -12,6 +12,7 @@ import {
 import { isSignedIn } from "@/lib/actions/auth";
 import { revalidatePath } from "next/cache";
 import {getRedis} from "@/lib/actions/get-redis";
+import { isOwnUploadKey } from "@/lib/upload-keys";
 
 async function Page() {
 	const user = await isSignedIn();
@@ -39,8 +40,34 @@ async function Page() {
 				return { success: false, error: res.error.message };
 			}
 
+			// Only the parsed contact fields; ownership, workspace and DAV
+			// columns are never taken from the form.
+			const {
+				id: _id,
+				ownerId: _ownerId,
+				workspaceId: _workspaceId,
+				davUri: _davUri,
+				davEtag: _davEtag,
+				createdAt: _createdAt,
+				updatedAt: _updatedAt,
+				...fields
+			} = res.data as ContactCreate;
+
+			// Picture keys are signed for display later: only the caller's
+			// own contact uploads.
+			const actor = await isSignedIn();
+			const contactsPrefix = `private/${actor?.id}/contacts/`;
+			for (const value of [fields.profilePicture, fields.profilePictureXs]) {
+				if (
+					value &&
+					!(actor?.id && isOwnUploadKey(value, actor.id) && value.startsWith(contactsPrefix))
+				) {
+					return { success: false, error: "Invalid profile picture" };
+				}
+			}
+
 			const payload = {
-				...decode(formData),
+				...fields,
 				addressBookId: defaultAddressBook.id,
 			};
 			const [newContact] = await rls((tx) =>

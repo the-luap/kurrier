@@ -27,6 +27,13 @@ import { gt, isNull } from "drizzle-orm";
 
 const trimSlashes = (s: string) => s.replace(/^\/+|\/+$/g, "");
 
+/** Drive volumes and entries are private to their owner (RLS is workspace-wide). */
+async function requireDriveUserId() {
+	const user = await isSignedIn();
+	if (!user?.id) throw new Error("Not signed in");
+	return String(user.id);
+}
+
 function assertDriveEnabled() {
 	if (!DISTRIBUTION_CONFIG.features.drive) {
 		throw new Error("Drive is disabled");
@@ -45,13 +52,19 @@ export const normalizeWithinPath = async (segments: string[]) => {
 	const within = isCloud ? cleaned.slice(2) : cleaned;
 	const withinPath = "/" + within.filter(Boolean).join("/");
 
+	const userId = await requireDriveUserId();
 	const rls = await rlsClient();
 	const driveVolume = publicId
 		? await rls(async (tx) => {
 				const [vol] = await tx
 					.select()
 					.from(driveVolumes)
-					.where(eq(driveVolumes.publicId, publicId))
+					.where(
+						and(
+							eq(driveVolumes.publicId, publicId),
+							eq(driveVolumes.ownerId, userId),
+						),
+					)
 					.limit(1);
 				return vol ?? null;
 			})
@@ -128,13 +141,19 @@ export async function addNewFolder(
 			return { success: false, error: "drive.missingVolume" };
 		}
 
+		const userId = await requireDriveUserId();
 		const rls = await rlsClient();
 
 		const volume = await rls(async (tx) => {
 			const [vol] = await tx
 				.select()
 				.from(driveVolumes)
-				.where(eq(driveVolumes.publicId, publicId))
+				.where(
+					and(
+						eq(driveVolumes.publicId, publicId),
+						eq(driveVolumes.ownerId, userId),
+					),
+				)
 				.limit(1);
 
 			return vol ?? null;
@@ -242,8 +261,31 @@ function getVolumePrefix(volume: DriveVolumeEntity) {
 
 export async function fetchCloudListPath(ctx: DriveRouteContext) {
 	assertDriveEnabled();
-	const volume = ctx.driveVolume;
+	// The context comes from the browser: reload the volume (bucket, code,
+	// workspace) from the database; only its public id is taken from ctx.
+	const publicId = ctx?.driveVolume?.publicId;
+	if (!publicId) return [];
+	const userId = await requireDriveUserId();
+	const [volume] = await (await rlsClient())((tx) =>
+		tx
+			.select()
+			.from(driveVolumes)
+			.where(
+				and(
+					eq(driveVolumes.publicId, String(publicId)),
+					eq(driveVolumes.ownerId, userId),
+				),
+			)
+			.limit(1),
+	);
 	if (!volume) return [];
+	if (
+		String(ctx.withinPath || "/")
+			.split("/")
+			.some((segment) => segment === "." || segment === "..")
+	) {
+		throw new Error("Invalid folder path");
+	}
 
 	const volumeId = volume.id;
 	const bucket = String(volume.metaData?.bucket || "");
@@ -491,18 +533,49 @@ export async function getCloudUploadUrl(
 
 
 
+/**
+ * Bucket and key of an entry, checked against its volume: the stored
+ * metadata must point into the volume's own prefix and bucket.
+ */
+async function storedEntryLocation(entry: typeof driveEntries.$inferSelect) {
+	const rls = await rlsClient();
+	const [volume] = await rls((tx) =>
+		tx
+			.select()
+			.from(driveVolumes)
+			.where(eq(driveVolumes.id, entry.volumeId))
+			.limit(1),
+	);
+	if (!volume) throw new Error("Volume not found");
+	const meta = entry.metaData as any;
+	const bucket = String(volume.metaData?.bucket || "");
+	const key = String(meta?.key || "");
+	if (
+		!bucket ||
+		!key ||
+		String(meta?.bucket || bucket) !== bucket ||
+		!key.startsWith(getVolumePrefix(volume)) ||
+		key.split("/").some((part) => part === "..")
+	) {
+		throw new Error("Missing bucket or key");
+	}
+	return { bucket, key };
+}
+
 export async function getDriveDownloadUrl(entryId: string) {
 	assertDriveEnabled();
 
+	const userId = await requireDriveUserId();
 	const rls = await rlsClient();
 	const [entry] = await rls((tx) =>
-		tx.select().from(driveEntries).where(eq(driveEntries.id, entryId)).limit(1),
+		tx
+			.select()
+			.from(driveEntries)
+			.where(and(eq(driveEntries.id, String(entryId)), eq(driveEntries.ownerId, userId)))
+			.limit(1),
 	);
 	if (!entry) throw new Error("Missing drive entry");
-	const meta = entry.metaData as any;
-	const bucket = String(meta?.bucket || "");
-	const key = String(meta?.key || entry.path?.replace(/^\/+/, "") || "");
-	if (!bucket || !key) throw new Error("Missing bucket or key");
+	const { bucket, key } = await storedEntryLocation(entry);
 	return getSignedUrl(
 		s3,
 		new GetObjectCommand({
@@ -518,19 +591,20 @@ export async function getDriveDownloadUrl(entryId: string) {
 export async function deleteDriveEntry(entryId: string) {
 	return handleAction(async () => {
 		assertDriveEnabled();
+		const userId = await requireDriveUserId();
 		const rls = await rlsClient();
 
 		const [entry] = await rls((tx) =>
-			tx.select().from(driveEntries).where(eq(driveEntries.id, entryId)).limit(1),
+			tx
+				.select()
+				.from(driveEntries)
+				.where(and(eq(driveEntries.id, String(entryId)), eq(driveEntries.ownerId, userId)))
+				.limit(1),
 		);
 
 		if (!entry) throw new Error("Missing drive entry");
 
-		const meta = entry.metaData as any;
-		const bucket = String(meta?.bucket || "");
-		const key = String(meta?.key || entry.path?.replace(/^\/+/, "") || "");
-
-		if (!bucket || !key) throw new Error("Missing bucket or key");
+		const { bucket, key } = await storedEntryLocation(entry);
 
 		if (entry.type === "folder") {
 			const prefix = key.endsWith("/") ? key : `${key}/`;
@@ -622,10 +696,15 @@ export async function deleteDriveEntry(entryId: string) {
 export async function getDrivePreviewUrl(entryId: string) {
 	assertDriveEnabled();
 
+	const userId = await requireDriveUserId();
 	const rls = await rlsClient();
 
 	const [entry] = await rls((tx) =>
-		tx.select().from(driveEntries).where(eq(driveEntries.id, entryId)).limit(1)
+		tx
+			.select()
+			.from(driveEntries)
+			.where(and(eq(driveEntries.id, String(entryId)), eq(driveEntries.ownerId, userId)))
+			.limit(1)
 	);
 
 	if (!entry || entry.type !== "file") {
@@ -712,6 +791,7 @@ export async function createDriveShareLink(
 	const token = randomBytes(32).toString("base64url");
 	const tokenHash = createHash("sha256").update(token).digest("hex");
 	const expiresAt = new Date(Date.now() + durationMs);
+	const userId = await requireDriveUserId();
 	const rls = await rlsClient();
 
 	const link = await rls(async (tx) => {
@@ -722,7 +802,7 @@ export async function createDriveShareLink(
 				workspaceId: driveEntries.workspaceId,
 			})
 			.from(driveEntries)
-			.where(eq(driveEntries.id, entryId))
+			.where(and(eq(driveEntries.id, String(entryId)), eq(driveEntries.ownerId, userId)))
 			.limit(1);
 
 		if (!entry || entry.type !== "file") {
@@ -759,13 +839,14 @@ export async function createDriveShareLink(
 export async function listDriveShareLinks(entryId: string) {
 	assertDriveEnabled();
 
+	const userId = await requireDriveUserId();
 	const rls = await rlsClient();
 
 	return rls(async (tx) => {
 		const [entry] = await tx
 			.select({ id: driveEntries.id })
 			.from(driveEntries)
-			.where(eq(driveEntries.id, entryId))
+			.where(and(eq(driveEntries.id, String(entryId)), eq(driveEntries.ownerId, userId)))
 			.limit(1);
 
 		if (!entry) {
@@ -802,13 +883,14 @@ export async function revokeDriveShareLink(
 ) {
 	assertDriveEnabled();
 
+	const userId = await requireDriveUserId();
 	const rls = await rlsClient();
 
 	return rls(async (tx) => {
 		const [entry] = await tx
 			.select({ id: driveEntries.id })
 			.from(driveEntries)
-			.where(eq(driveEntries.id, entryId))
+			.where(and(eq(driveEntries.id, String(entryId)), eq(driveEntries.ownerId, userId)))
 			.limit(1);
 
 		if (!entry) {

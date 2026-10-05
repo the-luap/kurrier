@@ -640,8 +640,9 @@ export default function MailComposer({
                 dict?.common?.success ??
                 "Success",
                 {
+                    // `success` is a boolean; only a message is text.
                     description:
-                    formState.success,
+                    formState.message,
                 },
             );
 

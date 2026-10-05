@@ -334,9 +334,65 @@ function unwrapDocument(html: string) {
 	}>${bodyInner.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "")}</div>`;
 }
 
-const REMOTE_URL = /^\s*(https?:)?\/\//i;
-const CSS_REMOTE_URL = /url\(\s*(['"]?)\s*(https?:)?\/\/[^)]*\)/gi;
+// Anything the browser would fetch is "remote" except inline data: URIs and
+// unresolved cid: references. A plain scheme check is not enough: browsers
+// strip tabs/newlines from URLs, accept backslashes as slashes and resolve
+// "https:host" or relative paths, so all of those must count as remote too.
+const isRemoteUrl = (value: string) => {
+	// Drop ASCII control characters and spaces (U+0000-U+0020).
+	const url = value.replace(/[^\x21-\uFFFF]/g, "");
+	if (!url) return false;
+	return !/^(data|cid):/i.test(url);
+};
+
+// Decode CSS escapes (\75 rl(...), htt\70 s:...) so they cannot hide a URL
+// from the checks below. Escapes that decode to quotes, backslashes,
+// parentheses or whitespace stay escaped so string/token boundaries do not
+// move.
+const decodeCssEscapes = (css: string) =>
+	css.replace(
+		/\\(?:([0-9a-f]{1,6})[ \t\n\r\f]?|([^\n\r\f0-9a-f]))/gi,
+		(sequence, hex: string | undefined, char: string | undefined) => {
+			let decoded = char ?? "";
+			if (hex) {
+				const code = Number.parseInt(hex, 16);
+				if (!(code > 0 && code <= 0x10ffff)) return sequence;
+				decoded = String.fromCodePoint(code);
+			}
+			return /^["'\\()\s]$/.test(decoded) ? sequence : decoded;
+		},
+	);
+
+// The closing parenthesis is optional: an unterminated url( at the end of a
+// style is still fetched.
+const CSS_URL = /url\(\s*(?:"([^"]*)"?|'([^']*)'?|([^)]*))\s*\)?/gi;
+// image-set("…") and @import "…" take plain strings as URLs.
+const CSS_URL_STRING = /(image-set\(|@import\b)[^;{}]*/gi;
 const CSS_IMPORT = /@import\b[^;]*;?/gi;
+
+/** Returns the CSS with remote URLs removed, or null when it has none. */
+function stripCssRemoteUrls(css: string, trustedUrls: Set<string>) {
+	if (!/url|image-set|@import|\\/i.test(css)) return null;
+	const decoded = decodeCssEscapes(css);
+	let found = false;
+	const stripped = decoded
+		.replace(CSS_IMPORT, () => {
+			found = true;
+			return "";
+		})
+		.replace(CSS_URL_STRING, (match) => {
+			if (!/["']/.test(match)) return match;
+			found = true;
+			return "none";
+		})
+		.replace(CSS_URL, (match, dq?: string, sq?: string, bare?: string) => {
+			const url = dq ?? sq ?? bare ?? "";
+			if (!isRemoteUrl(url) || trustedUrls.has(url.trim())) return match;
+			found = true;
+			return "none";
+		});
+	return found ? stripped : null;
+}
 
 const EMPTY_CID_URLS: Record<string, string> = {};
 
@@ -355,10 +411,10 @@ function resolveCids(html: string, cidUrls: Record<string, string>) {
 	});
 }
 
-const hasRemoteSrcset = (value: string) =>
+const hasRemoteSrcset = (value: string, trustedUrls: Set<string>) =>
 	value.split(",").some((candidate) => {
 		const url = candidate.trim().split(/\s+/)[0] ?? "";
-		return REMOTE_URL.test(url);
+		return isRemoteUrl(url) && !trustedUrls.has(url);
 	});
 
 /**
@@ -384,7 +440,7 @@ const prepareHtml = (
 	for (const element of Array.from(doc.body.querySelectorAll("*"))) {
 		for (const attr of ["src", "background", "poster"]) {
 			const value = element.getAttribute(attr);
-			if (!value || !REMOTE_URL.test(value) || trustedUrls.has(value.trim())) {
+			if (!value || !isRemoteUrl(value) || trustedUrls.has(value.trim())) {
 				continue;
 			}
 			hasRemoteImages = true;
@@ -397,7 +453,7 @@ const prepareHtml = (
 		}
 
 		const srcset = element.getAttribute("srcset");
-		if (srcset && hasRemoteSrcset(srcset)) {
+		if (srcset && hasRemoteSrcset(srcset, trustedUrls)) {
 			hasRemoteImages = true;
 			if (!allowRemoteImages) {
 				element.setAttribute("data-blocked-srcset", srcset);
@@ -407,19 +463,16 @@ const prepareHtml = (
 
 		const style = element.getAttribute("style");
 		if (style) {
-			const stripped = style.replace(CSS_REMOTE_URL, "none");
-			if (stripped !== style) {
+			const stripped = stripCssRemoteUrls(style, trustedUrls);
+			if (stripped !== null) {
 				hasRemoteImages = true;
 				if (!allowRemoteImages) element.setAttribute("style", stripped);
 			}
 		}
 
 		if (element.tagName === "STYLE" && element.textContent) {
-			const css = element.textContent;
-			const stripped = css
-				.replace(CSS_REMOTE_URL, "none")
-				.replace(CSS_IMPORT, "");
-			if (stripped !== css) {
+			const stripped = stripCssRemoteUrls(element.textContent, trustedUrls);
+			if (stripped !== null) {
 				hasRemoteImages = true;
 				if (!allowRemoteImages) element.textContent = stripped;
 			}

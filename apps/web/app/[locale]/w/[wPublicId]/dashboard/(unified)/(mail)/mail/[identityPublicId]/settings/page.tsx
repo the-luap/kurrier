@@ -4,6 +4,7 @@ import { type FormState, handleAction } from "@schema";
 import { decode } from "decode-formdata";
 import { eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
+import { notFound } from "next/navigation";
 
 import { rlsClient } from "@/lib/actions/clients";
 import SettingsGeneral from "@/components/mailbox/settings/settings-general";
@@ -50,6 +51,8 @@ async function SettingsGeneralContent({ params }: PageProps) {
 			.where(eq(identities.publicId, paramsResolved.identityPublicId))
 			.limit(1)
 	);
+
+	if (!identity) notFound();
 
 	const updateName = async (
 		_prev: FormState,

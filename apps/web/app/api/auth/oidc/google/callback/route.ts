@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import { cookies } from "next/headers";
 import { NextRequest, NextResponse } from "next/server";
 import { and, eq, sql } from "drizzle-orm";
+import { getPublicEnv } from "@schema";
 import {
     authAccounts,
     authProviders,
@@ -15,7 +16,7 @@ import {
     createSessionForUser,
     createUserWithWorkspace,
     getWorkspaceRedirectUrl,
-} from "@/lib/actions/auth";
+} from "@/lib/auth-session";
 
 const GOOGLE_ISSUER = "https://accounts.google.com";
 const GOOGLE_PROVIDER_NAME = "google";
@@ -138,6 +139,12 @@ export async function GET(request: NextRequest) {
             .limit(1);
 
         if (!existingUser) {
+            // Google accounts are public: honour DISABLE_SIGNUP here too,
+            // otherwise anyone with a Google account could create a user.
+            if (getPublicEnv().DISABLE_SIGNUP) {
+                return NextResponse.redirect(new URL("/auth/login", baseUrl));
+            }
+
             const passwordHash = await argon2.hash(crypto.randomUUID());
 
             const createdUser = await createUserWithWorkspace({

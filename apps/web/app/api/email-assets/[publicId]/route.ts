@@ -80,6 +80,7 @@ export async function GET(
             "Cache-Control":
                 "public, max-age=31536000, immutable",
             "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
             "Cross-Origin-Resource-Policy":
                 "cross-origin",
             "Access-Control-Allow-Origin": "*",

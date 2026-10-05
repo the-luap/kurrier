@@ -5,6 +5,7 @@ import { Clock, Paperclip, Trash } from "lucide-react";
 import * as React from "react";
 import { useMemo } from "react";
 import { ReusableFormButton } from "@/components/common/reusable-form-button";
+import { useIsClient } from "@/components/mailbox/default/thread-list-utils";
 import { useOptionalDictionary } from "@/components/providers/dictionary-provider";
 import { deleteScheduledDraft } from "@/lib/actions/mailbox";
 
@@ -90,10 +91,14 @@ function hasAttachments(payload: Record<string, any>) {
 
 function ScheduledListItem({ draft }: { draft: DraftMessageRow }) {
 	const dict = useOptionalDictionary();
-	const scheduledLabel = formatDateLabel(
-		draft.scheduledAt ?? draft.updatedAt ?? draft.createdAt ?? Date.now(),
-		dict?.locale,
-	);
+	// Viewer-timezone label on the client only, so SSR and hydration agree.
+	const isClient = useIsClient();
+	const scheduledLabel = isClient
+		? formatDateLabel(
+				draft.scheduledAt ?? draft.updatedAt ?? draft.createdAt ?? undefined,
+				dict?.locale,
+			)
+		: "";
 	const toLabel = getToLabel(draft.payload);
 	const subject = getSubject(draft.payload);
 	const preview = getPreview(draft.payload);
@@ -119,7 +124,8 @@ function ScheduledListItem({ draft }: { draft: DraftMessageRow }) {
 					<div className="mt-1 flex items-center gap-1 text-xs text-muted-foreground">
 						<Clock className="h-3.5 w-3.5" />
 						<span className="whitespace-nowrap">
-							Scheduled for {scheduledLabel}
+							{dict?.mailbox?.scheduledBullet ?? "Scheduled • "}
+							{scheduledLabel}
 						</span>
 					</div>
 				</div>

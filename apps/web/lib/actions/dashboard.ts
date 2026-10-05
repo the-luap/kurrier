@@ -35,8 +35,13 @@ import {
 	Providers,
 	SmtpAccountFormSchema,
 	SYSTEM_MAILBOXES,
+	webHookList,
 } from "@schema";
-import { currentSession, isSignedIn } from "@/lib/actions/auth";
+import { isMetadataOrLinkLocalAddress } from "@/lib/safe-url";
+import { httpOutboundPolicy, isBlockedIp } from "@providers/net-guard";
+import { isIP } from "node:net";
+import { isSignedIn } from "@/lib/actions/auth";
+import { readSessionToken as currentSession } from "@/lib/auth-session";
 import {and, count, eq, sql, gte, desc, sum, countDistinct} from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { decode } from "decode-formdata";
@@ -68,6 +73,7 @@ import {
 	verifySMTPAccount
 } from "@/lib/actions/email-identity";
 import { access } from "@/lib/actions/shared";
+import { requireWorkspaceAdmin } from "@/lib/actions/authz";
 
 const DASHBOARD_PATH = "/w/[workspaceId]/dashboard/providers";
 const CURRENT_API_VERSION = 1;
@@ -81,6 +87,52 @@ const withInboundWebhookToken = (url: string) => {
 	withToken.searchParams.set("token", secret);
 	return withToken.toString();
 };
+
+/** A provider of the caller's workspace (through RLS), or throws. */
+async function requireWorkspaceProvider(providerId: string) {
+	if (!providerId) throw new Error("Provider not found");
+	const rls = await rlsClient();
+	const [provider] = await rls((tx) =>
+		tx
+			.select()
+			.from(providers)
+			.where(eq(providers.id, String(providerId)))
+			.limit(1),
+	);
+	if (!provider) throw new Error("Provider not found");
+	return provider;
+}
+
+/** Stored, decrypted secret row of a workspace provider (never client data). */
+async function loadProviderSecretRow(providerId: string | null | undefined) {
+	if (!providerId) return undefined;
+	const [row] = await fetchDecryptedSecrets({
+		linkTable: providerSecrets,
+		foreignCol: providerSecrets.providerId,
+		secretIdCol: providerSecrets.secretId,
+		parentId: String(providerId),
+	});
+	return row;
+}
+
+/** Identity (+ SMTP account / provider) of the current workspace, or throws. */
+async function loadWorkspaceIdentityRow(identityId: string, workspaceId: string) {
+	if (!identityId) throw new Error("Identity not found");
+	const [row] = await db
+		.select()
+		.from(identities)
+		.leftJoin(smtpAccounts, eq(identities.smtpAccountId, smtpAccounts.id))
+		.leftJoin(providers, eq(identities.providerId, providers.id))
+		.where(
+			and(
+				eq(identities.id, String(identityId)),
+				eq(identities.workspaceId, workspaceId),
+			),
+		)
+		.limit(1);
+	if (!row) throw new Error("Identity not found");
+	return row;
+}
 
 export const syncProviders = async () => {
 	const rls = await rlsClient();
@@ -97,6 +149,7 @@ export async function upsertProviderAccount(
 	formData: FormData,
 ): Promise<FormState> {
 	return handleAction(async () => {
+		await requireWorkspaceAdmin();
 		const session = await currentSession();
 		const data = decode(formData);
 		const workspaceId = await getWorkspaceId();
@@ -114,6 +167,8 @@ export async function upsertProviderAccount(
 
 
 		const parsed = ProviderAccountFormSchema.parse(data);
+		// The provider id comes from the form: it must be ours.
+		await requireWorkspaceProvider(String(parsed.providerId));
 
 		const rls = await rlsClient();
 		if (!DISTRIBUTION_CONFIG.features.drive) {
@@ -166,6 +221,7 @@ export async function upsertSMTPAccount(
 	formData: FormData,
 ): Promise<FormState> {
 	return handleAction(async () => {
+		await requireWorkspaceAdmin();
 		const data = decode(formData);
 		const parsed = SmtpAccountFormSchema.parse(data);
 
@@ -203,6 +259,7 @@ export async function connectCustomEmailProvider(
 	formData: FormData,
 ): Promise<FormState> {
 	return handleAction(async () => {
+		await requireWorkspaceAdmin();
 		const credentials = CustomEmailProviderCredentialsSchema.parse(
 			decode(formData),
 		);
@@ -340,6 +397,8 @@ export async function fetchDecryptedSecrets({
 	secretIdCol: PgColumn;
 	parentId?: string;
 }) {
+	// Returns decrypted provider/SMTP credentials: owners/admins only.
+	await requireWorkspaceAdmin();
 	const rls = await rlsClient();
 	const session = await currentSession();
 
@@ -407,6 +466,7 @@ export type FetchDecryptedSecretsResultRow =
 
 export const deleteSmtpAccount = async (id: string): Promise<FormState> => {
 	return handleAction(async () => {
+		await requireWorkspaceAdmin();
 		const rls = await rlsClient();
 
 		await rls(async (tx) => {
@@ -430,6 +490,7 @@ export const deleteSmtpAccount = async (id: string): Promise<FormState> => {
 export const verifySmtpAccount = async (
 	smtpSecret: FetchDecryptedSecretsResultRow,
 ): Promise<FormState<VerifyResult>> => {
+	await requireWorkspaceAdmin();
 	const result = await verifySMTPAccount(
 		String(smtpSecret.linkRow?.accountId),
 	);
@@ -438,6 +499,7 @@ export const verifySmtpAccount = async (
 };
 
 export const getProviderById = async (providerId: string) => {
+	await requireWorkspaceAdmin();
 	const rls = await rlsClient();
 	const [provider] = await rls((tx) =>
 		tx.select().from(providers).where(eq(providers.id, providerId)),
@@ -449,6 +511,7 @@ export async function initializeDomainIdentity(
 	data: Record<string, unknown>,
 ): Promise<FormState<{ identity: DomainIdentity }>> {
 	return handleAction(async () => {
+		await requireWorkspaceAdmin();
 		const [secret] = await fetchDecryptedSecrets({
 			linkTable: providerSecrets,
 			foreignCol: providerSecrets.providerId,
@@ -500,7 +563,9 @@ export async function addNewDomainIdentity(
 	formData: FormData,
 ): Promise<FormState<DomainIdentityResult["data"]>> {
 	return handleAction(async () => {
+		await requireWorkspaceAdmin();
 		const parsed = DomainIdentityFormSchema.parse(decode(formData));
+		await requireWorkspaceProvider(String(parsed.providerId));
 		const { success, data, error } = await initializeDomainIdentity(parsed);
 
 		if (!success || !data?.identity)
@@ -529,10 +594,23 @@ export async function addNewDomainIdentity(
 }
 
 export async function verifyDomainIdentity(
-	userDomainIdentity: FetchUserIdentitiesResult[number],
-	providerAccount: FetchDecryptedSecretsResult[number] | undefined,
+	clientDomainIdentity: FetchUserIdentitiesResult[number],
+	_clientProviderAccount: FetchDecryptedSecretsResult[number] | undefined,
 ): Promise<FormState<DomainIdentity>> {
 	return handleAction(async () => {
+		// Both arguments come from the browser: only the identity id is used,
+		// identity and provider credentials are reloaded server-side.
+		const { workspaceId } = await requireWorkspaceAdmin();
+		const userDomainIdentity = await loadWorkspaceIdentityRow(
+			String(clientDomainIdentity?.identities?.id ?? ""),
+			workspaceId,
+		);
+		const providerAccount = await loadProviderSecretRow(
+			userDomainIdentity.identities.providerId,
+		);
+		if (!providerAccount?.provider) {
+			throw new Error("dashboard.noProviderSecretFound");
+		}
 		const decrypted = providerAccount?.parsedSecret;
 		const mailer = createMailer(
 			providerAccount?.provider?.type as Providers,
@@ -616,9 +694,8 @@ export const initializeMailboxes = async (clientIdentity: IdentityEntity, _userI
 	// Reload it and require it to live in the caller's (membership-checked)
 	// workspace. Not an RLS select: a freshly created identity that is not
 	// shared and not assigned to the creator is invisible through RLS.
-	const sessionUser = await isSignedIn();
-	if (!sessionUser?.id) throw new Error("Not authenticated");
-	const currentWorkspaceId = await getWorkspaceId();
+	const { user: sessionUser, workspaceId: currentWorkspaceId } =
+		await requireWorkspaceAdmin();
 	const [emailIdentity] = await db
 		.select()
 		.from(identities)
@@ -679,7 +756,16 @@ const assignWorkspaceMembersToIdentity = async (
 ) => {
 	const rls = await rlsClient();
 
-	const listIds = list ? list.split(",").filter(Boolean) : [];
+	const requested = list ? String(list).split(",").filter(Boolean) : [];
+	if (!requested.length) return;
+	const members = await rls((tx) =>
+		tx
+			.select({ userId: workspaceMembers.userId })
+			.from(workspaceMembers)
+			.where(eq(workspaceMembers.workspaceId, identity.workspaceId)),
+	);
+	const memberIds = new Set(members.map((m) => String(m.userId)));
+	const listIds = requested.filter((id) => memberIds.has(id));
 	if (!listIds.length) return;
 
 	await rls((tx) =>
@@ -693,8 +779,23 @@ const assignWorkspaceMembersToIdentity = async (
 };
 
 export const assignIdentityToAllWorkspaceMembers = async (
-	identity: IdentityEntity
+	clientIdentity: IdentityEntity
 ) => {
+	// Public endpoint: granting identity access is an admin operation, and
+	// the identity must be one of the current workspace (not client data).
+	const { workspaceId } = await requireWorkspaceAdmin();
+	const [identity] = await db
+		.select({ id: identities.id, workspaceId: identities.workspaceId })
+		.from(identities)
+		.where(
+			and(
+				eq(identities.id, String(clientIdentity?.id ?? "")),
+				eq(identities.workspaceId, workspaceId),
+			),
+		)
+		.limit(1);
+	if (!identity) throw new Error("Identity not found");
+
 	const rls = await rlsClient();
 
 	const members = await rls((tx) => tx.select().from(workspaceMembers).where(eq(workspaceMembers.workspaceId, identity.workspaceId)));
@@ -715,6 +816,7 @@ export async function addNewEmailIdentity(
 	formData: FormData,
 ) {
 	return handleAction(async () => {
+		await requireWorkspaceAdmin();
 		const rls = await rlsClient();
 		const data = decode(formData) as Record<string, any>;
 
@@ -850,8 +952,19 @@ export async function addNewEmailIdentity(
 				tx
 					.select()
 					.from(identities)
-					.where(eq(identities.id, String(data.domainIdentityId))),
+					.where(
+						and(
+							eq(identities.id, String(data.domainIdentityId)),
+							eq(identities.workspaceId, workspaceId),
+							eq(identities.kind, "domain"),
+						),
+					),
 			);
+			if (!domainIdentity?.providerId) {
+				throw new Error("Domain identity not found");
+			}
+			// The provider is the domain's, not whatever the form says.
+			data.providerId = domainIdentity.providerId;
 
 			const id = uuidv4();
 			const initRes = await initializeEmailIdentity(data, id);
@@ -862,14 +975,19 @@ export async function addNewEmailIdentity(
 
 			const { response, parsedVaultValues, secret } = initRes.data;
 
-			data.metaData = response;
-			data.id = id;
-			data.sharedWithWorkspace = sharedWithWorkspace;
-
+			// Explicit fields only: spreading the form let callers set
+			// workspaceId, ownerId, status, smtpAccountId, ...
 			const identityData = IdentityInsertSchema.parse({
+				id,
 				workspaceId,
 				ownerId: userId,
-				...data,
+				kind: "email",
+				value: String(data.value ?? "").trim(),
+				displayName: data.displayName ? String(data.displayName) : undefined,
+				domainIdentityId: domainIdentity.id,
+				providerId: domainIdentity.providerId,
+				sharedWithWorkspace,
+				metaData: response,
 			});
 
 			const [emailIdentity] = await db
@@ -912,10 +1030,34 @@ export async function addNewEmailIdentity(
 }
 
 export const testSendingEmail = async (
-	userIdentity: FetchUserIdentitiesResult[number],
-	decryptedSecrets: Record<any, unknown>,
+	clientIdentity: FetchUserIdentitiesResult[number],
+	_clientSecrets: Record<any, unknown>,
 ) => {
 	return handleAction(async () => {
+		// The browser only names the identity; the identity, the SMTP host
+		// and the credentials are reloaded server-side (a caller-supplied
+		// SMTP config was an SSRF / relay primitive).
+		const { workspaceId } = await requireWorkspaceAdmin();
+		const userIdentity = await loadWorkspaceIdentityRow(
+			String(clientIdentity?.identities?.id ?? ""),
+			workspaceId,
+		);
+		let decryptedSecrets: Record<any, unknown> = {};
+		if (userIdentity.smtp_accounts) {
+			const [smtpRow] = await fetchDecryptedSecrets({
+				linkTable: smtpAccountSecrets,
+				foreignCol: smtpAccountSecrets.accountId,
+				secretIdCol: smtpAccountSecrets.secretId,
+				parentId: userIdentity.smtp_accounts.id,
+			});
+			if (!smtpRow) throw new Error("SMTP account secret not found");
+			decryptedSecrets = smtpRow.parsedSecret;
+		} else if (userIdentity.providers) {
+			const providerRow = await loadProviderSecretRow(userIdentity.providers.id);
+			if (!providerRow) throw new Error("dashboard.noProviderSecretFound");
+			decryptedSecrets = providerRow.parsedSecret;
+		}
+
 		if (userIdentity?.smtp_accounts) {
 			const mailer = createMailer("smtp", decryptedSecrets);
 
@@ -967,7 +1109,7 @@ export const testSendingEmail = async (
 };
 
 export const fetchUserIdentities = async () => {
-	const workspaceId = await getWorkspaceId();
+	const { workspaceId } = await requireWorkspaceAdmin();
 	return db.select()
 		.from(identities)
 		.leftJoin(smtpAccounts, eq(identities.smtpAccountId, smtpAccounts.id))
@@ -978,10 +1120,22 @@ export const fetchUserIdentities = async () => {
 };
 
 export const deleteDomainIdentity = async (
-	userDomainIdentity: FetchUserIdentitiesResult[number],
-	providerAccount: FetchDecryptedSecretsResult[number] | undefined,
+	clientDomainIdentity: FetchUserIdentitiesResult[number],
+	_clientProviderAccount: FetchDecryptedSecretsResult[number] | undefined,
 ): Promise<FormState> => {
 	return handleAction(async () => {
+		// Only the identity id is taken from the browser.
+		const { workspaceId } = await requireWorkspaceAdmin();
+		const userDomainIdentity = await loadWorkspaceIdentityRow(
+			String(clientDomainIdentity?.identities?.id ?? ""),
+			workspaceId,
+		);
+		if (userDomainIdentity.identities.kind !== "domain") {
+			throw new Error("Identity not found");
+		}
+		const providerAccount = await loadProviderSecretRow(
+			userDomainIdentity.identities.providerId,
+		);
 		const rls = await rlsClient();
 		const emailsUsingThisDomain = await rls((tx) =>
 			tx
@@ -1042,10 +1196,8 @@ export const deleteEmailIdentity = async (
 		// workspace (also ones restricted to other members, which RLS hides);
 		// other members only identities they can see.
 		const identityId = String(clientIdentity?.identities?.id);
-		const [workspaceId, workspaceRole] = await Promise.all([
-			getWorkspaceId(),
-			getWorkspaceRole(),
-		]);
+		// Identity management is an owner/admin operation.
+		const { workspaceId, role: workspaceRole } = await requireWorkspaceAdmin();
 		const [userIdentity] = await db
 			.select()
 			.from(identities)
@@ -1126,12 +1278,21 @@ export const deleteEmailIdentity = async (
 };
 
 export const verifyProviderAccount = async (
-	providerType: Providers,
-	providerSecret: FetchDecryptedSecretsResultRow,
+	_clientProviderType: Providers,
+	clientProviderSecret: FetchDecryptedSecretsResultRow,
 ) => {
 	return handleAction(async () => {
 		let res = { ok: false, message: "Not implemented" } as VerifyResult;
-		const workspaceId = await getWorkspaceId();
+		// Only the provider id is taken from the browser: type, credentials
+		// and secret ids are reloaded from the caller's workspace.
+		const { workspaceId } = await requireWorkspaceAdmin();
+		const providerSecret = await loadProviderSecretRow(
+			String(clientProviderSecret?.linkRow?.providerId ?? ""),
+		);
+		if (!providerSecret?.provider) {
+			throw new Error("dashboard.noProviderSecretFound");
+		}
+		const providerType = providerSecret.provider.type as Providers;
 		if (providerType === "ses") {
 			const mailer = createMailer("ses", providerSecret.parsedSecret);
 			const { WEB_URL } = getPublicEnv();
@@ -1413,6 +1574,7 @@ export async function addApiKey(
 	formData: FormData,
 ): Promise<FormState> {
 	return handleAction(async () => {
+		await requireWorkspaceAdmin();
 		const session = await currentSession();
 		const data = decode(formData);
 		const workspaceId = await getWorkspaceId();
@@ -1470,9 +1632,10 @@ export async function addApiKey(
 }
 
 export const fetchUserAPIKeys = async () => {
+	// Returns raw API keys: owners/admins only.
+	const { workspaceId } = await requireWorkspaceAdmin();
 	const rls = await rlsClient();
 	const session = await currentSession();
-	const workspaceId = await getWorkspaceId();
 
 	const apiKeyRows = await rls((tx) =>
 		tx
@@ -1522,6 +1685,7 @@ export const regenerateDavPassword = async () => {
 
 export async function addNewVolume(_prev: FormState, formData: FormData) {
 	return handleAction(async () => {
+		await requireWorkspaceAdmin();
 		if (!DISTRIBUTION_CONFIG.features.drive) {
 			throw new Error("Drive is disabled");
 		}
@@ -1600,7 +1764,45 @@ export async function addNewVolume(_prev: FormState, formData: FormData) {
 }
 
 
+/**
+ * Webhook targets: http(s) only, no credentials, never cloud metadata or
+ * link-local addresses; private/loopback only with
+ * OUTBOUND_ALLOW_PRIVATE_NETWORKS=true. The worker repeats the check at
+ * connect time (DNS names are resolved there).
+ */
+function parseWebhookUrl(rawUrl: string) {
+	let url: URL;
+	try {
+		url = new URL(rawUrl.trim());
+	} catch {
+		throw new Error("Invalid webhook URL");
+	}
+	if (url.protocol !== "https:" && url.protocol !== "http:") {
+		throw new Error("Webhook URL must use http or https");
+	}
+	if (url.username || url.password) {
+		throw new Error("Webhook URL must not contain credentials");
+	}
+	// Same rule as the public API (apps/worker/lib/api-helpers.ts
+	// assertValidWebhookUrl): literal internal / link-local / metadata IPs are
+	// rejected unless OUTBOUND_ALLOW_PRIVATE_NETWORKS=true.
+	const host = url.hostname.replace(/^\[|\]$/g, "");
+	if (
+		!host ||
+		isMetadataOrLinkLocalAddress(host) ||
+		(isIP(host) !== 0 && isBlockedIp(host, httpOutboundPolicy())) ||
+		(!httpOutboundPolicy().allowPrivate &&
+			(host.toLowerCase() === "localhost" || host.toLowerCase().endsWith(".localhost")))
+	) {
+		throw new Error(
+			"Webhook url must be a public http(s) URL (internal addresses are not allowed)",
+		);
+	}
+	return url.toString();
+}
+
 export const fetchUserWebhooks = async () => {
+	await requireWorkspaceAdmin();
 	const rls = await rlsClient();
 
 	const hookRows = await rls((tx) =>
@@ -1625,14 +1827,30 @@ export async function addWebhook(
 	formData: FormData,
 ): Promise<FormState> {
 	return handleAction(async () => {
+		await requireWorkspaceAdmin();
 		const data = decode(formData);
-		const insertPayload = {
-			url: data.url,
-			identityId: data.identityId ?? null,
-			events: [data.scope],
-		};
-
+		const url = parseWebhookUrl(String(data.url ?? ""));
+		const identityId = data.identityId ? String(data.identityId) : null;
 		const rls = await rlsClient();
+		if (identityId) {
+			const [identity] = await rls((tx) =>
+				tx
+					.select({ id: identities.id })
+					.from(identities)
+					.where(eq(identities.id, identityId))
+					.limit(1),
+			);
+			if (!identity) throw new Error("Identity not found");
+		}
+		const insertPayload = {
+			url,
+			identityId,
+			events: [String(data.scope ?? "")],
+		};
+		if (!(webHookList as readonly string[]).includes(insertPayload.events[0])) {
+			throw new Error("Invalid webhook event");
+		}
+
 		await rls((tx) =>
 			tx
 				.insert(webhooks)
@@ -1652,6 +1870,7 @@ export const deleteWebhook = async (
 	formData: FormData,
 ): Promise<FormState> => {
 	return handleAction(async () => {
+		await requireWorkspaceAdmin();
 		const data = decode(formData);
 		const rls = await rlsClient();
 		await rls((tx) =>
@@ -1719,9 +1938,21 @@ export type FetchGoogleAccountsResultRow = FetchGoogleAccountsResult[number];
 
 export const verifyGoogleAccount = async (googleAccountId: string) => {
 	return handleAction(async () => {
+		await requireWorkspaceAdmin();
+		const rls = await rlsClient();
+		const [ownAccount] = await rls((tx) =>
+			tx
+				.select({ id: googleAccounts.id })
+				.from(googleAccounts)
+				.where(eq(googleAccounts.id, String(googleAccountId)))
+				.limit(1),
+		);
+		if (!ownAccount) {
+			return { success: false, error: "dashboard.googleAccountNotFound" };
+		}
 		try {
 			const { gmail, googleAccount, markConnected } =
-				await gmailClientForGoogleAccount(googleAccountId);
+				await gmailClientForGoogleAccount(ownAccount.id);
 
 			const profile = await gmail.users.getProfile({ userId: "me" });
 
@@ -1784,6 +2015,7 @@ export async function createProviderIdentity(
 	formData: FormData,
 ): Promise<FormState> {
 	return handleAction(async () => {
+		await requireWorkspaceAdmin();
 		const data = decode(formData);
 		const providerType = data.providerType;
 
@@ -1903,6 +2135,7 @@ export async function createProviderIdentity(
 export const fetchProviderIdentities = async (
 	providerType: SimpleEmailIdentityProvider,
 ) => {
+	await requireWorkspaceAdmin();
 	const rls = await rlsClient();
 	return rls((tx) =>
 		tx
@@ -1931,6 +2164,7 @@ export const deleteProviderIdentity = async (
 	providerType: SimpleEmailIdentityProvider,
 ): Promise<FormState> => {
 	return handleAction(async () => {
+		await requireWorkspaceAdmin();
 		const rls = await rlsClient();
 		const workspaceId = await getWorkspaceId();
 
@@ -2012,9 +2246,9 @@ const GOOGLE_MAIL_OAUTH_SECRET_NAME = "GOOGLE_MAIL_OAUTH_CONFIG";
 const CUSTOM_EMAIL_PROVIDERS_SECRET_NAME = "CUSTOM_EMAIL_PROVIDERS";
 
 export async function fetchCustomEmailProviders() {
+	const { workspaceId } = await requireWorkspaceAdmin();
 	const rls = await rlsClient();
 	const session = await currentSession();
-	const workspaceId = await getWorkspaceId();
 
 	const [row] = await rls((tx) =>
 		tx
@@ -2046,9 +2280,10 @@ export async function fetchCustomEmailProviders() {
 }
 
 export async function fetchGoogleOAuthConfig(): Promise<GoogleOAuthConfig | null> {
+	// Contains the OAuth client secret: owners/admins only.
+	const { workspaceId } = await requireWorkspaceAdmin();
 	const rls = await rlsClient();
 	const session = await currentSession();
-	const workspaceId = await getWorkspaceId();
 
 	const [row] = await rls((tx) =>
 		tx
@@ -2106,6 +2341,7 @@ export async function saveGoogleOAuthConfig(
 	formData: FormData,
 ): Promise<FormState> {
 	return handleAction(async () => {
+		await requireWorkspaceAdmin();
 		const data = decode(formData);
 
 		const clientId = String(data.clientId ?? "").trim();
@@ -2182,6 +2418,7 @@ export async function saveMailtrapCredentials(
 	formData: FormData,
 ): Promise<FormState> {
 	return handleAction(async () => {
+		await requireWorkspaceAdmin();
 		const data = decode(formData);
 
 		const providerId = String(data.providerId || "").trim();
@@ -2212,6 +2449,9 @@ export async function saveMailtrapCredentials(
 			};
 		}
 
+
+		// The provider id comes from the form: it must be ours.
+		await requireWorkspaceProvider(providerId);
 
 		const rls = await rlsClient();
 
@@ -2306,6 +2546,7 @@ export const verifyMailtrapConnection = async (
 	formData: FormData,
 ): Promise<FormState<VerifyResult>> => {
 	return handleAction(async () => {
+		await requireWorkspaceAdmin();
 		const providerId = String(formData.get("providerId") || "").trim();
 
 		if (!providerId) {
@@ -2376,6 +2617,7 @@ export async function saveCustomEmailProvider(
 	formData: FormData,
 ): Promise<FormState> {
 	return handleAction(async () => {
+		await requireWorkspaceAdmin();
 		const data = decode(formData);
 
 		const name = String(data.name ?? "").trim();
@@ -2505,6 +2747,7 @@ export async function deleteCustomEmailProvider(
 	providerId: string,
 ): Promise<FormState> {
 	return handleAction(async () => {
+		await requireWorkspaceAdmin();
 		const providers = await fetchCustomEmailProviders();
 
 		const nextProviders = providers.filter(

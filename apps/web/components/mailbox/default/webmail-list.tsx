@@ -209,6 +209,22 @@ function WebmailRows({
 	const { state, setState } = useDynamicContext<SelectionState>();
 	const selectedThreadIds = state.selectedThreadIds;
 
+	// The list stays mounted across ?page= changes and refreshes after a
+	// move/delete: drop selected threads that are no longer listed, so bulk
+	// actions never act on rows the user cannot see.
+	useEffect(() => {
+		const visible = new Set(mailboxThreads.map((t) => t.threadId));
+		setState((prev) => {
+			let changed = false;
+			const next = new Set<string>();
+			for (const id of prev.selectedThreadIds) {
+				if (visible.has(id)) next.add(id);
+				else changed = true;
+			}
+			return changed ? { ...prev, selectedThreadIds: next } : prev;
+		});
+	}, [mailboxThreads, setState]);
+
 	const onToggleSelect = useCallback(
 		(threadId: string, checked: boolean) => {
 			setState((prev) => {

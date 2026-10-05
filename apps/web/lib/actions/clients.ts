@@ -1,4 +1,5 @@
-import { currentSession, isSignedIn } from "@/lib/actions/auth";
+import { isSignedIn } from "@/lib/actions/auth";
+import { readSessionToken as currentSession } from "@/lib/auth-session";
 import {
 	createDrizzleClientInstance,
 	db,
@@ -123,18 +124,11 @@ export const getWorkspacePublicId = async () => {
 };
 
 export const getWorkspaceRole = async () => {
+	// Always the role from the database. The "workspaceRole" cookie is only a
+	// hint written at workspace switch; cookies are client controlled and must
+	// never grant a role.
 	const workspace = await currentWorkspaceContext();
-	if (!workspace) return "";
-	const cookieStore = await cookies();
-	const cookieWorkspaceId = usableCookieValue(
-		cookieStore.get("workspaceId")?.value,
-	);
-	// The role cookie belongs to the cookie workspace only.
-	if (cookieWorkspaceId === workspace.id) {
-		const role = usableCookieValue(cookieStore.get("workspaceRole")?.value);
-		if (role) return role;
-	}
-	return workspace.role;
+	return workspace?.role ?? "";
 };
 
 /** Membership check, deduplicated per request. */

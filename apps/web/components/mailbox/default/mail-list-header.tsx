@@ -421,7 +421,7 @@ function MailListHeader({
 								</AlertDialogTitle>
 								<AlertDialogDescription>
 									{dict?.mailbox?.emptyBinConfirmDescription ??
-										"This action cannot be undone. This will permanently delete your account and remove your data from our servers."}
+										"This action cannot be undone. All messages in the Trash will be permanently deleted."}
 								</AlertDialogDescription>
 							</AlertDialogHeader>
 							<AlertDialogFooter>

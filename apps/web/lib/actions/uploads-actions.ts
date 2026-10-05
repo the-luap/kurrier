@@ -7,9 +7,10 @@ import {DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectComma
 import {getSignedUrl} from "@aws-sdk/s3-request-presigner";
 import {s3} from "@/lib/create-s3-client";
 import {emailAssets, messages} from "@db";
-import {eq} from "drizzle-orm";
+import {and, eq} from "drizzle-orm";
 import {getWorkspaceId, rlsClient} from "@/lib/actions/clients";
 import {isOwnUploadKey} from "@/lib/upload-keys";
+import {mailboxVisibleSql} from "@/lib/actions/authz";
 
 export async function createAttachmentUploadUrl(input: {
     fileName: string;
@@ -77,7 +78,13 @@ export async function getRawMessageDownloadUrl(messageId: string) {
         tx
             .select()
             .from(messages)
-            .where(eq(messages.id, messageId))
+            .where(
+                and(
+                    eq(messages.id, String(messageId)),
+                    // messages RLS is workspace-wide.
+                    mailboxVisibleSql(messages.mailboxId),
+                ),
+            )
             .limit(1),
     );
     if (!message?.rawStorageKey) {
