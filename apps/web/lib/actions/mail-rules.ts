@@ -1,9 +1,9 @@
 "use server";
 
 import { rlsClient } from "@/lib/actions/clients";
-import {mailRules, mailRuleActions, labels} from "@db";
+import { identities, labels, mailRuleActions, mailRules } from "@db";
 import { handleAction, mailRulesActionsList, mailRulesFieldsList, mailRulesOpsList } from "@schema";
-import {asc, eq, ne} from "drizzle-orm";
+import { asc, eq, ne, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { decode } from "decode-formdata";
 
@@ -94,7 +94,7 @@ function validateRulePayload(p: {
     return errors;
 }
 
-export async function buildRulePayloadFromFormData(formData: FormData) {
+async function buildRulePayloadFromFormData(formData: FormData) {
     const from = asString(formData.get("from"));
     const to = asString(formData.get("to"));
     const subject = asString(formData.get("subject"));
@@ -171,7 +171,7 @@ export async function buildRulePayloadFromFormData(formData: FormData) {
     return { ...payload, _errors: Object.keys(errors).length ? errors : null };
 }
 
-export async function createMailRule(payload: {
+async function createMailRule(payload: {
     identityId: string;
     name: string;
     priority: number;
@@ -183,6 +183,20 @@ export async function createMailRule(payload: {
     const rls = await rlsClient();
 
     return rls(async (tx) => {
+        // The worker applies rules by identity with the service role, so the
+        // identity must be the caller's own (RLS hides other identities).
+        const [identity] = await tx
+            .select({ id: identities.id })
+            .from(identities)
+            .where(eq(identities.id, payload.identityId))
+            .limit(1);
+        if (!identity) {
+            return {
+                ok: false as const,
+                error: "Identity not found.",
+                errors: { identityId: ["Identity not found."] } as Record<string, string[]>,
+            };
+        }
         try {
             const [rule] = await tx
                 .insert(mailRules)
@@ -214,7 +228,7 @@ export async function createMailRule(payload: {
                 return {
                     ok: false as const,
                     error: "A rule with this name already exists for this identity.",
-                    errors: { name: ["Rule name must be unique per identity."] },
+                    errors: { name: ["Rule name must be unique per identity."] } as Record<string, string[]>,
                 };
             }
             throw e;
@@ -276,16 +290,20 @@ export async function toggleRule(_prev: any, formData: FormData) {
     return handleAction(async () => {
         const decodedForm = decode(formData);
         const rls = await rlsClient();
-        await rls(async (tx) => {
-            const [rule] = await tx
-                .select().from(mailRules).where(eq(mailRules.id, String(decodedForm.ruleId)));
-            if (!rule) throw new Error("Rule not found");
-
-            await tx.update(mailRules).set({
-                enabled: !rule.enabled,
-            }).where(eq(mailRules.id, String(decodedForm.ruleId)));
-        });
-        revalidatePath(String(decodedForm.pathname));
+        // One statement instead of select + update.
+        const [rule] = await rls((tx) =>
+            tx
+                .update(mailRules)
+                .set({ enabled: sql`not ${mailRules.enabled}` })
+                .where(eq(mailRules.id, String(decodedForm.ruleId)))
+                .returning({ id: mailRules.id }),
+        );
+        if (!rule) throw new Error("Rule not found");
+        revalidatePath(
+            typeof decodedForm.pathname === "string" && decodedForm.pathname
+                ? decodedForm.pathname
+                : "/dashboard/mail",
+        );
 
         return { success: true };
     });

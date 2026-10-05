@@ -1,4 +1,3 @@
-import React from "react";
 import ScheduledList from "@/components/mailbox/default/scheduled-list";
 import { fetchScheduledDrafts } from "@/lib/actions/mailbox";
 
@@ -7,14 +6,12 @@ async function Page(props: {
 }) {
 	const { identityPublicId } = await props.params;
 	const scheduledDrafts = await fetchScheduledDrafts(identityPublicId);
+	// ScheduledList renders its own card + <ul>; wrapping it in another <ul>
+	// produced invalid markup (<div> inside <ul>) and a hydration warning.
 	return (
-		<>
-			<div className="p-4">
-				<ul role="list" className="divide-y rounded-4xl">
-					<ScheduledList drafts={scheduledDrafts} />
-				</ul>
-			</div>
-		</>
+		<div className="p-4">
+			<ScheduledList drafts={scheduledDrafts} />
+		</div>
 	);
 }
 

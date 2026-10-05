@@ -30,14 +30,13 @@ import {
 	EventSlotFragment,
 	FormState,
 	handleAction,
-	SlotKey,
 	ViewParams,
 } from "@schema";
 import { decode } from "decode-formdata";
 import { revalidatePath } from "next/cache";
 import { Dayjs } from "dayjs";
 import { cache } from "react";
-import { getRedis } from "@/lib/actions/get-redis";
+import { addJobAndWait, getQueue } from "@/lib/actions/get-redis";
 import { dayjsExtended, getDayjsTz } from "@common/day-js-extended";
 import { calendarEventAttendees } from "@db";
 import { PgTransaction } from "drizzle-orm/pg-core";
@@ -51,39 +50,6 @@ export const fetchDefaultCalendar = cache(async () => {
 	);
 	return defaultCalendar;
 });
-
-export const fetchCalendarEventsForView = async (
-	calendarId: string,
-	tz: string,
-	view: CalendarViewType,
-	params?: ViewParams,
-) => {
-	const { from, to } = await getRangeForCalendarView(tz, view, params);
-	return fetchCalendarEvents(calendarId, from.toDate(), to.toDate());
-};
-
-export const fetchCalendarEvents = async (
-	calendarId: string,
-	from?: Date | string,
-	to?: Date | string,
-) => {
-	const rls = await rlsClient();
-	const fromDate = from ? new Date(from) : undefined;
-	const toDate = to ? new Date(to) : undefined;
-	const events = await rls((tx) =>
-		tx
-			.select()
-			.from(calendarEvents)
-			.where(
-				and(
-					eq(calendarEvents.calendarId, calendarId),
-					fromDate ? gte(calendarEvents.endsAt, fromDate) : undefined,
-					toDate ? lte(calendarEvents.startsAt, toDate) : undefined,
-				),
-			),
-	);
-	return events;
-};
 
 export async function fetchEventAttendees(
 	eventIds: string[],
@@ -149,7 +115,7 @@ type SyncEventAttendeesArgs = {
 	attendeePayload: AttendeePayload | null;
 };
 
-export async function syncEventAttendees({
+async function syncEventAttendees({
 	tx,
 	eventId,
 	organizerEmail,
@@ -272,20 +238,21 @@ export async function syncEventAttendees({
 			.where(inArray(calendarEventAttendees.id, emailsToDelete));
 	}
 
-	for (const g of nonOrganizerGuests) {
-		const key = g.email.toLowerCase();
-		if (!existingByEmail.has(key)) {
-			await tx.insert(calendarEventAttendees).values({
-				eventId,
-				email: g.email,
-				name: g.name,
-				contactId: g.contactId,
-				isOrganizer: false,
-				role: "req_participant",
-				partstat: "needs_action",
-				rsvp: false,
-			});
-		}
+	// One multi-row insert instead of one statement per guest.
+	const newAttendees = nonOrganizerGuests
+		.filter((g) => !existingByEmail.has(g.email.toLowerCase()))
+		.map((g) => ({
+			eventId,
+			email: g.email,
+			name: g.name,
+			contactId: g.contactId,
+			isOrganizer: false,
+			role: "req_participant" as const,
+			partstat: "needs_action" as const,
+			rsvp: false,
+		}));
+	if (newAttendees.length > 0) {
+		await tx.insert(calendarEventAttendees).values(newAttendees);
 	}
 }
 
@@ -365,12 +332,16 @@ export async function upsertCalendarEvent(
 			if (eventId && String(eventId).length > 0) {
 				const parsedPayload = CalendarEventUpdateSchema.parse(payload);
 
-				await tx
+				// RLS: no row back means the event is not the caller's, so
+				// nothing must be queued for the (service role) worker.
+				const [updated] = await tx
 					.update(calendarEvents)
 					.set(parsedPayload)
-					.where(eq(calendarEvents.id, String(eventId)));
+					.where(eq(calendarEvents.id, String(eventId)))
+					.returning({ id: calendarEvents.id });
+				if (!updated) throw new Error("Calendar event not found");
 
-				finalEventId = String(eventId);
+				finalEventId = updated.id;
 			} else {
 				const parsedPayload = CalendarEventInsertSchema.parse(payload);
 				const [calendarEvent] = await tx
@@ -401,8 +372,7 @@ export async function upsertCalendarEvent(
 			throw new Error("Failed to persist calendar event");
 		}
 
-		const { davQueue } = await getRedis();
-		await davQueue.add(
+		await getQueue("dav-worker").add(
 			eventId ? "dav:calendar:update-event" : "dav:calendar:create-event",
 			{ eventId: finalEventId, notifyAttendees: notify },
 		);
@@ -459,57 +429,7 @@ export async function getRangeForCalendarView(
 	return { from, to };
 }
 
-export async function eventsBySlot(
-	tz: string,
-	events: CalendarEventEntity[],
-): Promise<Map<SlotKey, EventSlotFragment[]>> {
-	const map = new Map<SlotKey, EventSlotFragment[]>();
-	const dayjsTz = getDayjsTz(tz);
-
-	for (const ev of events) {
-		const start = dayjsTz(ev.startsAt);
-		const end = dayjsTz(ev.endsAt);
-
-		if (!end.isAfter(start)) continue;
-
-		let slotStart = start.startOf("hour");
-
-		while (slotStart.isBefore(end)) {
-			const slotEnd = slotStart.add(1, "hour");
-
-			const overlapStart = start.isAfter(slotStart) ? start : slotStart;
-			const overlapEnd = end.isBefore(slotEnd) ? end : slotEnd;
-
-			if (overlapEnd.isAfter(overlapStart)) {
-				const totalMs = slotEnd.valueOf() - slotStart.valueOf();
-				const offsetMs = overlapStart.valueOf() - slotStart.valueOf();
-				const occupiedMs = overlapEnd.valueOf() - overlapStart.valueOf();
-
-				const key: SlotKey = `${slotStart.format("YYYY-MM-DD")}:${slotStart.hour()}`;
-
-				const fragment: EventSlotFragment = {
-					event: ev,
-					date: slotStart.format("YYYY-MM-DD"),
-					hour: slotStart.hour(),
-					topPercent: (offsetMs / totalMs) * 100,
-					heightPercent: (occupiedMs / totalMs) * 100,
-					isStart: overlapStart.isSame(start),
-					isEnd: overlapEnd.isSame(end),
-				};
-
-				const bucket = map.get(key);
-				if (bucket) bucket.push(fragment);
-				else map.set(key, [fragment]);
-			}
-
-			slotStart = slotStart.add(1, "hour");
-		}
-	}
-
-	return map;
-}
-
-export async function eventsByDay(
+async function eventsByDay(
 	tz: string,
 	events: CalendarEventEntity[],
 ): Promise<Map<string, EventSlotFragment[]>> {
@@ -569,14 +489,22 @@ export async function eventsByDay(
 
 export const deleteCalendarEvent = async (id: string): Promise<FormState> => {
 	return handleAction(async () => {
-		const { davQueue, davEvents } = await getRedis();
-		const job = await davQueue.add("dav:calendar:delete-event", {
+		const rls = await rlsClient();
+		// The worker runs with the service role: check ownership first.
+		const [event] = await rls((tx) =>
+			tx
+				.select({ id: calendarEvents.id })
+				.from(calendarEvents)
+				.where(eq(calendarEvents.id, id))
+				.limit(1),
+		);
+		if (!event) throw new Error("Calendar event not found");
+
+		await addJobAndWait("dav-worker", "dav:calendar:delete-event", {
 			eventId: id,
 			notifyAttendees: true,
 		});
-		await job.waitUntilFinished(davEvents);
 
-		const rls = await rlsClient();
 		await rls((tx) =>
 			tx.delete(calendarEvents).where(eq(calendarEvents.id, id)),
 		);
@@ -587,6 +515,22 @@ export const deleteCalendarEvent = async (id: string): Promise<FormState> => {
 		};
 	});
 };
+
+// One storage request for all avatars instead of one per contact (or, in the
+// compose search, one per e-mail address).
+async function signAvatarUrls(paths: (string | null | undefined)[]) {
+	const unique = Array.from(new Set(paths.filter(Boolean).map(String)));
+	const urls = new Map<string, string>();
+	if (!unique.length) return urls;
+	const supabase = await createClient();
+	const { data } = await supabase.storage
+		.from("attachments")
+		.createSignedUrls(unique, 60000);
+	for (const row of data ?? []) {
+		if (row.path && row.signedUrl) urls.set(row.path, row.signedUrl);
+	}
+	return urls;
+}
 
 export const searchContactsForCompose = async (searchValue: string) => {
 	const q = searchValue.trim();
@@ -622,20 +566,18 @@ export const searchContactsForCompose = async (searchValue: string) => {
 
 	const suggestions: ComposeContact[] = [];
 
-	const supabase = await createClient();
+	const avatarUrls = await signAvatarUrls(
+		rows.map((row) => row.profilePictureXs),
+	);
 	for (const row of rows) {
 		const fullName = [row.firstName, row.lastName].filter(Boolean).join(" ");
 		const emails = (row.emails ?? []) as { address: string }[];
+		const avatarUrl = row.profilePictureXs
+			? (avatarUrls.get(String(row.profilePictureXs)) ?? null)
+			: null;
 
 		for (const e of emails) {
 			if (!e.address) continue;
-			let avatarUrl: string | null = null;
-			if (row.profilePictureXs) {
-				const { data } = await supabase.storage
-					.from("attachments")
-					.createSignedUrl(String(row.profilePictureXs), 60000);
-				avatarUrl = data?.signedUrl || null;
-			}
 
 			suggestions.push({
 				id: row.id,
@@ -649,51 +591,80 @@ export const searchContactsForCompose = async (searchValue: string) => {
 	return suggestions.slice(0, 20);
 };
 
-export const getContactsForAttendeeIds = async (attendeeIds: string[]) => {
+/**
+ * Pass `knownAttendees` (e.g. the rows from fetchEventAttendees) to skip
+ * re-reading the attendees; only their contacts are loaded then.
+ */
+export const getContactsForAttendeeIds = async (
+	attendeeIds: string[],
+	knownAttendees?: Pick<CalendarEventAttendeeEntity, "id" | "contactId" | "email">[],
+) => {
 	if (!attendeeIds?.length) return [];
 	const rls = await rlsClient();
-	const attendeesRows = await rls((tx) =>
-		tx
-			.select({
-				attendeeId: calendarEventAttendees.id,
-				contactId: calendarEventAttendees.contactId,
-				email: calendarEventAttendees.email,
-			})
-			.from(calendarEventAttendees)
-			.where(inArray(calendarEventAttendees.id, attendeeIds)),
-	);
+	const contactColumns = {
+		firstName: contacts.firstName,
+		lastName: contacts.lastName,
+		profilePictureXs: contacts.profilePictureXs,
+	};
 
-	if (!attendeesRows.length) return [];
-	const contactIds = attendeesRows
-		.map((a) => a.contactId)
-		.filter(Boolean) as string[];
-	let contactsMap = new Map<
-		string,
-		{
+	let attendeesRows: {
+		attendeeId: string;
+		contactId: string | null;
+		email: string;
+		contact: {
 			firstName: string | null;
 			lastName: string | null;
-			emails: any[];
 			profilePictureXs: string | null;
-		}
-	>();
-	if (contactIds.length) {
-		const contactRows = await rls((tx) =>
+		} | null;
+	}[];
+
+	if (knownAttendees) {
+		const wanted = new Set(attendeeIds);
+		const known = knownAttendees.filter((a) => wanted.has(a.id));
+		const contactIds = Array.from(
+			new Set(known.map((a) => a.contactId).filter(Boolean) as string[]),
+		);
+		const contactRows = contactIds.length
+			? await rls((tx) =>
+					tx
+						.select({ id: contacts.id, ...contactColumns })
+						.from(contacts)
+						.where(inArray(contacts.id, contactIds)),
+				)
+			: [];
+		const byId = new Map(contactRows.map(({ id, ...c }) => [id, c]));
+		attendeesRows = known.map((a) => ({
+			attendeeId: a.id,
+			contactId: a.contactId,
+			email: a.email,
+			contact: a.contactId ? (byId.get(a.contactId) ?? null) : null,
+		}));
+	} else {
+		// Attendees with their contact in one query.
+		attendeesRows = await rls((tx) =>
 			tx
 				.select({
-					id: contacts.id,
-					firstName: contacts.firstName,
-					lastName: contacts.lastName,
-					emails: contacts.emails,
-					profilePictureXs: contacts.profilePictureXs,
+					attendeeId: calendarEventAttendees.id,
+					contactId: calendarEventAttendees.contactId,
+					email: calendarEventAttendees.email,
+					contact: contactColumns,
 				})
-				.from(contacts)
-				.where(inArray(contacts.id, contactIds)),
+				.from(calendarEventAttendees)
+				.leftJoin(contacts, eq(contacts.id, calendarEventAttendees.contactId))
+				.where(inArray(calendarEventAttendees.id, attendeeIds)),
 		);
-
-		for (const c of contactRows) contactsMap.set(c.id, c);
 	}
 
-	const supabase = await createClient();
+	if (!attendeesRows.length) return [];
+	const contactsMap = new Map(
+		attendeesRows.flatMap((a) =>
+			a.contactId && a.contact ? [[a.contactId, a.contact] as const] : [],
+		),
+	);
+	const avatarUrls = await signAvatarUrls(
+		attendeesRows.map((a) => a.contact?.profilePictureXs),
+	);
+
 	const results: ComposeContact[] = [];
 
 	for (const attendee of attendeesRows) {
@@ -708,13 +679,9 @@ export const getContactsForAttendeeIds = async (attendeeIds: string[]) => {
 					.filter(Boolean)
 					.join(" ")
 			: null;
-		let avatarUrl: string | null = null;
-		if (relatedContact?.profilePictureXs) {
-			const { data } = await supabase.storage
-				.from("attachments")
-				.createSignedUrl(String(relatedContact.profilePictureXs), 60000);
-			avatarUrl = data?.signedUrl || null;
-		}
+		const avatarUrl = relatedContact?.profilePictureXs
+			? (avatarUrls.get(String(relatedContact.profilePictureXs)) ?? null)
+			: null;
 
 		results.push({
 			id: attendee.contactId ?? attendee.attendeeId,
@@ -731,9 +698,9 @@ export type FetchContactsForAttendeesResult = Awaited<
 	ReturnType<typeof getContactsForAttendeeIds>
 >;
 
-export async function yesCalendarInvite(
-	_prev: FormState,
+async function replyToCalendarInvite(
 	formData: FormData,
+	partstat: "accepted" | "declined" | "tentative",
 ): Promise<FormState> {
 	return handleAction(async () => {
 		const decodedForm = decode(formData) as {
@@ -741,63 +708,55 @@ export async function yesCalendarInvite(
 			eventId: string;
 			attendeeId: string;
 		};
+		const eventId = String(decodedForm.eventId ?? "");
+		const attendeeId = String(decodedForm.attendeeId ?? "");
 
-		const { davQueue, davEvents } = await getRedis();
-		const job = await davQueue.add("dav:calendar:itip-reply", {
-			eventId: decodedForm.eventId,
-			attendeeId: decodedForm.attendeeId,
-			partstat: "accepted",
+		// The worker runs with the service role: only reply for the caller's
+		// own event/attendee pair.
+		const rls = await rlsClient();
+		const [attendee] = await rls((tx) =>
+			tx
+				.select({ id: calendarEventAttendees.id })
+				.from(calendarEventAttendees)
+				.where(
+					and(
+						eq(calendarEventAttendees.id, attendeeId),
+						eq(calendarEventAttendees.eventId, eventId),
+					),
+				)
+				.limit(1),
+		);
+		if (!attendee) throw new Error("Invitation not found");
+
+		await addJobAndWait("dav-worker", "dav:calendar:itip-reply", {
+			eventId,
+			attendeeId,
+			partstat,
 		});
-		await job.waitUntilFinished(davEvents);
 		revalidatePath("/dashboard/calendar");
 		return { success: true };
 	});
+}
+
+export async function yesCalendarInvite(
+	_prev: FormState,
+	formData: FormData,
+): Promise<FormState> {
+	return replyToCalendarInvite(formData, "accepted");
 }
 
 export async function noCalendarInvite(
 	_prev: FormState,
 	formData: FormData,
 ): Promise<FormState> {
-	return handleAction(async () => {
-		const decodedForm = decode(formData) as {
-			calendarId: string;
-			eventId: string;
-			attendeeId: string;
-		};
-
-		const { davQueue, davEvents } = await getRedis();
-		const job = await davQueue.add("dav:calendar:itip-reply", {
-			eventId: decodedForm.eventId,
-			attendeeId: decodedForm.attendeeId,
-			partstat: "declined",
-		});
-		await job.waitUntilFinished(davEvents);
-		revalidatePath("/dashboard/calendar");
-		return { success: true };
-	});
+	return replyToCalendarInvite(formData, "declined");
 }
 
 export async function maybeCalendarInvite(
 	_prev: FormState,
 	formData: FormData,
 ): Promise<FormState> {
-	return handleAction(async () => {
-		const decodedForm = decode(formData) as {
-			calendarId: string;
-			eventId: string;
-			attendeeId: string;
-		};
-
-		const { davQueue, davEvents } = await getRedis();
-		const job = await davQueue.add("dav:calendar:itip-reply", {
-			eventId: decodedForm.eventId,
-			attendeeId: decodedForm.attendeeId,
-			partstat: "tentative",
-		});
-		await job.waitUntilFinished(davEvents);
-		revalidatePath("/dashboard/calendar");
-		return { success: true };
-	});
+	return replyToCalendarInvite(formData, "tentative");
 }
 
 export async function updateCalendarTimezone(
@@ -896,7 +855,7 @@ function fromRRuleLocal(rruleDate: Date, tz: string): Date {
 	return zoned.toDate();
 }
 
-export async function expandEventForRange(
+async function expandEventForRange(
 	event: CalendarEventEntity,
 	rangeStart: Date,
 	rangeEnd: Date,
@@ -1028,34 +987,36 @@ export async function fetchEventPreviewItems(
         .download(String(messageAttachment.path));
     const rawICS = await data?.text();
     const uid = rawICS ? extractIcalUid(rawICS) : null;
-    const rls = await rlsClient();
-
-    const [calendarEvent] = await rls((tx) =>
-        tx
-            .select()
-            .from(calendarEvents)
-            .where(eq(calendarEvents.icalUid, String(uid)))
-    );
-
-    if (!calendarEvent) {
+    if (!uid) {
         return { calendarEvent: null, attendees: null, identity: null };
     }
+    const rls = await rlsClient();
 
-    const attendees = await rls((tx) =>
-        tx
+    // One transaction instead of three.
+    return rls(async (tx) => {
+        const [calendarEvent] = await tx
+            .select()
+            .from(calendarEvents)
+            .where(eq(calendarEvents.icalUid, uid))
+            .limit(1);
+
+        if (!calendarEvent) {
+            return { calendarEvent: null, attendees: null, identity: null };
+        }
+
+        const attendees = await tx
             .select()
             .from(calendarEventAttendees)
-            .where(eq(calendarEventAttendees.eventId, calendarEvent.id))
-    );
+            .where(eq(calendarEventAttendees.eventId, calendarEvent.id));
 
-    const [identity] = await rls((tx) =>
-        tx
+        const [identity] = await tx
             .select()
             .from(identities)
             .where(eq(identities.publicId, identityPublicId))
-    );
+            .limit(1);
 
-    return { calendarEvent, attendees, identity }
+        return { calendarEvent, attendees, identity };
+    });
 
 }
 

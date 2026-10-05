@@ -67,11 +67,10 @@ export async function CalendarView({
 		fetchEventAttendees(masterIds),
 	]);
 
-	const attendeeIds = Object.values(attendees).flatMap((list) =>
-		list.map((a) => a.id),
-	);
+	const attendeeList = Object.values(attendees).flat();
+	const attendeeIds = attendeeList.map((a) => a.id);
 	// Not awaited on purpose: streamed to the client and unwrapped with use().
-	const contacts = getContactsForAttendeeIds(attendeeIds);
+	const contacts = getContactsForAttendeeIds(attendeeIds, attendeeList);
 
 	const gridProps = {
 		events: expandedEvents,

@@ -294,9 +294,6 @@ importers:
       babel-plugin-react-compiler:
         specifier: ^1.0.0
         version: 1.0.0
-      bcrypt:
-        specifier: ^6.0.0
-        version: 6.0.0
       browser-image-compression:
         specifier: ^2.0.2
         version: 2.0.2
@@ -330,9 +327,6 @@ importers:
       next:
         specifier: 16.2.6
         version: 16.2.6(@babel/core@7.28.5)(babel-plugin-react-compiler@1.0.0)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)
-      next-themes:
-        specifier: ^0.4.6
-        version: 0.4.6(react-dom@19.2.3(react@19.2.3))(react@19.2.3)
       pino:
         specifier: ^10.1.0
         version: 10.1.0
@@ -354,9 +348,6 @@ importers:
       thread-stream:
         specifier: 3.1.0
         version: 3.1.0
-      undici:
-        specifier: ^8.2.0
-        version: 8.2.0
     devDependencies:
       '@biomejs/biome':
         specifier: 2.2.6
@@ -364,9 +355,6 @@ importers:
       '@tailwindcss/postcss':
         specifier: ^4.1.17
         version: 4.1.18
-      '@types/bcrypt':
-        specifier: ^6.0.0
-        version: 6.0.0
       '@types/mime-types':
         specifier: ^3.0.1
         version: 3.0.1
@@ -7404,10 +7392,6 @@ packages:
 
   undici-types@7.16.0:
     resolution: {integrity: sha512-Zz+aZWSj8LE6zoxD+xrjh4VfkIG8Ya6LvYkZqtUQGJPZjYl53ypCaUwWqo7eI0x66KBGeRo+mlBEkMSeSZ38Nw==}
-
-  undici@8.2.0:
-    resolution: {integrity: sha512-Z+4Hx9GE26Lh9Upwfnc8C7SsrpBPGaM/Gm6kMFtiG7c+5IvQKlXi/t+9x9DrrCh29cww5TSP9YdVaBcnLDs5fQ==}
-    engines: {node: '>=22.19.0'}
 
   unenv@2.0.0-rc.24:
     resolution: {integrity: sha512-i7qRCmY42zmCwnYlh9H2SvLEypEFGye5iRmEMKjcGi7zk9UquigRjFtTLz0TYqr0ZGLZhaMHl/foy1bZR+Cwlw==}
@@ -14726,11 +14710,6 @@ snapshots:
       react: 19.2.1
       react-dom: 19.2.1(react@19.2.1)
 
-  next-themes@0.4.6(react-dom@19.2.3(react@19.2.3))(react@19.2.3):
-    dependencies:
-      react: 19.2.3
-      react-dom: 19.2.3(react@19.2.3)
-
   next@16.2.6(@babel/core@7.28.5)(babel-plugin-react-compiler@1.0.0)(react-dom@19.2.3(react@19.2.3))(react@19.2.3):
     dependencies:
       '@next/env': 16.2.6
@@ -16412,8 +16391,6 @@ snapshots:
   undici-types@7.13.0: {}
 
   undici-types@7.16.0: {}
-
-  undici@8.2.0: {}
 
   unenv@2.0.0-rc.24:
     dependencies:

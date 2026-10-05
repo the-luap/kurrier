@@ -1,5 +1,5 @@
 import { getServerEnv } from "@schema";
-import { Queue, QueueEvents } from "bullmq";
+import { type JobsOptions, Queue, QueueEvents } from "bullmq";
 
 type RedisConnection = {
 	connection: {
@@ -27,7 +27,7 @@ function getRedisConnection(): RedisConnection {
 	};
 }
 
-type QueueName =
+export type QueueName =
 	| "smtp-worker"
 	| "send-mail"
 	| "search-ingest"
@@ -91,43 +91,45 @@ export async function getQueueEvents(name: QueueName): Promise<QueueEvents> {
 	return pair.events;
 }
 
-export const getRedis = async () => {
-	const [
-		smtpEvents,
-		sendMailEvents,
-		searchIngestEvents,
-		davEvents,
-		migrationWorkerEvents,
-	] = await Promise.all([
-		getQueueEvents("smtp-worker"),
-		getQueueEvents("send-mail"),
-		getQueueEvents("search-ingest"),
-		getQueueEvents("dav-worker"),
-		getQueueEvents("migration-worker"),
-	]);
-
-	return {
-		smtpQueue: getQueue("smtp-worker"),
-		smtpEvents,
-		sendMailQueue: getQueue("send-mail"),
-		sendMailEvents,
-		searchIngestQueue: getQueue("search-ingest"),
-		searchIngestEvents,
-		davQueue: getQueue("dav-worker"),
-		davEvents,
-		migrationWorkerQueue: getQueue("migration-worker"),
-		migrationWorkerEvents,
-	};
-};
-
-export const getSmtpQueue = async () => {
-	const pair = getPair("smtp-worker");
+/** Queue that has finished connecting (fails fast while Redis is down). */
+export async function getReadyQueue(name: QueueName): Promise<Queue> {
+	const pair = getPair(name);
 	try {
 		await pair.queue.waitUntilReady();
 	} catch (error) {
-		dropQueue("smtp-worker", pair);
+		dropQueue(name, pair);
 		throw error;
 	}
+	return pair.queue;
+}
 
-	return { smtpQueue: pair.queue };
-};
+export const getSmtpQueue = async () => ({
+	smtpQueue: await getReadyQueue("smtp-worker"),
+});
+
+/**
+ * Queue plus its event stream, for callers that wait for a job result.
+ * Only connects the one stream that is needed. The events are subscribed before the caller adds a job, so
+ * no completion event is missed.
+ */
+export async function getQueueWithEvents(name: QueueName) {
+	const events = await getQueueEvents(name);
+	return { queue: getQueue(name), events };
+}
+
+/** Add a job and wait for its return value. */
+export async function addJobAndWait<T = unknown>(
+	name: QueueName,
+	jobName: string,
+	data: unknown,
+	opts?: JobsOptions,
+): Promise<T> {
+	const { queue, events } = await getQueueWithEvents(name);
+	const job = await queue.add(jobName, data, opts);
+	return (await job.waitUntilFinished(events)) as T;
+}
+
+export const RETRY_JOB_OPTS = {
+	attempts: 3,
+	backoff: { type: "exponential", delay: 1500 },
+} satisfies JobsOptions;

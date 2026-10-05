@@ -13,29 +13,27 @@ export default async function SnoozedPage({
 }) {
 	const { identityPublicId } = await params;
 
-	const publicConfig = await getPublicEnv();
-	const globalLabels = await fetchLabels();
-
-	const { threads } = await fetchIdentitySnoozedThreads(identityPublicId);
-	const labelsByThreadId =
-		threads.length > 0 ? await fetchMailboxThreadLabels(threads) : {};
-
-	const firstMailboxSlug = threads[0]?.mailboxSlug || "inbox";
-	const { activeMailbox } = await fetchMailbox(
-		identityPublicId,
-		firstMailboxSlug,
-	);
+	const publicConfig = getPublicEnv();
+	const [globalLabels, { threads }] = await Promise.all([
+		fetchLabels(),
+		fetchIdentitySnoozedThreads(identityPublicId),
+	]);
 
 	const filteredThreads = threads.filter(
 		(thread) => thread.identityPublicId === identityPublicId,
 	);
+	const firstMailboxSlug = threads[0]?.mailboxSlug || "inbox";
+	const [labelsByThreadId, { activeMailbox }] = await Promise.all([
+		threads.length > 0 ? fetchMailboxThreadLabels(threads) : {},
+		fetchMailbox(identityPublicId, firstMailboxSlug),
+	]);
 
 	return (
 		<div className="p-4 space-y-4">
 			<header className="flex items-center justify-between">
 				<h1 className="text-lg font-semibold">Snoozed</h1>
 				<div className="text-sm text-muted-foreground">
-					Threads: {threads.length}
+					Threads: {filteredThreads.length}
 				</div>
 			</header>
 

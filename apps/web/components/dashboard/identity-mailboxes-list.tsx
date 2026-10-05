@@ -142,14 +142,14 @@ function buildTree(rows: MailboxEntity[]): TreeMailbox[] {
 
 // Module scope (not defined inside the list) so React keeps the same
 // component type across renders and the folder tree (and its open/collapsed
-// state) does not remount on navigation.
-function MailboxItem({
+// state) does not remount on navigation. Memoized and only given the active
+// slug of *its own* identity, so navigating re-renders just the folders
+// whose active state changes instead of every folder of every identity.
+const MailboxItem = React.memo(function MailboxItem({
 	m,
 	identityPublicId,
 	depth = 0,
 	identity,
-	pathname,
-	activeIdentityPublicId,
 	activeSlug,
 	onNavigate,
 }: {
@@ -157,17 +157,14 @@ function MailboxItem({
 	identityPublicId: string;
 	depth?: number;
 	identity: IdentityEntity;
-	pathname: string;
-	activeIdentityPublicId?: string;
+	/** Active mailbox slug when this identity is the active one. */
 	activeSlug?: string;
 	onNavigate: () => void;
 }) {
 	const Icon = ICON[m.kind] ?? Folder;
 	const slug = m.slug ?? "inbox";
 	const href = `/dashboard/mail/${identityPublicId}/${slug}`;
-	const isActive =
-		pathname === href ||
-		(activeIdentityPublicId === identityPublicId && activeSlug === slug);
+	const isActive = activeSlug === slug;
 
 	const [open, setOpen] = React.useState(true);
 	const hasChildren = m.children.length > 0;
@@ -275,8 +272,6 @@ function MailboxItem({
 							identityPublicId={identityPublicId}
 							identity={identity}
 							depth={depth + 1}
-							pathname={pathname}
-							activeIdentityPublicId={activeIdentityPublicId}
 							activeSlug={activeSlug}
 							onNavigate={onNavigate}
 						/>
@@ -285,6 +280,61 @@ function MailboxItem({
 			)}
 		</div>
 	);
+});
+
+type IdentityNavEntry = {
+	identity: IdentityEntity;
+	mailboxes: FetchIdentityMailboxListResult[number]["mailboxes"];
+	tree: TreeMailbox[];
+	identityUnread: number;
+	draftCount: number;
+	scheduledCount: number;
+	snoozedCount: number;
+};
+
+// Derived from the server data only (not the pathname): built once per data
+// change instead of on every navigation.
+function buildIdentityNav(
+	identityMailboxes: FetchIdentityMailboxListResult,
+	scheduledDrafts: Pick<DraftMessageEntity, "id" | "identityId" | "status">[],
+	snoozedThreads: Pick<MailboxThreadEntity, "identityId">[],
+): IdentityNavEntry[] {
+	const draftCounts = new Map<string, number>();
+	const scheduledCounts = new Map<string, number>();
+	for (const draft of scheduledDrafts) {
+		const target =
+			draft.status === "scheduled"
+				? scheduledCounts
+				: draft.status === "draft"
+					? draftCounts
+					: null;
+		if (!target || !draft.identityId) continue;
+		target.set(draft.identityId, (target.get(draft.identityId) ?? 0) + 1);
+	}
+	const snoozedCounts = new Map<string, number>();
+	for (const snoozed of snoozedThreads) {
+		if (!snoozed.identityId) continue;
+		snoozedCounts.set(
+			snoozed.identityId,
+			(snoozedCounts.get(snoozed.identityId) ?? 0) + 1,
+		);
+	}
+
+	return identityMailboxes.map(({ identity, mailboxes }) => {
+		const tree = buildTree(mailboxes as MailboxEntity[]);
+		return {
+			identity,
+			mailboxes,
+			tree,
+			identityUnread: tree.reduce(
+				(sum, mailbox) => sum + (mailbox.kind === "inbox" ? mailbox.unread : 0),
+				0,
+			),
+			draftCount: draftCounts.get(identity.id) ?? 0,
+			scheduledCount: scheduledCounts.get(identity.id) ?? 0,
+			snoozedCount: snoozedCounts.get(identity.id) ?? 0,
+		};
+	});
 }
 
 export default function IdentityMailboxesList({
@@ -315,6 +365,10 @@ export default function IdentityMailboxesList({
 		onComplete?.();
 		if (isMobile) setOpenMobile(false);
 	}, [onComplete, isMobile, setOpenMobile]);
+	const identityNav = React.useMemo(
+		() => buildIdentityNav(identityMailboxes, scheduledDrafts, snoozedThreads),
+		[identityMailboxes, scheduledDrafts, snoozedThreads],
+	);
 	const lastPathnameRef = React.useRef(pathname);
 	React.useEffect(() => {
 		if (lastPathnameRef.current === pathname) return;
@@ -338,118 +392,113 @@ export default function IdentityMailboxesList({
 				<LayoutDashboard className="h-4 w-4 shrink-0 text-primary" />
 				<span className="min-w-0 truncate">Mailbox Overview</span>
 			</Link>
-			{identityMailboxes.map(({ identity, mailboxes }) => {
-				const tree = buildTree(mailboxes as MailboxEntity[]);
-				const identityUnread = tree.reduce(
-					(sum, mailbox) =>
-						sum + (mailbox.kind === "inbox" ? mailbox.unread : 0),
-					0,
-				);
+			{identityNav.map(
+				({
+					identity,
+					mailboxes,
+					tree,
+					identityUnread,
+					draftCount: draftCounts,
+					scheduledCount: scheduledCounts,
+					snoozedCount: snoozedCounts,
+				}) => {
+					const isActiveIdentity =
+						params.identityPublicId === identity.publicId;
+					const activeSlug = isActiveIdentity ? currentSlug : undefined;
+					return (
+						<div key={identity.id} className="min-w-0">
+							<div className="mb-1 mt-3 grid min-w-0 grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-1 border-l-2 border-l-primary/30 px-2 text-xs font-semibold text-sidebar-foreground/60 dark:border-l-primary/50">
+								<span
+									className="min-w-0 flex-1 truncate"
+									title={identity.value}
+								>
+									{identity.value}
+								</span>
+								{identityUnread > 0 ? (
+									<span className="shrink-0 rounded-full bg-primary/10 px-1.5 text-[10px] leading-5 text-sidebar-foreground tabular-nums dark:bg-primary/20">
+										{identityUnread > 99 ? "99+" : identityUnread}
+									</span>
+								) : null}
+								<AddNewFolder mailboxes={mailboxes} identity={identity} />
+							</div>
+							<div className="min-w-0 space-y-1">
+								{tree.map((m) => (
+									<MailboxItem
+										key={`${identity.id}:${m.id}`}
+										m={m}
+										identityPublicId={identity.publicId}
+										identity={identity}
+										activeSlug={activeSlug}
+										onNavigate={handleNavigate}
+									/>
+								))}
+							</div>
+							{draftCounts > 0 && (
+								<Link
+									href={`/dashboard/mail/${identity.publicId}/unsent`}
+									prefetch={false}
+									onClick={handleNavigate}
+									className={cn(
+										"my-2 flex w-full items-center justify-start gap-1 rounded border border-transparent p-1.5 text-sm transition-colors hover:bg-sidebar-accent/80",
+										isActiveIdentity &&
+											currentSlug === "unsent" &&
+											"border-primary/20 bg-primary/10 text-sidebar-accent-foreground dark:border-primary/30 dark:bg-primary/20",
+									)}
+								>
+									<FileText
+										size={16}
+										className="text-amber-600 dark:text-amber-300"
+									/>
+									<span className="font-normal">Drafts ({draftCounts})</span>
+								</Link>
+							)}
+							{scheduledCounts > 0 && (
+								<Link
+									href={`/dashboard/mail/${identity.publicId}/scheduled`}
+									prefetch={false}
+									onClick={handleNavigate}
+									className={cn(
+										"my-2 flex w-full justify-start gap-1 rounded border border-transparent p-1.5 text-sm transition-colors hover:bg-sidebar-accent/80",
+										isActiveIdentity &&
+											currentSlug === "scheduled" &&
+											"border-primary/20 bg-primary/10 text-sidebar-accent-foreground dark:border-primary/30 dark:bg-primary/20",
+									)}
+								>
+									<IconMailFast
+										size={22}
+										className="text-cyan-600 dark:text-cyan-300"
+									/>
+									<span className={"font-normal text-sm"}>
+										Scheduled ({scheduledCounts})
+									</span>
+								</Link>
+							)}
 
-				const scheduledCounts = scheduledDrafts.filter(
-					(draft) =>
-						draft.identityId === identity.id && draft.status === "scheduled",
-				).length;
-				const draftCounts = scheduledDrafts.filter(
-					(draft) =>
-						draft.identityId === identity.id && draft.status === "draft",
-				).length;
-				const isActiveIdentity = params.identityPublicId === identity.publicId;
-				const snoozedCounts = snoozedThreads.filter(
-					(snoozed) => snoozed.identityId === identity.id,
-				).length;
-				return (
-					<div key={identity.id} className="min-w-0">
-						<div className="mb-1 mt-3 grid min-w-0 grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-1 border-l-2 border-l-primary/30 px-2 text-xs font-semibold text-sidebar-foreground/60 dark:border-l-primary/50">
-							<span className="min-w-0 flex-1 truncate" title={identity.value}>
-								{identity.value}
-							</span>
-							{identityUnread > 0 ? (
-								<span className="shrink-0 rounded-full bg-primary/10 px-1.5 text-[10px] leading-5 text-sidebar-foreground tabular-nums dark:bg-primary/20">
-									{identityUnread > 99 ? "99+" : identityUnread}
-								</span>
-							) : null}
-							<AddNewFolder mailboxes={mailboxes} identity={identity} />
+							{snoozedCounts > 0 && (
+								<Link
+									href={`/dashboard/mail/${identity.publicId}/snoozed`}
+									prefetch={false}
+									onClick={handleNavigate}
+									className={cn(
+										"my-2 flex w-full items-center justify-start gap-1 rounded border border-transparent p-1.5 text-sm transition-colors hover:bg-sidebar-accent/80",
+										isActiveIdentity &&
+											currentSlug === "snoozed" &&
+											"border-primary/20 bg-primary/10 text-sidebar-accent-foreground dark:border-primary/30 dark:bg-primary/20",
+									)}
+								>
+									<Clock4
+										size={16}
+										className="text-violet-600 dark:text-violet-300"
+									/>
+									<span className={"font-normal text-sm"}>
+										Snoozed ({snoozedCounts})
+									</span>
+								</Link>
+							)}
 						</div>
-						<div className="min-w-0 space-y-1">
-							{tree.map((m) => (
-								<MailboxItem
-									key={`${identity.id}:${m.id}`}
-									m={m}
-									identityPublicId={identity.publicId}
-									identity={identity}
-									pathname={pathname}
-									activeIdentityPublicId={params.identityPublicId}
-									activeSlug={currentSlug}
-									onNavigate={handleNavigate}
-								/>
-							))}
-						</div>
-						{draftCounts > 0 && (
-							<Link
-								href={`/dashboard/mail/${identity.publicId}/unsent`}
-								prefetch={false}
-								onClick={handleNavigate}
-								className={cn(
-									"my-2 flex w-full items-center justify-start gap-1 rounded border border-transparent p-1.5 text-sm transition-colors hover:bg-sidebar-accent/80",
-									isActiveIdentity &&
-										currentSlug === "unsent" &&
-										"border-primary/20 bg-primary/10 text-sidebar-accent-foreground dark:border-primary/30 dark:bg-primary/20",
-								)}
-							>
-								<FileText
-									size={16}
-									className="text-amber-600 dark:text-amber-300"
-								/>
-								<span className="font-normal">Drafts ({draftCounts})</span>
-							</Link>
-						)}
-						{scheduledCounts > 0 && (
-							<Link
-								href={`/dashboard/mail/${identity.publicId}/scheduled`}
-								prefetch={false}
-								onClick={handleNavigate}
-								className={cn(
-									"my-2 flex w-full justify-start gap-1 rounded border border-transparent p-1.5 text-sm transition-colors hover:bg-sidebar-accent/80",
-									isActiveIdentity &&
-										currentSlug === "scheduled" &&
-										"border-primary/20 bg-primary/10 text-sidebar-accent-foreground dark:border-primary/30 dark:bg-primary/20",
-								)}
-							>
-								<IconMailFast
-									size={22}
-									className="text-cyan-600 dark:text-cyan-300"
-								/>
-								<span className={"font-normal text-sm"}>
-									Scheduled ({scheduledCounts})
-								</span>
-							</Link>
-						)}
-
-						{snoozedCounts > 0 && (
-							<Link
-								href={`/dashboard/mail/${identity.publicId}/snoozed`}
-								prefetch={false}
-								onClick={handleNavigate}
-								className={cn(
-									"my-2 flex w-full items-center justify-start gap-1 rounded border border-transparent p-1.5 text-sm transition-colors hover:bg-sidebar-accent/80",
-									isActiveIdentity &&
-										currentSlug === "snoozed" &&
-										"border-primary/20 bg-primary/10 text-sidebar-accent-foreground dark:border-primary/30 dark:bg-primary/20",
-								)}
-							>
-								<Clock4
-									size={16}
-									className="text-violet-600 dark:text-violet-300"
-								/>
-								<span className={"font-normal text-sm"}>
-									Snoozed ({snoozedCounts})
-								</span>
-							</Link>
-						)}
-					</div>
-				);
-			})}
+					);
+				},
+			)}
 		</div>
 	);
 }

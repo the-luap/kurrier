@@ -1,5 +1,6 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
+import { getServerEnv } from "@schema";
 
 // AI endpoints are user supplied and fetched from the web server. Local and
 // LAN hosts are legitimate (Ollama / LM Studio usually run there), but
@@ -116,3 +117,92 @@ export const resolveAiApiKey = (
 	}
 	return null;
 };
+
+export type AiProvider = "ollama" | "lmstudio";
+
+export const isAiProvider = (value: string): value is AiProvider =>
+	value === "ollama" || value === "lmstudio";
+
+export const toAiProvider = (value: unknown): AiProvider =>
+	isAiProvider(String(value ?? "")) ? (value as AiProvider) : "ollama";
+
+export const aiProviderLabel = (provider: AiProvider) =>
+	provider === "lmstudio" ? "LM Studio" : "Ollama";
+
+export const getAiDefaults = (provider: AiProvider) => {
+	if (provider === "lmstudio") {
+		return { baseUrl: "http://localhost:1234/v1", model: "" };
+	}
+	const { OLLAMA_BASE_URL, OLLAMA_MODEL } = getServerEnv();
+	return {
+		baseUrl: OLLAMA_BASE_URL || "http://localhost:11434",
+		model: OLLAMA_MODEL || "gemma3:12b",
+	};
+};
+
+/**
+ * Run one non-streaming prompt against Ollama (/api/generate) or an
+ * OpenAI-compatible LM Studio server (/chat/completions) and return the
+ * trimmed text. Errors carry the provider label as prefix.
+ */
+export async function runAiPrompt({
+	provider,
+	baseUrl,
+	apiKey,
+	model,
+	prompt,
+	temperature,
+	maxTokens,
+	timeoutMs = 60_000,
+}: {
+	provider: AiProvider;
+	baseUrl: string;
+	apiKey?: string | null;
+	model: string;
+	prompt: string;
+	temperature: number;
+	maxTokens: number;
+	timeoutMs?: number;
+}): Promise<string> {
+	const label = aiProviderLabel(provider);
+	const headers = {
+		"Content-Type": "application/json",
+		...aiAuthHeaders(apiKey),
+	};
+
+	if (provider === "lmstudio") {
+		const data = (await fetchAiEndpoint(`${baseUrl}/chat/completions`, {
+			label,
+			method: "POST",
+			headers,
+			body: JSON.stringify({
+				model,
+				messages: [{ role: "user", content: prompt }],
+				stream: false,
+				temperature,
+				max_tokens: maxTokens,
+			}),
+			signal: AbortSignal.timeout(timeoutMs),
+		})) as {
+			choices?: Array<{ message?: { content?: string } }>;
+			error?: { message?: string } | string;
+		};
+		if (data.error) throw new Error(`${label} returned an error.`);
+		return String(data.choices?.[0]?.message?.content || "").trim();
+	}
+
+	const data = (await fetchAiEndpoint(`${baseUrl}/api/generate`, {
+		label,
+		method: "POST",
+		headers,
+		body: JSON.stringify({
+			model,
+			prompt,
+			stream: false,
+			options: { temperature, num_predict: maxTokens },
+		}),
+		signal: AbortSignal.timeout(timeoutMs),
+	})) as { response?: string; error?: string };
+	if (data.error) throw new Error(`${label} returned an error.`);
+	return String(data.response || "").trim();
+}

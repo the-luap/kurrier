@@ -1,4 +1,3 @@
-// @ts-nocheck
 "use client";
 
 import { getMessageAddress } from "@common/mail-client";

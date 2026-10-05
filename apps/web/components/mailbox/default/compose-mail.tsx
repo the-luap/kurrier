@@ -4,17 +4,18 @@ import { ActionIcon } from "@mantine/core";
 import { useMediaQuery } from "@mantine/hooks";
 import type { PublicConfig } from "@schema";
 import { MailPlus, Minus, PencilLine, X } from "lucide-react";
+import dynamic from "next/dynamic";
 import { useParams } from "next/navigation";
 import type React from "react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
 	OPEN_DRAFT_EVENT,
 	type OpenDraftDetail,
-} from "@/components/mailbox/default/draft-list";
-import EmailEditor, {
-	type EmailEditorHandle,
-	type InitialDraft,
+} from "@/components/mailbox/default/draft-events";
+import type {
+	EmailEditorHandle,
+	InitialDraft,
 } from "@/components/mailbox/default/editor/email-editor";
 import { Button } from "@/components/ui/button";
 import {
@@ -22,6 +23,23 @@ import {
 	fetchIdentityMailboxList,
 	fetchMailbox,
 } from "@/lib/actions/mailbox";
+
+// ComposeMail is rendered in the mail layout (every mail page), but the TipTap
+// editor is only needed once the user clicks "Compose": load it on demand and
+// warm the chunk on hover/focus of the button.
+const loadEmailEditor = () =>
+	import("@/components/mailbox/default/editor/email-editor");
+const EmailEditor = dynamic(loadEmailEditor, {
+	ssr: false,
+	loading: () => (
+		<div className="px-4 py-10 text-sm text-muted-foreground">
+			Loading editor…
+		</div>
+	),
+});
+const preloadEmailEditor = () => {
+	void loadEmailEditor();
+};
 
 function Portal({ children }: { children: React.ReactNode }) {
 	const elRef = useRef<HTMLDivElement | null>(null);
@@ -164,24 +182,29 @@ export default function ComposeMail({
 		};
 	}, [open]);
 
-	useEffect(() => {
-		const onOpenDraft = (event: Event) => {
-			const detail = (event as CustomEvent<OpenDraftDetail>).detail;
-			if (!detail) return;
-			preferredMailboxRef.current = detail.mailboxId;
-			setInitialDraft({ id: detail.id, payload: detail.payload });
-			setEditorKey((k) => k + 1);
-			setMinimized(false);
-			if (open) {
-				void loadSenders();
-			} else {
-				setSentMailboxId(undefined);
-				setOpen(true);
-			}
-		};
-		window.addEventListener(OPEN_DRAFT_EVENT, onOpenDraft);
-		return () => window.removeEventListener(OPEN_DRAFT_EVENT, onOpenDraft);
+	// Effect event: always sees the latest state without re-subscribing the
+	// window listener on every render.
+	const onOpenDraft = useEffectEvent((event: Event) => {
+		const detail = (event as CustomEvent<OpenDraftDetail>).detail;
+		if (!detail) return;
+		preferredMailboxRef.current = detail.mailboxId;
+		setInitialDraft({ id: detail.id, payload: detail.payload });
+		setEditorKey((k) => k + 1);
+		setMinimized(false);
+		if (open) {
+			void loadSenders();
+		} else {
+			setSentMailboxId(undefined);
+			setOpen(true);
+		}
 	});
+
+	// biome-ignore lint/correctness/useExhaustiveDependencies: effect events must not be dependencies
+	useEffect(() => {
+		const listener = (event: Event) => onOpenDraft(event);
+		window.addEventListener(OPEN_DRAFT_EVENT, listener);
+		return () => window.removeEventListener(OPEN_DRAFT_EVENT, listener);
+	}, []);
 
 	const handleOpen = () => {
 		preferredMailboxRef.current = null;
@@ -201,11 +224,21 @@ export default function ComposeMail({
 	return (
 		<>
 			{isMobile ? (
-				<ActionIcon onClick={handleOpen}>
+				<ActionIcon
+					onClick={handleOpen}
+					onPointerEnter={preloadEmailEditor}
+					onFocus={preloadEmailEditor}
+					aria-label="Compose"
+				>
 					<PencilLine size={16} />
 				</ActionIcon>
 			) : (
-				<Button size="lg" onClick={handleOpen}>
+				<Button
+					size="lg"
+					onClick={handleOpen}
+					onPointerEnter={preloadEmailEditor}
+					onFocus={preloadEmailEditor}
+				>
 					<MailPlus className="h-5 w-5" />
 					Compose
 				</Button>

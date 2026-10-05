@@ -722,6 +722,8 @@ export const messages = pgTable(
 
 		index("idx_messages_mailbox_date").on(t.mailboxId, t.date),
 		index("idx_messages_mailbox_seen_date").on(t.mailboxId, t.seen, t.date),
+		// RLS adds owner_id = auth.uid() to every query (dashboard counts).
+		index("idx_messages_owner_created").on(t.ownerId, t.createdAt),
 
 		pgPolicy("messages_select_own", {
 			for: "select",
@@ -886,6 +888,10 @@ export const mailboxThreads = pgTable(
 
 		index("ix_mbth_mailbox_snoozed_until").on(t.mailboxId, t.snoozedUntil),
 		index("ix_mbth_mailbox_unsnoozed_at").on(t.mailboxId, t.unsnoozedAt),
+		// Account-wide snoozed list / sidebar counts.
+		index("ix_mbth_owner_snoozed_until")
+			.on(t.ownerId, t.snoozedUntil)
+			.where(sql`${t.snoozedUntil} IS NOT NULL`),
 
 		uniqueIndex("ux_mbth_thread_mailbox").on(t.threadId, t.mailboxId),
 
@@ -1555,6 +1561,10 @@ export const calendarEvents = pgTable(
 		index("ix_calendar_events_owner").on(t.ownerId),
 		index("ix_calendar_events_calendar").on(t.calendarId),
 		index("ix_calendar_events_calendar_start").on(t.calendarId, t.startsAt),
+		// Invitation preview looks events up by iCal UID.
+		index("ix_calendar_events_owner_ical_uid")
+			.on(t.ownerId, t.icalUid)
+			.where(sql`${t.icalUid} IS NOT NULL`),
 		uniqueIndex("ix_calendar_events_owner_dav_uri")
 			.on(t.ownerId, t.davUri)
 			.where(sql`${t.davUri} IS NOT NULL`),

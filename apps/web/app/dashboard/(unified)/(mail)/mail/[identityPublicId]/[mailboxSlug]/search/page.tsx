@@ -26,27 +26,23 @@ export default async function SearchPage({
 	const starred = (resolvedSearchParams.starred as string) === "1";
 	const page = Math.max(1, Number((resolvedSearchParams.page as string) ?? 1));
 
-	const { activeMailbox } = await fetchMailbox(identityPublicId, mailboxSlug);
-	const publicConfig = await getPublicEnv();
-
-	let items: ThreadHit[] = [];
-	let totalThreads = 0;
-	let totalMessages = 0;
-
-	if (q.trim()) {
+	const publicConfig = getPublicEnv();
+	const runSearch = async () => {
+		if (!q.trim()) return null;
 		const user = await isSignedIn();
-		const res = await initSearch(
-			q,
-			String(user?.id),
-			has,
-			unread,
-			starred,
-			page,
-		);
-		items = res.items ?? [];
-		totalThreads = res.totalThreads ?? items.length;
-		totalMessages = res.totalMessages ?? items.length;
-	}
+		return initSearch(q, String(user?.id), has, unread, starred, page);
+	};
+
+	// Mailbox, labels and the search itself are independent: run them together.
+	const [{ activeMailbox }, globalLabels, res] = await Promise.all([
+		fetchMailbox(identityPublicId, mailboxSlug),
+		fetchLabels(),
+		runSearch(),
+	]);
+
+	const items: ThreadHit[] = res?.items ?? [];
+	const totalThreads = res ? (res.totalThreads ?? items.length) : 0;
+	const totalMessages = res ? (res.totalMessages ?? items.length) : 0;
 
 	const total = totalThreads || items.length;
 	const totalPages = Math.max(1, Math.ceil((total || 1) / PAGE_SIZE));
@@ -58,8 +54,6 @@ export default async function SearchPage({
 		activeMailbox && threadIds.length > 0
 			? await fetchMailboxThreadsList(activeMailbox.id, threadIds)
 			: { threads: [] };
-
-	const globalLabels = await fetchLabels();
 
 	const labelsByThreadId =
 		threads.length > 0 ? await fetchMailboxThreadLabels(threads) : {};

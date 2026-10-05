@@ -1,6 +1,8 @@
 "use server";
 
-import { getRedis } from "@/lib/actions/get-redis";
+import { cache } from "react";
+import { addJobAndWait } from "@/lib/actions/get-redis";
+import { withServerCache } from "@/lib/server-cache";
 import { isSignedIn } from "@/lib/actions/auth";
 import {
 	driveEntries,
@@ -14,17 +16,18 @@ import { rlsClient } from "@/lib/actions/clients";
 import { DriveRouteContext, FormState, handleAction, Providers } from "@schema";
 import { decode } from "decode-formdata";
 import { revalidatePath } from "next/cache";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { fetchDecryptedSecrets } from "@/lib/actions/dashboard";
 import { createStore, ListPathEntry, ListPathResult } from "@providers";
 import mime from "mime-types";
 import { nanoid } from "nanoid";
 
+// Callers wait for the result through the queue events, so finished jobs
+// (whose return values hold whole directory listings) need not stay in Redis
+// forever.
 const onRemove = {
-	// removeOnComplete: { age: 60 * 5, count: 1000 },
-	// removeOnFail: { age: 60 * 60, count: 1000 },
-	removeOnComplete: false,
-	removeOnFail: false,
+	removeOnComplete: { age: 60 * 5, count: 1000 },
+	removeOnFail: { age: 60 * 60, count: 1000 },
 };
 
 const trimSlashes = (s: string) => s.replace(/^\/+|\/+$/g, "");
@@ -60,16 +63,23 @@ export const normalizeWithinPath = async (segments: string[]) => {
 	} satisfies DriveRouteContext;
 };
 
-export const fetchVolumes = async () => {
-	const { davQueue, davEvents } = await getRedis();
-	const user = await isSignedIn();
-	const job = await davQueue.add(
+const discoverVolumes = async (userId: string | undefined) =>
+	addJobAndWait<DriveVolumeEntity[]>(
+		"dav-worker",
 		"dav:drive:discover-user-volumes",
-		{ userId: user?.id },
+		{ userId },
 		onRemove,
 	);
 
-	const vols = await job.waitUntilFinished(davEvents);
+// Rendered by the drive layout on every navigation: dedupe per request and
+// keep the worker round trip in the (optional) per-user server cache.
+export const fetchVolumes = cache(async () => {
+	const user = await isSignedIn();
+	const vols = user?.id
+		? await withServerCache(user.id, `drive-volumes:${user.id}`, 30, () =>
+				discoverVolumes(user.id),
+			)
+		: await discoverVolumes(undefined);
 	const localVolumes = vols.filter(
 		(v: DriveVolumeEntity) => v.kind === "local" && v.code !== "home",
 	);
@@ -77,13 +87,13 @@ export const fetchVolumes = async () => {
 		(v: DriveVolumeEntity) => v.kind === "cloud",
 	);
 	return { localVolumes, cloudVolumes };
-};
+});
 
 export const fetchListPath = async (path: string[]) => {
-	const { davQueue, davEvents } = await getRedis();
 	const user = await isSignedIn();
 
-	const job = await davQueue.add(
+	return addJobAndWait<(typeof driveEntries.$inferSelect)[]>(
+		"dav-worker",
 		"dav:drive:list-path",
 		{
 			ownerId: user?.id,
@@ -91,8 +101,6 @@ export const fetchListPath = async (path: string[]) => {
 		},
 		onRemove,
 	);
-
-	return await job.waitUntilFinished(davEvents);
 };
 
 export async function deletePath(
@@ -102,21 +110,17 @@ export async function deletePath(
 	return handleAction(async () => {
 		const decodedForm = decode(formData) as Record<string, unknown>;
 		const rls = await rlsClient();
-		const entry = await rls(async (tx) => {
-			const [e] = await tx
-				.select()
+		// Entry and its volume in one query.
+		const [row] = await rls((tx) =>
+			tx
+				.select({ entry: driveEntries, volume: driveVolumes })
 				.from(driveEntries)
-				.where(and(eq(driveEntries.id, decodedForm.entryId as string)));
-			return e;
-		});
-
-		const volume = await rls(async (tx) => {
-			const [vol] = await tx
-				.select()
-				.from(driveVolumes)
-				.where(and(eq(driveVolumes.id, entry.volumeId)));
-			return vol;
-		});
+				.innerJoin(driveVolumes, eq(driveVolumes.id, driveEntries.volumeId))
+				.where(eq(driveEntries.id, String(decodedForm.entryId)))
+				.limit(1),
+		);
+		if (!row) return { success: false, error: "Entry not found" };
+		const { entry, volume } = row;
 
 		if (volume.kind === "cloud") {
 			const [secret] = await fetchDecryptedSecrets({
@@ -141,10 +145,10 @@ export async function deletePath(
 			return { success: true };
 		}
 
-		const { davQueue, davEvents } = await getRedis();
 		const user = await isSignedIn();
 
-		const job = await davQueue.add(
+		await addJobAndWait(
+			"dav-worker",
 			"dav:drive:delete-path",
 			{
 				ownerId: user?.id,
@@ -153,15 +157,13 @@ export async function deletePath(
 			},
 			onRemove,
 		);
-
-		await job.waitUntilFinished(davEvents);
 		revalidatePath("/dashboard/drive");
 
 		return { success: true };
 	});
 }
 
-export const normalizeWithinPathString = async (path: unknown) => {
+const normalizeWithinPathString = async (path: unknown) => {
 	const raw = typeof path === "string" ? path : "/";
 	const cleaned = "/" + trimSlashes(decodeURIComponent(raw));
 	return cleaned === "/" ? "/" : cleaned;
@@ -190,7 +192,6 @@ export async function addNewFolder(
 ): Promise<FormState> {
 	return handleAction(async () => {
 		const decodedForm = decode(formData) as Record<string, unknown>;
-		console.log("decodedForm", decodedForm);
 
 		const name =
 			typeof decodedForm.name === "string" ? decodedForm.name.trim() : "";
@@ -213,14 +214,16 @@ export async function addNewFolder(
 		if (scope === "cloud") {
 			if (!publicId) return { success: false, error: "Missing volume" };
 
-			const vol = await rls(async (tx) => {
-				const [v] = await tx
-					.select()
+			// Volume and its provider in one query.
+			const [volRow] = await rls((tx) =>
+				tx
+					.select({ vol: driveVolumes, prov: providers })
 					.from(driveVolumes)
+					.leftJoin(providers, eq(providers.id, driveVolumes.providerId))
 					.where(eq(driveVolumes.publicId, publicId))
-					.limit(1);
-				return v ?? null;
-			});
+					.limit(1),
+			);
+			const vol = volRow?.vol ?? null;
 
 			if (!vol) return { success: false, error: "Volume not found" };
 			if (vol.kind !== "cloud")
@@ -233,14 +236,7 @@ export async function addNewFolder(
 			if (!providerId)
 				return { success: false, error: "Cloud volume missing providerId" };
 
-			const prov = await rls(async (tx) => {
-				const [p] = await tx
-					.select()
-					.from(providers)
-					.where(eq(providers.id, providerId))
-					.limit(1);
-				return p ?? null;
-			});
+			const prov = volRow?.prov ?? null;
 
 			if (!prov) return { success: false, error: "Storage provider not found" };
 
@@ -304,13 +300,12 @@ export async function addNewFolder(
 		}
 
 		const user = await isSignedIn();
-		const { davQueue, davEvents } = await getRedis();
-		const job = await davQueue.add(
+		await addJobAndWait(
+			"dav-worker",
 			"dav:drive:add-folder-path",
 			{ ownerId: String(user?.id), withinPath, name },
 			onRemove,
 		);
-		await job.waitUntilFinished(davEvents);
 		revalidatePath("/dashboard/drive");
 		return { success: true };
 	});
@@ -419,27 +414,17 @@ export async function fetchDownloadLink(
 
 		const rls = await rlsClient();
 
-		const entry = await rls(async (tx) => {
-			const [e] = await tx
-				.select()
+		const [row] = await rls((tx) =>
+			tx
+				.select({ entry: driveEntries, volume: driveVolumes })
 				.from(driveEntries)
+				.innerJoin(driveVolumes, eq(driveVolumes.id, driveEntries.volumeId))
 				.where(eq(driveEntries.id, entryId))
-				.limit(1);
-			return e ?? null;
-		});
+				.limit(1),
+		);
 
-		if (!entry) return { success: false, error: "Entry not found" };
-
-		const volume = await rls(async (tx) => {
-			const [vol] = await tx
-				.select()
-				.from(driveVolumes)
-				.where(eq(driveVolumes.id, entry.volumeId))
-				.limit(1);
-			return vol ?? null;
-		});
-
-		if (!volume) return { success: false, error: "Volume not found" };
+		if (!row) return { success: false, error: "Entry not found" };
+		const { entry, volume } = row;
 
 		if (volume.kind !== "cloud") {
 			const now = new Date();

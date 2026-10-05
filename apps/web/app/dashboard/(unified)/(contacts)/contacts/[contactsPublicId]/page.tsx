@@ -18,7 +18,7 @@ import { LabelScope } from "@schema";
 import { Star } from "lucide-react";
 import Form from "next/form";
 import { getCountryDataList, TCountryCode } from "countries-list";
-import { getRedis } from "@/lib/actions/get-redis";
+import { getQueue } from "@/lib/actions/get-redis";
 import { isSignedIn } from "@/lib/actions/auth";
 import ContactListAvatar from "@/components/dashboard/contacts/contact-list-avatar";
 
@@ -73,7 +73,7 @@ async function Page({
 
 	const onDeleteAction = async (id: string) => {
 		"use server";
-		const { davQueue } = await getRedis();
+		const davQueue = getQueue("dav-worker");
 		const user = await isSignedIn();
 		await davQueue.add("dav:delete-contact", {
 			contactId: id,

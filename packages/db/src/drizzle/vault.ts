@@ -1,5 +1,5 @@
-import { eq, sql } from "drizzle-orm";
-import type { PgTransaction } from "drizzle-orm/pg-core";
+import { eq, inArray, sql } from "drizzle-orm";
+import type { PgDatabase, PgTransaction } from "drizzle-orm/pg-core";
 import { createDrizzleSupabaseClient } from "./drizzle-client";
 import { secretsMeta } from "./schema";
 import { DecryptedEntity } from "./drizzle-types";
@@ -32,8 +32,9 @@ async function vaultDeleteSecret(tx: PgTransaction<any, any, any>, id: string) {
 	await tx.execute(sql`select vault.delete_secret(${id})`);
 }
 
+// A single read needs no transaction (BEGIN/COMMIT are two extra round trips).
 async function vaultGetSecret(
-	tx: PgTransaction<any, any, any>,
+	tx: PgDatabase<any, any, any>,
 	id: string,
 ): Promise<DecryptedEntity | null> {
 	const [row]: [DecryptedEntity] = await tx.execute(
@@ -117,9 +118,7 @@ export async function getSecretAdmin(id: string) {
 
 	if (!meta) throw new Error("Secret metadata not found");
 
-	const vault = await db.transaction((tx) =>
-		vaultGetSecret(tx, meta.vaultSecret),
-	);
+	const vault = await vaultGetSecret(db, meta.vaultSecret);
 
 	return { metaSecret: meta, vault };
 }
@@ -134,11 +133,50 @@ export async function getSecret(session: AuthSession, id: string) {
 
 	if (!meta) throw new Error("Not found or not allowed");
 
-	const vault = await admin.transaction((tx) =>
-		vaultGetSecret(tx, meta.vaultSecret),
-	);
+	const vault = await vaultGetSecret(admin, meta.vaultSecret);
 
 	return { metaSecret: meta, vault };
+}
+
+/**
+ * Batched getSecret: two queries for any number of secrets instead of
+ * three round trips per secret. Ids the caller may not read (RLS) are
+ * missing from the result.
+ */
+export async function getSecrets(session: AuthSession, ids: string[]) {
+	const result = new Map<
+		string,
+		{
+			metaSecret: typeof secretsMeta.$inferSelect;
+			vault: DecryptedEntity | null;
+		}
+	>();
+	const uniqueIds = Array.from(new Set(ids.filter(Boolean)));
+	if (!uniqueIds.length) return result;
+
+	const { admin, rls } = await createDrizzleSupabaseClient(session);
+	const metas = await rls((tx) =>
+		tx.select().from(secretsMeta).where(inArray(secretsMeta.id, uniqueIds)),
+	);
+	if (!metas.length) return result;
+
+	const vaultRows = (await admin.execute(
+		sql`select id, name, description, decrypted_secret
+        from vault.decrypted_secrets
+        where id in (${sql.join(
+					metas.map((m) => sql`${m.vaultSecret}`),
+					sql`, `,
+				)})`,
+	)) as unknown as DecryptedEntity[];
+	const vaultById = new Map(vaultRows.map((row) => [String(row.id), row]));
+
+	for (const meta of metas) {
+		result.set(meta.id, {
+			metaSecret: meta,
+			vault: vaultById.get(String(meta.vaultSecret)) ?? null,
+		});
+	}
+	return result;
 }
 
 export async function updateSecret(

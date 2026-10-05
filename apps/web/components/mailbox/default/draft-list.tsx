@@ -7,15 +7,13 @@ import { FileText, Forward, Paperclip, Reply, Trash } from "lucide-react";
 import { useRouter } from "next/navigation";
 import * as React from "react";
 import { toast } from "sonner";
+import { useIsClient } from "@/components/mailbox/default/thread-list-utils";
 import { type DraftPayload, deleteDraft } from "@/lib/actions/mailbox";
 
-export const OPEN_DRAFT_EVENT = "kurrier:open-draft";
-
-export type OpenDraftDetail = {
-	id: string;
-	mailboxId: string;
-	payload: DraftPayload;
-};
+import {
+	OPEN_DRAFT_EVENT,
+	type OpenDraftDetail,
+} from "@/components/mailbox/default/draft-events";
 
 function formatDateLabel(input?: string | number | Date | null) {
 	if (!input) return "";
@@ -40,6 +38,9 @@ function DraftListItem({ draft }: { draft: DraftMessageEntity }) {
 	const router = useRouter();
 	const payload = (draft.payload ?? {}) as DraftPayload;
 	const [deleting, setDeleting] = React.useState(false);
+	// Local-timezone label: client only, so SSR (server timezone) and
+	// hydration never disagree.
+	const isClient = useIsClient();
 	const isReply = payload.mode === "reply" || payload.mode === "forward";
 	const ModeIcon =
 		payload.mode === "reply"
@@ -66,11 +67,16 @@ function DraftListItem({ draft }: { draft: DraftMessageEntity }) {
 
 	return (
 		<li
-			className="px-3 py-2 transition-colors hover:bg-muted/50 cursor-pointer"
+			className="px-3 py-2 transition-colors hover:bg-muted/50 cursor-pointer has-[:focus-visible]:bg-muted/50"
 			onClick={open}
 		>
 			<div className="flex items-start justify-between gap-3">
-				<div className="min-w-0 flex-1">
+				{/* A real button for keyboard users; its click bubbles to the row. */}
+				<button
+					type="button"
+					aria-label={`Open draft ${payload.subject || "(no subject)"}`}
+					className="min-w-0 flex-1 text-left focus-visible:outline-none"
+				>
 					<div className="flex items-center gap-2 min-w-0">
 						<ModeIcon className="h-4 w-4 text-muted-foreground shrink-0" />
 						<div className="truncate font-semibold">
@@ -85,15 +91,16 @@ function DraftListItem({ draft }: { draft: DraftMessageEntity }) {
 						{preview && <span className="mx-1">–</span>}
 						{preview && <span>{preview}</span>}
 					</div>
-				</div>
+				</button>
 				<div className="flex items-center gap-2 shrink-0">
 					<span className="text-xs text-muted-foreground whitespace-nowrap">
-						{formatDateLabel(draft.updatedAt)}
+						{isClient ? formatDateLabel(draft.updatedAt) : ""}
 					</span>
 					<ActionIcon
 						size="sm"
 						variant="light"
 						title="Discard draft"
+						aria-label="Discard draft"
 						loading={deleting}
 						onClick={async (e) => {
 							e.stopPropagation();

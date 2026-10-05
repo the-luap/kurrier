@@ -7,16 +7,12 @@ import { type FormState, getPublicEnv } from "@schema";
 import type { AuthSession } from "@supabase/supabase-js";
 import { redirect } from "next/navigation";
 import { cache } from "react";
-import { getQueue, getQueueEvents, getRedis } from "@/lib/actions/get-redis";
+import { addJobAndWait } from "@/lib/actions/get-redis";
 import { createClient } from "@/lib/supabase/server";
 import { formDataToJson } from "@/lib/utils";
 
 const initProviders = async (userId: string) => {
-	const commonWorkerQueue = getQueue("common-worker");
-	const commonWorkerEvents = await getQueueEvents("common-worker");
-
-	const job = await commonWorkerQueue.add("sync-providers", { userId });
-	await job.waitUntilFinished(commonWorkerEvents);
+	await addJobAndWait("common-worker", "sync-providers", { userId });
 };
 
 export async function login(
@@ -45,8 +41,8 @@ export async function login(
 }
 
 const applyPendingMigrations = async (userId: string) => {
-	const { migrationWorkerQueue, migrationWorkerEvents } = await getRedis();
-	const job = await migrationWorkerQueue.add(
+	await addJobAndWait(
+		"migration-worker",
 		"migration:run-for-user-after-signup",
 		{ userId },
 		{
@@ -60,8 +56,6 @@ const applyPendingMigrations = async (userId: string) => {
 			jobId: `migration:${userId}:${APP_VERSION}`,
 		},
 	);
-	await job.waitUntilFinished(migrationWorkerEvents);
-	return;
 };
 
 export async function signup(

@@ -1,18 +1,17 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useIsClient } from "@/components/mailbox/default/thread-list-utils";
 
-function formatShort(value: Date) {
-	return value.toLocaleString(undefined, {
-		day: "2-digit",
-		month: "2-digit",
-		hour: "2-digit",
-		minute: "2-digit",
-	});
-}
+const shortFormatter = new Intl.DateTimeFormat(undefined, {
+	day: "2-digit",
+	month: "2-digit",
+	hour: "2-digit",
+	minute: "2-digit",
+});
 
-// Formats a timestamp in the viewer's timezone. Rendering happens after mount
-// so the server (in its own timezone) and the client never disagree.
+// Formats a timestamp in the viewer's timezone. Rendering happens on the
+// client only so the server (in its own timezone) and the client never
+// disagree; useIsClient avoids an effect + extra render per instance.
 export default function LocalTime({
 	value,
 	className,
@@ -20,20 +19,17 @@ export default function LocalTime({
 	value: string | number | Date | null | undefined;
 	className?: string;
 }) {
-	const [label, setLabel] = useState("");
+	const isClient = useIsClient();
 	const time = value ? new Date(value).getTime() : Number.NaN;
-
-	useEffect(() => {
-		setLabel(Number.isNaN(time) ? "" : formatShort(new Date(time)));
-	}, [time]);
+	const valid = !Number.isNaN(time);
 
 	return (
 		<time
 			className={className}
-			dateTime={Number.isNaN(time) ? undefined : new Date(time).toISOString()}
+			dateTime={valid ? new Date(time).toISOString() : undefined}
 			suppressHydrationWarning
 		>
-			{label}
+			{isClient && valid ? shortFormatter.format(time) : ""}
 		</time>
 	);
 }

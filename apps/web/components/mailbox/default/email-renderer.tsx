@@ -1,8 +1,10 @@
-// @ts-nocheck
 "use client";
 import { getMessageAddress, getMessageName } from "@common/mail-client";
-import type { MessageAttachmentEntity, MessageEntity } from "@db";
-import { Temporal } from "@js-temporal/polyfill";
+import type {
+	MailSubscriptionEntity,
+	MessageAttachmentEntity,
+	MessageEntity,
+} from "@db";
 import { ActionIcon, Button, Menu, Modal } from "@mantine/core";
 import { useDisclosure } from "@mantine/hooks";
 import type { PublicConfig } from "@schema";
@@ -32,7 +34,6 @@ import type { AuthStatus } from "@/components/mailbox/default/auth-status";
 import MailUnsubscriber from "@/components/mailbox/default/mail-unsubscriber";
 import {
 	type FetchIdentityMailboxListResult,
-	type FetchThreadMailSubsResult,
 	fetchDraftForMessage,
 	fetchIdentityMailboxList,
 	fetchMailbox,
@@ -68,6 +69,25 @@ function formatAddressList(message: MessageEntity, field: "to" | "cc"): string {
 		.filter(Boolean)
 		.join(", ");
 }
+
+// Viewer-local formatting (same output as the former Temporal polyfill code,
+// without shipping the polyfill to the thread view).
+const headerDateFormatter = new Intl.DateTimeFormat("en-US", {
+	day: "2-digit",
+	month: "short",
+	year: "numeric",
+	hour: "2-digit",
+	minute: "2-digit",
+	hour12: true,
+});
+const originalDateFormatter = new Intl.DateTimeFormat("en-GB", {
+	day: "numeric",
+	month: "long",
+	year: "numeric",
+	hour: "2-digit",
+	minute: "2-digit",
+	hour12: false,
+});
 
 function authClass(value: string) {
 	if (value === "pass") return "text-green-700 dark:text-green-400";
@@ -139,6 +159,7 @@ function EmailRenderer({
 	activeMailboxId,
 	mailSubscription,
 	authStatus,
+	attachmentUrls,
 	children,
 }: {
 	threadIndex: number;
@@ -149,8 +170,10 @@ function EmailRenderer({
 	threadId: string;
 	markSmtp: boolean;
 	activeMailboxId: string;
-	mailSubscription: FetchThreadMailSubsResult["byMessageId"] | null;
+	mailSubscription: MailSubscriptionEntity | null;
 	authStatus?: AuthStatus | null;
+	/** Server-signed download URLs by attachment id. */
+	attachmentUrls?: Record<string, string>;
 	children?: React.ReactNode;
 }) {
 	const receivedAt = message.date ?? message.createdAt;
@@ -333,60 +356,41 @@ function EmailRenderer({
 	const [emailString, setEmailString] = useState<string | null>(null);
 
 	useEffect(() => {
-		if (opened) {
-			if (!message.rawStorageKey) {
-				setEmailString("Raw .eml source is not available for this message.");
-				return;
-			}
-			const supabase = createClient(publicConfig);
-			supabase.storage
-				.from("attachments")
-				.download(String(message.rawStorageKey))
-				.then(({ data, error }) => {
-					if (error) {
-						console.error("Error downloading original message:", error);
-						return;
-					}
-					if (data) {
-						data.text().then((raw) => {
-							setEmailString(
-								raw.length > 200_000
-									? `${raw.slice(0, 200_000)}\n\n… truncated, use "Download" for the full message.`
-									: raw,
-							);
-						});
-					}
-				});
+		if (!opened || emailString) return;
+		if (!message.rawStorageKey) {
+			setEmailString("Raw .eml source is not available for this message.");
+			return;
 		}
-	}, [opened, publicConfig, message.rawStorageKey]);
+		// Ignore a late response once the modal is closed / message changes.
+		let cancelled = false;
+		const supabase = createClient(publicConfig);
+		supabase.storage
+			.from("attachments")
+			.download(String(message.rawStorageKey))
+			.then(async ({ data, error }) => {
+				if (error) {
+					console.error("Error downloading original message:", error);
+					return;
+				}
+				if (!data) return;
+				const raw = await data.text();
+				if (cancelled) return;
+				setEmailString(
+					raw.length > 200_000
+						? `${raw.slice(0, 200_000)}\n\n… truncated, use "Download" for the full message.`
+						: raw,
+				);
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [opened, emailString, publicConfig, message.rawStorageKey]);
 
 	useEffect(() => {
-		const instant = Temporal.Instant.from(new Date(receivedAt).toISOString());
-		setFormatted(
-			instant
-				.toZonedDateTimeISO(Temporal.Now.timeZoneId())
-				.toLocaleString("en-US", {
-					day: "2-digit",
-					month: "short",
-					year: "numeric",
-					hour: "2-digit",
-					minute: "2-digit",
-					hour12: true,
-				}),
-		);
-		setFormattedTime(
-			instant
-				.toZonedDateTimeISO(Temporal.Now.timeZoneId())
-				.toLocaleString("en-GB", {
-					day: "numeric",
-					month: "long",
-					year: "numeric",
-					hour: "2-digit",
-					minute: "2-digit",
-					hour12: false,
-				})
-				.replace(",", " at"),
-		);
+		const date = new Date(receivedAt);
+		if (Number.isNaN(date.getTime())) return;
+		setFormatted(headerDateFormatter.format(date));
+		setFormattedTime(originalDateFormatter.format(date).replace(",", " at"));
 	}, [receivedAt]);
 
 	return (
@@ -702,6 +706,7 @@ function EmailRenderer({
 							<EditorAttachmentItem
 								key={attachment.id}
 								attachment={attachment}
+								signedUrl={attachmentUrls?.[String(attachment.id)]}
 								publicConfig={publicConfig}
 							/>
 						))}
