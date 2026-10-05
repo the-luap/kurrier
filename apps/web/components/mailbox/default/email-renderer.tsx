@@ -177,6 +177,12 @@ function EmailRenderer({
 	children?: React.ReactNode;
 }) {
 	const receivedAt = message.date ?? message.createdAt;
+	// thread-item passes a trimmed header object ({ from, to, subject }).
+	const headerInfo = (message.headersJson ?? {}) as {
+		from?: { text?: string };
+		to?: { text?: string };
+		subject?: string;
+	};
 	const [formatted, setFormatted] = useState("");
 	const [formattedTime, setFormattedTime] = useState("");
 
@@ -420,9 +426,7 @@ function EmailRenderer({
 						<div className="bg-muted px-3 py-2 font-medium text-muted-foreground">
 							From
 						</div>
-						<div className="px-3 py-2">
-							{message?.headersJson?.from?.text ?? ""}
-						</div>
+						<div className="px-3 py-2">{headerInfo.from?.text ?? ""}</div>
 					</div>
 
 					<div className="grid grid-cols-[160px_1fr] border-b">
@@ -430,9 +434,7 @@ function EmailRenderer({
 							To
 						</div>
 						{/*<div className="px-3 py-2">suisse@dinebot.io</div>*/}
-						<div className="px-3 py-2">
-							{message?.headersJson?.to?.text ?? ""}
-						</div>
+						<div className="px-3 py-2">{headerInfo.to?.text ?? ""}</div>
 					</div>
 
 					<div className="grid grid-cols-[160px_1fr] border-b">
@@ -441,7 +443,7 @@ function EmailRenderer({
 						</div>
 						<div className="px-3 py-2">
 							{/*Google Workspace: Your invoice is available for dinebot.io*/}
-							{message?.headersJson?.subject}
+							{headerInfo.subject}
 						</div>
 					</div>
 
