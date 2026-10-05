@@ -129,19 +129,13 @@ export default defineEventHandler(async (event) => {
 				new GetObjectCommand({ Bucket: bucket, Key: key }),
 			);
 			const rawEmail = (await getObj?.Body?.transformToString("utf-8")) || "";
-			const encoder = new TextEncoder();
-			const emailBuffer = encoder.encode(rawEmail);
 
-			await supabase.storage
-				.from("attachments")
-				.upload(`eml/${ownerId}/${emlId}`, emailBuffer, {
-					contentType: "message/rfc822",
-				});
-
-			const parsed = await simpleParser(rawEmail);
+			// The raw EML is stored by parseAndStoreEmail (under `key`); it used
+			// to be uploaded a second time here to a path nothing references.
+			// Parse once with the options parseAndStoreEmail needs and hand the
+			// result over instead of parsing the message twice.
+			const parsed = await simpleParser(rawEmail, { keepCidLinks: true });
 			const headers = parsed.headers as Map<string, any>;
-
-			console.dir(parsed, { depth: 10 });
 
 			const userMailboxes = await db
 				.select()
@@ -196,6 +190,7 @@ export default defineEventHandler(async (event) => {
 				mailboxId: targetMailboxId,
 				rawStorageKey: key, // S3 key
 				emlKey: emlId,
+				parsed,
 			});
 
 			const channel = await supabase.channel(`${ownerId}-mailbox`);

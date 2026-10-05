@@ -156,7 +156,8 @@ export async function storeInboundRawEmail(
 		});
 	}
 
-	const parsed = await simpleParser(rawMime);
+	// keepCidLinks: the parse is reused by parseAndStoreEmail (no second parse).
+	const parsed = await simpleParser(rawMime, { keepCidLinks: true });
 	const candidates = [
 		...new Set(
 			[
@@ -217,6 +218,7 @@ export async function storeInboundRawEmail(
 		mailboxId: targetMailbox.id,
 		rawStorageKey,
 		emlKey,
+		parsed,
 	});
 
 	return {

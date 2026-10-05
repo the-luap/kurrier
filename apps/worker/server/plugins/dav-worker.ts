@@ -1,6 +1,8 @@
 import { JobScheduler, Worker } from "bullmq";
 import { defineNitroPlugin } from "nitropack/runtime";
-import { getRedis } from "../../lib/get-redis";
+import { getRedis, workerOptions } from "../../lib/get-redis";
+import { contacts, db } from "@db";
+import { and, inArray, isNotNull } from "drizzle-orm";
 import { updatePassword } from "../../lib/dav/dav-update-password";
 import { createContact } from "../../lib/dav/dav-create-contact";
 import { updateContact } from "../../lib/dav/dav-update-contact";
@@ -87,13 +89,44 @@ export default defineNitroPlugin(async (nitroApp) => {
 				case "dav:update-contact":
 					return updateContact(job.data.contactId, job.data.ownerId);
 				case "dav:create-contacts-batch": {
-					const { ownerId, contactIds } = job.data;
+					const { ownerId } = job.data;
+					// Older producers sent "null" for messages without a contact.
+					const contactIds: string[] = [
+						...new Set<string>(
+							(job.data.contactIds ?? []).filter(
+								(id: unknown) =>
+									typeof id === "string" && id !== "" && id !== "null",
+							),
+						),
+					];
 
 					console.log(
 						`[DAV WORKER] Processing contacts batch (${contactIds.length})`,
 					);
+					// Every stored message enqueues its sender: skip contacts that
+					// already have a DAV card (the If-None-Match PUT would only fail
+					// with 412 after a secret lookup and an HTTP round trip).
+					const alreadySynced = new Set(
+						contactIds.length
+							? (
+									await db
+										.select({ id: contacts.id })
+										.from(contacts)
+										.where(
+											and(
+												inArray(contacts.id, contactIds),
+												isNotNull(contacts.davUri),
+											),
+										)
+								).map((r) => r.id)
+							: [],
+					);
 					const results = [];
 					for (const id of contactIds) {
+						if (alreadySynced.has(id)) {
+							results.push({ id, success: true, skipped: true });
+							continue;
+						}
 						try {
 							const r = await createContact(id, ownerId);
 							results.push({ id, success: true, result: r });
@@ -127,7 +160,7 @@ export default defineNitroPlugin(async (nitroApp) => {
 					return { success: true, skipped: true };
 			}
 		},
-		{ connection, concurrency: 1 },
+		workerOptions({ concurrency: 1 }),
 	);
 
 	worker.on("completed", (job) => {
@@ -154,7 +187,6 @@ export default defineNitroPlugin(async (nitroApp) => {
 	nitroApp.hooks.hookOnce("close", async () => {
 		console.info("Closing nitro server...");
 		console.info("Shutting down dav worker!");
-		await scheduler.removeJobScheduler("dav-sync-scheduler");
 		try {
 			console.info("Removing dav-sync-scheduler...");
 			await scheduler.removeJobScheduler("dav-sync-scheduler");

@@ -1,6 +1,10 @@
 import { db, identities, mailboxes, mailboxThreads, messages } from "@db";
 import { and, eq, isNotNull, sql } from "drizzle-orm";
-import { initSmtpClient } from "./imap-client";
+import {
+	closeImapClient,
+	initSmtpClient,
+	onImapReconnect,
+} from "./imap-client";
 import type { ImapFlow } from "imapflow";
 import type { FlagsEvent } from "imapflow";
 import { deltaFetch } from "../../lib/imap/imap-delta-fetch";
@@ -36,7 +40,12 @@ async function handleFlagsUpdate(
 		}
 
 		const [message] = await tx
-			.select()
+			.select({
+				id: messages.id,
+				threadId: messages.threadId,
+				seen: messages.seen,
+				flagged: messages.flagged,
+			})
 			.from(messages)
 			.where(
 				and(
@@ -132,7 +141,12 @@ async function handleExpunge(
 		}
 
 		const [message] = await tx
-			.select()
+			.select({
+				id: messages.id,
+				threadId: messages.threadId,
+				seen: messages.seen,
+				flagged: messages.flagged,
+			})
 			.from(messages)
 			.where(
 				and(
@@ -202,48 +216,62 @@ function attachRealtimeEventHandlers(
 	client: ImapFlow,
 	imapInstances: Map<string, ImapFlow>,
 ) {
-	client.on("exists", async (mailbox) => {
-		await deltaFetch(identityId, imapInstances);
+	// EventEmitter does not await listeners: every handler must catch its own
+	// errors, otherwise they surface as unhandled promise rejections.
+	client.on("exists", async () => {
+		try {
+			await deltaFetch(identityId, imapInstances);
+		} catch (err) {
+			console.error(`[realtime:${identityId}] delta fetch failed`, err);
+		}
 	});
 
 	client.on("flags", async (ev: FlagsEvent) => {
-		let uid = (ev as any).uid as number | undefined;
-		if (!uid) {
-			const msg = await client.fetchOne(ev.seq, { uid: true });
-			if (msg) {
-				uid = msg.uid;
+		try {
+			let uid = (ev as any).uid as number | undefined;
+			if (!uid) {
+				const msg = await client.fetchOne(ev.seq, { uid: true });
+				if (msg) {
+					uid = msg.uid;
+				}
 			}
-		}
-		if (!uid) {
-			console.warn(
-				`[realtime:${identityId}] could not resolve UID for seq=${ev.seq}`,
+			if (!uid) {
+				console.warn(
+					`[realtime:${identityId}] could not resolve UID for seq=${ev.seq}`,
+				);
+				return;
+			}
+			const isFlagged = ev.flags.has("\\Flagged");
+			const isSeen = ev.flags.has("\\Seen");
+			const isAnswered = ev.flags.has("\\Answered");
+			await handleFlagsUpdate(
+				identityId,
+				uid,
+				ev.path,
+				isFlagged,
+				isSeen,
+				isAnswered,
 			);
-			return;
+		} catch (err) {
+			console.error(`[realtime:${identityId}] flags update failed`, err);
 		}
-		const isFlagged = ev.flags.has("\\Flagged");
-		const isSeen = ev.flags.has("\\Seen");
-		const isAnswered = ev.flags.has("\\Answered");
-		await handleFlagsUpdate(
-			identityId,
-			uid,
-			ev.path,
-			isFlagged,
-			isSeen,
-			isAnswered,
-		);
 	});
 
 	client.on("expunge", async (ev) => {
-		console.log(`[realtime:${identityId}] EXPUNGE event`, ev);
-		const uid = (ev as any).uid as number | undefined;
-		if (!uid) {
-			console.warn(
-				`[realtime:${identityId}] expunge: missing uid for seq=${ev.seq}`,
-			);
-			return;
-		}
+		try {
+			console.log(`[realtime:${identityId}] EXPUNGE event`, ev);
+			const uid = (ev as any).uid as number | undefined;
+			if (!uid) {
+				console.warn(
+					`[realtime:${identityId}] expunge: missing uid for seq=${ev.seq}`,
+				);
+				return;
+			}
 
-		await handleExpunge(identityId, ev.path, uid);
+			await handleExpunge(identityId, ev.path, uid);
+		} catch (err) {
+			console.error(`[realtime:${identityId}] expunge failed`, err);
+		}
 	});
 }
 
@@ -254,6 +282,8 @@ async function idleForever(identityId: string, client: ImapFlow) {
 			await client.idle();
 		} catch (err) {
 			console.error(`[realtime:${identityId}] idle error`, err);
+			// Avoid a hot loop if IDLE keeps failing immediately.
+			await new Promise((r) => setTimeout(r, 1000));
 		}
 	}
 	console.warn(`[realtime:${identityId}] idle loop ended (client closed)`);
@@ -267,7 +297,9 @@ async function startRealtimeSyncForIdentity(
 	try {
 		await client.getMailboxLock("INBOX");
 		attachRealtimeEventHandlers(identityId, client, imapInstances);
-		idleForever(identityId, client);
+		idleForever(identityId, client).catch((err) =>
+			console.error(`[realtime:${identityId}] idle loop crashed`, err),
+		);
 	} catch (err) {
 		console.error(
 			`[realtime:${identityId}] failed to start realtime sync`,
@@ -306,16 +338,18 @@ export async function stopRealtimeForIdentity(
 	const idleClient = idleImapInstances.get(identityId);
 	const cmdClient = imapInstances.get(identityId);
 
+	// closeImapClient: a plain logout would trigger the auto-reconnect and
+	// silently restart the clients a few seconds later.
 	if (idleClient) {
 		try {
-			await idleClient.logout();
+			await closeImapClient(idleClient);
 		} catch {}
 		idleImapInstances.delete(identityId);
 	}
 
 	if (cmdClient) {
 		try {
-			await cmdClient.logout();
+			await closeImapClient(cmdClient);
 		} catch {}
 		imapInstances.delete(identityId);
 	}
@@ -329,6 +363,12 @@ export const imapIdleSync = async (
 	idleImapInstances: Map<string, ImapFlow>,
 	imapInstances: Map<string, ImapFlow>,
 ) => {
+	// A dropped IDLE connection is re-created by safeReconnect(); re-attach the
+	// realtime listeners to the new client or realtime sync stops for good.
+	onImapReconnect(idleImapInstances, (identityId) =>
+		startRealtimeForIdentity(identityId, idleImapInstances, imapInstances),
+	);
+
 	const identityRows = await db
 		.select()
 		.from(identities)

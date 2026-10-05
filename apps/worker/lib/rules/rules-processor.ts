@@ -270,6 +270,8 @@ export const processRules = async ({ messageId }: { messageId: string }) => {
                         ownerId: mailbox.ownerId,
                         labelId,
                     })
+                    // Label may already be on the thread: don't fail the job.
+                    .onConflictDoNothing();
                     break;
                 }
                 default: {

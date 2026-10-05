@@ -1,6 +1,6 @@
 import {db, mailboxThreads, messages} from "@db";
 import { and, eq, inArray } from "drizzle-orm";
-import { getRedis } from "../../../lib/get-redis";
+import { enqueueThreadRefresh, getRedis } from "../../../lib/get-redis";
 
 export const markAsRead = async (
         threadId: string,
@@ -34,7 +34,7 @@ export const markAsRead = async (
 
 
         if (markSmtp) {
-            const { smtpQueue, searchIngestQueue } = await getRedis();
+            const { smtpQueue } = await getRedis();
 
             await Promise.all(
                 ids.map((threadId) =>
@@ -51,20 +51,6 @@ export const markAsRead = async (
                 ),
             );
 
-            await Promise.all(
-                ids.map((threadId) =>
-                    searchIngestQueue.add(
-                        "refresh-thread",
-                        { threadId },
-                        {
-                            jobId: `refresh-${threadId}`,
-                            removeOnComplete: true,
-                            removeOnFail: false,
-                            attempts: 3,
-                            backoff: { type: "exponential", delay: 1500 },
-                        },
-                    ),
-                ),
-            );
+            await Promise.all(ids.map((threadId) => enqueueThreadRefresh(threadId)));
         }
 }

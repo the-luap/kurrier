@@ -3,11 +3,15 @@ import { ImapFlow } from "imapflow";
 
 import { JobScheduler, Worker } from "bullmq";
 import { deltaFetch } from "../../lib/imap/imap-delta-fetch";
-import { initSmtpClient } from "../../lib/imap/imap-client";
+import { closeImapClient, initSmtpClient } from "../../lib/imap/imap-client";
 import { mailSetFlags } from "../../lib/imap/imap-flags";
 import { moveMail } from "../../lib/imap/imap-move";
 
-import { getRedis } from "../../lib/get-redis";
+import {
+	enqueueThreadRefresh,
+	getRedis,
+	workerOptions,
+} from "../../lib/get-redis";
 import { deleteMail } from "../../lib/imap/imap-delete";
 import { addNewFolder } from "../../lib/imap/imap-new-folder";
 import { deleteFolder } from "../../lib/imap/imap-delete-folder";
@@ -24,48 +28,31 @@ export default defineNitroPlugin(async (nitroApp) => {
 
 	const imapInstances = new Map<string, ImapFlow>();
 	const idleImapInstances = new Map<string, ImapFlow>();
-	const { connection, searchIngestQueue } = await getRedis();
+	const { connection } = await getRedis();
 
 	const worker = new Worker(
 		"smtp-worker",
 		async (job) => {
 			if (job.name === "delta-fetch") {
 				const identityId = job.data.identityId;
+				// Let failures reach BullMQ so the job is marked failed (the UI polls
+				// the job state) instead of always reporting success.
 				await deltaFetch(identityId, imapInstances).catch((err) => {
 					console.error(
 						`delta-fetch job failed for identityId ${identityId}:`,
 						err,
 					);
+					throw err;
 				});
 			} else if (job.name === "mail:move") {
 				if (job.data.op === "move" && !job.data.toMailboxId) {
 					throw new Error("mail:move requires toMailboxId when op === 'move'");
 				}
 				await moveMail(job.data, imapInstances);
-				await searchIngestQueue.add(
-					"refresh-thread",
-					{ threadId: job.data.threadId },
-					{
-						jobId: `refresh-${job.data.threadId}`, // collapses duplicates
-						removeOnComplete: true,
-						removeOnFail: false,
-						attempts: 3,
-						backoff: { type: "exponential", delay: 1500 },
-					},
-				);
+				await enqueueThreadRefresh(job.data.threadId);
 			} else if (job.name === "mail:set-flags") {
 				await mailSetFlags(job.data, imapInstances);
-				await searchIngestQueue.add(
-					"refresh-thread",
-					{ threadId: job.data.threadId },
-					{
-						jobId: `refresh-${job.data.threadId}`, // collapses duplicates
-						removeOnComplete: true,
-						removeOnFail: false,
-						attempts: 3,
-						backoff: { type: "exponential", delay: 1500 },
-					},
-				);
+				await enqueueThreadRefresh(job.data.threadId);
 			} else if (job.name === "mail:delete-permanent") {
 				await deleteMail(job.data, imapInstances);
 			} else if (job.name === "smtp:append:sent") {
@@ -111,7 +98,7 @@ export default defineNitroPlugin(async (nitroApp) => {
 			}
 			return { success: true };
 		},
-		{ connection },
+		workerOptions(),
 	);
 
 	await imapIdleSync(idleImapInstances, imapInstances);
@@ -147,10 +134,16 @@ export default defineNitroPlugin(async (nitroApp) => {
 	nitroApp.hooks.hookOnce("close", async () => {
 		console.info("Closing nitro server...");
 		try {
+			await worker.close();
+		} catch (err: any) {
+			console.error("Error closing smtp worker:", err?.message ?? err);
+		}
+		try {
 			const logoutAll = async (label: string, map: Map<string, ImapFlow>) => {
 				for (const [identityId, client] of map) {
 					try {
-						await client.logout();
+						// Intentional close: must not trigger the auto-reconnect.
+						await closeImapClient(client);
 						console.info(
 							`[${label}] Logged out from IMAP server for identityId: ${identityId}`,
 						);

@@ -29,8 +29,32 @@ type JoinedRow = {
 	mt_starred?: boolean | null;
 };
 
+/** messages LEFT JOIN mailbox_threads, as indexed into Typesense. */
+export function selectJoinedRows() {
+	return db
+		.select({
+			m: messages,
+			mt_subject: mailboxThreads.subject,
+			mt_preview: mailboxThreads.previewText,
+			mt_lastActivityAt: mailboxThreads.lastActivityAt,
+			mt_messageCount: mailboxThreads.messageCount,
+			mt_unreadCount: mailboxThreads.unreadCount,
+			mt_hasAttachments: mailboxThreads.hasAttachments,
+			mt_participants: mailboxThreads.participants,
+			mt_starred: mailboxThreads.starred,
+		})
+		.from(messages)
+		.leftJoin(
+			mailboxThreads,
+			and(
+				eq(messages.threadId, mailboxThreads.threadId),
+				eq(messages.mailboxId, mailboxThreads.mailboxId),
+			),
+		);
+}
+
 /** Convert one joined row to a Typesense doc */
-function rowToDoc(row: JoinedRow) {
+export function rowToDoc(row: JoinedRow) {
 	const m = row.m;
 	return toSearchDoc({
 		id: m.id,
@@ -70,26 +94,7 @@ function rowToDoc(row: JoinedRow) {
 async function fetchJoinedByMessageId(
 	messageId: string,
 ): Promise<JoinedRow | null> {
-	const rows = await db
-		.select({
-			m: messages,
-			mt_subject: mailboxThreads.subject,
-			mt_preview: mailboxThreads.previewText,
-			mt_lastActivityAt: mailboxThreads.lastActivityAt,
-			mt_messageCount: mailboxThreads.messageCount,
-			mt_unreadCount: mailboxThreads.unreadCount,
-			mt_hasAttachments: mailboxThreads.hasAttachments,
-			mt_participants: mailboxThreads.participants,
-			mt_starred: mailboxThreads.starred,
-		})
-		.from(messages)
-		.leftJoin(
-			mailboxThreads,
-			and(
-				eq(messages.threadId, mailboxThreads.threadId),
-				eq(messages.mailboxId, mailboxThreads.mailboxId),
-			),
-		)
+	const rows = await selectJoinedRows()
 		.where(eq(messages.id, messageId))
 		.limit(1);
 
@@ -108,27 +113,7 @@ export async function indexMessage(messageId: string) {
 export async function indexManyMessages(messageIds: string[]) {
 	if (messageIds.length === 0) return;
 
-	const rows = await db
-		.select({
-			m: messages,
-			mt_subject: mailboxThreads.subject,
-			mt_preview: mailboxThreads.previewText,
-			mt_lastActivityAt: mailboxThreads.lastActivityAt,
-			mt_messageCount: mailboxThreads.messageCount,
-			mt_unreadCount: mailboxThreads.unreadCount,
-			mt_hasAttachments: mailboxThreads.hasAttachments,
-			mt_participants: mailboxThreads.participants,
-			mt_starred: mailboxThreads.starred,
-		})
-		.from(messages)
-		.leftJoin(
-			mailboxThreads,
-			and(
-				eq(messages.threadId, mailboxThreads.threadId),
-				eq(messages.mailboxId, mailboxThreads.mailboxId),
-			),
-		)
-		.where(inArray(messages.id, messageIds));
+	const rows = await selectJoinedRows().where(inArray(messages.id, messageIds));
 
 	const docs = rows.map(rowToDoc);
 	if (docs.length === 0) return;
@@ -152,27 +137,9 @@ export async function deleteMessage(messageId: string) {
 
 /** Re-index ALL messages in a thread (needed if thread-level fields changed) */
 export async function refreshThread(threadId: string) {
-	const threadRows = await db
-		.select({
-			m: messages,
-			mt_subject: mailboxThreads.subject,
-			mt_preview: mailboxThreads.previewText,
-			mt_lastActivityAt: mailboxThreads.lastActivityAt,
-			mt_messageCount: mailboxThreads.messageCount,
-			mt_unreadCount: mailboxThreads.unreadCount,
-			mt_hasAttachments: mailboxThreads.hasAttachments,
-			mt_participants: mailboxThreads.participants,
-			mt_starred: mailboxThreads.starred,
-		})
-		.from(messages)
-		.leftJoin(
-			mailboxThreads,
-			and(
-				eq(messages.threadId, mailboxThreads.threadId),
-				eq(messages.mailboxId, mailboxThreads.mailboxId),
-			),
-		)
-		.where(eq(messages.threadId, threadId));
+	const threadRows = await selectJoinedRows().where(
+		eq(messages.threadId, threadId),
+	);
 
 	if (threadRows.length === 0) return;
 

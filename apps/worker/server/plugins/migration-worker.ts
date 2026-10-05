@@ -1,16 +1,15 @@
 import { defineNitroPlugin } from "nitropack/runtime";
 import { db, appMigrations } from "@db";
 import { authUsers } from "drizzle-orm/supabase";
-import { desc, eq } from "drizzle-orm";
+import { desc } from "drizzle-orm";
 import { kvGet, kvSet, APP_VERSION } from "@common";
 import { runMigrationsForUser } from "../../lib/migrations/run-migration";
-import { getRedis } from "../../lib/get-redis";
+import { workerOptions } from "../../lib/get-redis";
 import { Worker } from "bullmq";
 
 const isProd = process.env.NODE_ENV === "production";
 
 async function runAllUserMigrations() {
-	const { connection } = await getRedis();
 	const worker = new Worker(
 		"migration-worker",
 		async (job) => {
@@ -21,7 +20,7 @@ async function runAllUserMigrations() {
 					return { success: true, skipped: true };
 			}
 		},
-		{ connection },
+		workerOptions(),
 	);
 	worker.on("completed", (job) => {
 		console.info(`Migration job ${job.id} (${job.name}) completed`);
@@ -34,7 +33,17 @@ async function runAllUserMigrations() {
 	});
 
 	console.log("Starting per-user migrations…");
-	const users = await db.select().from(authUsers);
+	const users = await db.select({ id: authUsers.id }).from(authUsers);
+
+	// Latest applied version per user in one query (was one query per user).
+	const latestRows = await db
+		.selectDistinctOn([appMigrations.ownerId], {
+			ownerId: appMigrations.ownerId,
+			version: appMigrations.version,
+		})
+		.from(appMigrations)
+		.orderBy(appMigrations.ownerId, desc(appMigrations.version));
+	const latestByUser = new Map(latestRows.map((r) => [r.ownerId, r.version]));
 
 	for (const user of users) {
 		const userId = user.id;
@@ -50,14 +59,7 @@ async function runAllUserMigrations() {
 				}
 			}
 
-			const last = await db
-				.select()
-				.from(appMigrations)
-				.where(eq(appMigrations.ownerId, userId))
-				.orderBy(desc(appMigrations.version))
-				.limit(1);
-
-			const fromVersion = last.length > 0 ? last[0].version : null;
+			const fromVersion = latestByUser.get(userId) ?? null;
 
 			if (fromVersion === toVersion) {
 				console.log(`User ${userId}: already at ${toVersion} (db)`);

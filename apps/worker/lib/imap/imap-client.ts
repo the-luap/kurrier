@@ -5,6 +5,36 @@ import { ImapFlow } from "imapflow";
 const retryCounts = new Map<string, number>();
 const MAX_RETRIES = 3;
 
+// Clients closed on purpose (shutdown, stop-idle) must not auto-reconnect.
+const intentionallyClosed = new WeakSet<ImapFlow>();
+
+// In-flight connects per instance map + identity, so concurrent callers share
+// one connection instead of each opening (and leaking) their own.
+const pendingConnects = new WeakMap<
+	Map<string, ImapFlow>,
+	Map<string, Promise<ImapFlow | undefined>>
+>();
+
+// Called after safeReconnect() re-established a client for a map (used by
+// the realtime IDLE sync to re-attach its listeners to the new client).
+const reconnectHandlers = new WeakMap<
+	Map<string, ImapFlow>,
+	(identityId: string, client: ImapFlow) => void | Promise<void>
+>();
+
+export function onImapReconnect(
+	imapInstances: Map<string, ImapFlow>,
+	handler: (identityId: string, client: ImapFlow) => void | Promise<void>,
+) {
+	reconnectHandlers.set(imapInstances, handler);
+}
+
+/** Logs out a client without triggering the automatic reconnect. */
+export async function closeImapClient(client: ImapFlow) {
+	intentionallyClosed.add(client);
+	await client.logout();
+}
+
 function safeReconnect(
 	identityId: string,
 	imapInstances: Map<string, ImapFlow>,
@@ -20,21 +50,25 @@ function safeReconnect(
 
 	const existing = imapInstances.get(identityId);
 	if (existing) {
-		try {
-			existing.logout();
-		} catch {}
+		intentionallyClosed.add(existing);
+		existing.logout().catch(() => {});
 		imapInstances.delete(identityId);
 	}
 
 	setTimeout(() => {
-		initSmtpClient(identityId, imapInstances).catch(console.error);
+		initSmtpClient(identityId, imapInstances)
+			.then(async (client) => {
+				const handler = reconnectHandlers.get(imapInstances);
+				if (client && handler) await handler(identityId, client);
+			})
+			.catch(console.error);
 	}, 5000);
 }
 
 export const initSmtpClient = async (
 	identityId: string,
 	imapInstances: Map<string, ImapFlow>,
-) => {
+): Promise<ImapFlow | undefined> => {
 	// If we already have a working connection, reuse it
 	try {
 		const existing = imapInstances.get(identityId);
@@ -47,6 +81,25 @@ export const initSmtpClient = async (
 		return;
 	}
 
+	let pending = pendingConnects.get(imapInstances);
+	if (!pending) {
+		pending = new Map();
+		pendingConnects.set(imapInstances, pending);
+	}
+	const inFlight = pending.get(identityId);
+	if (inFlight) return inFlight;
+
+	const connecting = connectClient(identityId, imapInstances).finally(() => {
+		pending.delete(identityId);
+	});
+	pending.set(identityId, connecting);
+	return connecting;
+};
+
+async function connectClient(
+	identityId: string,
+	imapInstances: Map<string, ImapFlow>,
+): Promise<ImapFlow | undefined> {
 	try {
 		const [identity] = await db
 			.select()
@@ -97,6 +150,9 @@ export const initSmtpClient = async (
 			return;
 		}
 
+		// A successful connect resets the retry budget; otherwise an identity
+		// would stop reconnecting for good after three drops over its lifetime.
+		retryCounts.delete(identityId);
 		imapInstances.set(identityId, client);
 
 		const noopInterval = setInterval(
@@ -112,9 +168,18 @@ export const initSmtpClient = async (
 			5 * 60 * 1000,
 		);
 
+		let cleanedUp = false;
 		const cleanup = (reason: string) => {
+			// "error" is usually followed by "close": reconnect only once.
+			if (cleanedUp) return;
+			cleanedUp = true;
 			clearInterval(noopInterval);
-			imapInstances.delete(identityId);
+			// Only drop the map entry if it still points at this client.
+			if (imapInstances.get(identityId) === client) {
+				imapInstances.delete(identityId);
+			}
+
+			if (intentionallyClosed.has(client)) return;
 
 			console.warn(
 				`[IMAP:${identityId}] Disconnected (${reason}), reconnecting...`,
@@ -123,7 +188,9 @@ export const initSmtpClient = async (
 		};
 
 		client.once("close", () => cleanup("close"));
-		client.once("error", (err) => {
+		// `on`, not `once`: a second "error" without a listener would crash the
+		// process.
+		client.on("error", (err) => {
 			console.error(`[IMAP:${identityId}] Error:`, err);
 			cleanup("error");
 		});
@@ -134,4 +201,4 @@ export const initSmtpClient = async (
 		safeReconnect(identityId, imapInstances);
 		return;
 	}
-};
+}

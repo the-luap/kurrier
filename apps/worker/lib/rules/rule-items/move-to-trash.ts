@@ -1,4 +1,4 @@
-import {getRedis} from "../../../lib/get-redis";
+import { enqueueThreadRefresh, getRedis } from "../../../lib/get-redis";
 
 export const moveToTrash = async (
     threadId: string,
@@ -10,7 +10,7 @@ export const moveToTrash = async (
 
     if (!ids.length || !mailboxId) return;
 
-    const { smtpQueue, searchIngestQueue } = await getRedis();
+    const { smtpQueue } = await getRedis();
 
     await Promise.all(
         ids.map((threadId) =>
@@ -27,19 +27,5 @@ export const moveToTrash = async (
         ),
     );
 
-    await Promise.all(
-        ids.map((threadId) =>
-            searchIngestQueue.add(
-                "refresh-thread",
-                { threadId },
-                {
-                    jobId: `refresh-${threadId}`,
-                    removeOnComplete: true,
-                    removeOnFail: false,
-                    attempts: 3,
-                    backoff: { type: "exponential", delay: 1500 },
-                },
-            ),
-        ),
-    );
+    await Promise.all(ids.map((threadId) => enqueueThreadRefresh(threadId)));
 };

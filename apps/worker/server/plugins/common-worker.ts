@@ -1,6 +1,6 @@
 import { defineNitroPlugin } from "nitropack/runtime";
 import { JobScheduler, Worker } from "bullmq";
-import { getRedis } from "../../lib/get-redis";
+import { getRedis, workerOptions } from "../../lib/get-redis";
 import { db, mailboxThreads, MessageEntity, providers } from "@db";
 import { PROVIDERS, STORAGE_PROVIDERS } from "@schema";
 import { kvDel, kvGet, kvSet } from "@common";
@@ -68,7 +68,7 @@ export default defineNitroPlugin(async (nitroApp) => {
 					return { success: true };
 			}
 		},
-		{ connection },
+		workerOptions(),
 	);
 
 	const scheduler = new JobScheduler("common-worker", { connection });
@@ -105,13 +105,17 @@ export default defineNitroPlugin(async (nitroApp) => {
 			console.log(`ℹ️ Using existing tunnel URL from Redis: ${existing}`);
 		}
 
-		nitroApp.hooks.hookOnce("close", async () => {
-			console.log("Closing common-worker tunnel");
-		});
 	} else {
 		console.log("Local tunnel not enabled");
 		await kvDel("local-tunnel-url");
-		nitroApp.hooks.hookOnce("close", async () => {
-		});
 	}
+
+	nitroApp.hooks.hookOnce("close", async () => {
+		console.log("Closing common worker");
+		try {
+			await worker.close();
+		} catch (err: any) {
+			console.error("Error closing common worker:", err?.message ?? err);
+		}
+	});
 });

@@ -17,6 +17,9 @@ const client = new Typesense.Client({
 		},
 	],
 	apiKey: TYPESENSE_API_KEY,
+	// The 5s default is too short for bulk imports of full message bodies;
+	// a timeout made the client retry (re-send) the whole import.
+	connectionTimeoutSeconds: 60,
 });
 
 export default client;
