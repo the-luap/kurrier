@@ -11,6 +11,9 @@ export default defineNitroConfig({
 		"@db/*": "../../packages/db/src/*",
 		"@schema": "../../packages/schema/src/index.ts",
 		"@schema/*": "../../packages/schema/src/*",
+		// Prefix aliases match before "@providers/*", so subpath modules need
+		// their own entry ahead of the package alias.
+		"@providers/net-guard": "../../packages/providers/src/net-guard.ts",
 		"@providers": "../../packages/providers/src/index.ts",
 		"@providers/*": "../../packages/providers/src/*",
 		"@common": "../../packages/common/src/index.ts",
