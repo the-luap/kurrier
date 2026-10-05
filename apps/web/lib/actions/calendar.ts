@@ -31,7 +31,6 @@ import {
 	EventSlotFragment,
 	FormState, getServerEnv,
 	handleAction,
-	SlotKey,
 	ViewParams,
 } from "@schema";
 import { decode } from "decode-formdata";
@@ -149,7 +148,8 @@ type SyncEventAttendeesArgs = {
 
 
 
-export async function syncEventAttendees({
+// Internal: takes a transaction, so it must not be a server action.
+async function syncEventAttendees({
 											 tx,
 											 eventId,
 											 organizerEmail,
@@ -263,19 +263,22 @@ export async function syncEventAttendees({
 			.where(inArray(calendarEventAttendees.id, emailsToDelete));
 	}
 
-	for (const g of nonOrganizerGuests) {
-		const key = g.email.toLowerCase();
-		if (!existingByEmail.has(key)) {
-			await tx.insert(calendarEventAttendees).values({
+	// One multi-row insert instead of one round trip per new guest.
+	const newGuests = nonOrganizerGuests.filter(
+		(g) => !existingByEmail.has(g.email.toLowerCase()),
+	);
+	if (newGuests.length > 0) {
+		await tx.insert(calendarEventAttendees).values(
+			newGuests.map((g) => ({
 				eventId,
 				email: g.email,
 				name: g.name,
 				isOrganizer: false,
-				role: "req_participant",
-				partstat: "needs_action",
+				role: "req_participant" as const,
+				partstat: "needs_action" as const,
 				rsvp: false,
-			});
-		}
+			})),
+		);
 	}
 }
 
@@ -459,57 +462,8 @@ export async function getRangeForCalendarView(
 	return { from, to };
 }
 
-export async function eventsBySlot(
-	tz: string,
-	events: CalendarEventEntity[],
-): Promise<Map<SlotKey, EventSlotFragment[]>> {
-	const map = new Map<SlotKey, EventSlotFragment[]>();
-	const dayjsTz = getDayjsTz(tz);
-
-	for (const ev of events) {
-		const start = dayjsTz(ev.startsAt);
-		const end = dayjsTz(ev.endsAt);
-
-		if (!end.isAfter(start)) continue;
-
-		let slotStart = start.startOf("hour");
-
-		while (slotStart.isBefore(end)) {
-			const slotEnd = slotStart.add(1, "hour");
-
-			const overlapStart = start.isAfter(slotStart) ? start : slotStart;
-			const overlapEnd = end.isBefore(slotEnd) ? end : slotEnd;
-
-			if (overlapEnd.isAfter(overlapStart)) {
-				const totalMs = slotEnd.valueOf() - slotStart.valueOf();
-				const offsetMs = overlapStart.valueOf() - slotStart.valueOf();
-				const occupiedMs = overlapEnd.valueOf() - overlapStart.valueOf();
-
-				const key: SlotKey = `${slotStart.format("YYYY-MM-DD")}:${slotStart.hour()}`;
-
-				const fragment: EventSlotFragment = {
-					event: ev,
-					date: slotStart.format("YYYY-MM-DD"),
-					hour: slotStart.hour(),
-					topPercent: (offsetMs / totalMs) * 100,
-					heightPercent: (occupiedMs / totalMs) * 100,
-					isStart: overlapStart.isSame(start),
-					isEnd: overlapEnd.isSame(end),
-				};
-
-				const bucket = map.get(key);
-				if (bucket) bucket.push(fragment);
-				else map.set(key, [fragment]);
-			}
-
-			slotStart = slotStart.add(1, "hour");
-		}
-	}
-
-	return map;
-}
-
-export async function eventsByDay(
+// Internal helper of eventsByDayWithAllDay (not a server action).
+async function eventsByDay(
 	tz: string,
 	events: CalendarEventEntity[],
 ): Promise<Map<string, EventSlotFragment[]>> {
@@ -940,7 +894,8 @@ function fromRRuleLocal(rruleDate: Date, tz: string): Date {
 	return zoned.toDate();
 }
 
-export async function expandEventForRange(
+// Internal helper of expandEventsForRange (not a server action).
+async function expandEventForRange(
 	event: CalendarEventEntity,
 	rangeStart: Date,
 	rangeEnd: Date,

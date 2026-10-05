@@ -68,8 +68,15 @@ type MailComposerHeaderProps = {
     identityPublicId: string;
     identityMailboxes: FetchIdentityMailboxListResult;
     message?: MessageEntity | null;
+    /** Recipients of a restored draft (replace the reply default). */
+    initialRecipients?: {
+        to: string[];
+        cc: string[];
+        bcc: string[];
+    } | null;
 
     onModeChange: (mode: ComposerMode) => void;
+    onRecipientsChange?: () => void;
     onSubjectChange: (subject: string) => void;
     onIdentityChange: (identityPublicId: string) => void;
 };
@@ -80,15 +87,21 @@ export default function MailComposerHeader({
                                                identityPublicId,
                                                identityMailboxes,
                                                message,
+                                               initialRecipients = null,
                                                onModeChange,
+                                               onRecipientsChange,
                                                onSubjectChange,
                                                onIdentityChange,
                                            }: MailComposerHeaderProps) {
     const dict = useOptionalDictionary();
     const { editor } = useRichTextEditorContext();
 
-    const [ccVisible, setCcVisible] = useState(false);
-    const [bccVisible, setBccVisible] = useState(false);
+    const [ccVisible, setCcVisible] = useState(
+        () => (initialRecipients?.cc.length ?? 0) > 0,
+    );
+    const [bccVisible, setBccVisible] = useState(
+        () => (initialRecipients?.bcc.length ?? 0) > 0,
+    );
 
     const fromOptions = useMemo(
         () =>
@@ -122,6 +135,8 @@ export default function MailComposerHeader({
                     <EmailHeaderContacts
                         name="to"
                         toEmail={toEmail}
+                        defaultValues={initialRecipients?.to}
+                        onChange={onRecipientsChange}
                     />
                 </div>
 
@@ -162,6 +177,8 @@ export default function MailComposerHeader({
                         <EmailHeaderContacts
                             name="cc"
                             toEmail=""
+                            defaultValues={initialRecipients?.cc}
+                            onChange={onRecipientsChange}
                         />
                     </div>
                 </div>
@@ -177,6 +194,8 @@ export default function MailComposerHeader({
                         <EmailHeaderContacts
                             name="bcc"
                             toEmail=""
+                            defaultValues={initialRecipients?.bcc}
+                            onChange={onRecipientsChange}
                         />
                     </div>
                 </div>

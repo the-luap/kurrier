@@ -1,15 +1,22 @@
 import { defineEventHandler } from "h3";
-import { apiSuccess, validateApiKey } from "../../../../../lib/api-helpers";
+import {
+	API_SCOPES,
+	apiSuccess,
+	validateApiKey,
+} from "../../../../../lib/api-helpers";
 import { db, identities } from "@db";
-import {eq} from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
 export default defineEventHandler(async (event) => {
-
-	const { ownerId } = await validateApiKey(event);
+	const { ownerId, apiKey } = await validateApiKey(event, API_SCOPES.manage);
 	const identitiesList = await db
 		.select()
 		.from(identities)
-		.where(eq(identities.ownerId, ownerId));
+		.where(
+			and(
+				eq(identities.ownerId, ownerId),
+				eq(identities.workspaceId, apiKey.workspaceId),
+			),
+		);
 	return apiSuccess(identitiesList);
-
 });

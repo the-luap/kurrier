@@ -2,6 +2,7 @@
 
 import { cache } from "react";
 import {getWorkspacePublicId, rlsClient} from "@/lib/actions/clients";
+import { deleteDraft } from "@/lib/actions/drafts";
 import {
 	DraftMessageInsertSchema,
 	draftMessages, emailSignatures,
@@ -71,6 +72,7 @@ import dayjs from "dayjs";
 import {GetObjectCommand} from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { s3 } from "@/lib/create-s3-client";
+import { invalidateServerCache, withServerCache } from "@/lib/server-cache";
 import {access} from "@/lib/actions/shared";
 import {EmailDocument, renderEmailFragment, renderEmailText} from "@email-editor";
 
@@ -282,7 +284,7 @@ export type FetchMailboxResult = Awaited<
 
 
 
-export const fetchIdentityMailboxList = cache(async () => {
+async function loadIdentityMailboxList() {
 	const rls = await rlsClient();
 
 	const rows = await rls((tx) =>
@@ -340,14 +342,19 @@ export const fetchIdentityMailboxList = cache(async () => {
 	);
 
 	return Object.values(byIdentity);
-});
+}
+
+/** Cached per workspace + user (ENABLE_SERVER_CACHE), 15 s. */
+export const fetchIdentityMailboxList = cache(() =>
+	withServerCache("mailbox-list", 15, loadIdentityMailboxList),
+);
 
 
 export type FetchIdentityMailboxListResult = Awaited<
 	ReturnType<typeof fetchIdentityMailboxList>
 >;
 
-export const fetchMailboxUnreadCounts = cache(
+const loadMailboxUnreadCounts = (
 	async () => {
 		const rls = await rlsClient();
 		const now = new Date();
@@ -388,9 +395,119 @@ export const fetchMailboxUnreadCounts = cache(
 	}
 );
 
+/** Cached per workspace + user (ENABLE_SERVER_CACHE), 10 s. */
+export const fetchMailboxUnreadCounts = cache(() =>
+	withServerCache("mailbox-unread-counts", 10, loadMailboxUnreadCounts),
+);
 
 export type FetchMailboxUnreadCountsResult = Awaited<
 	ReturnType<typeof fetchMailboxUnreadCounts>
+>;
+
+export type MailboxOverviewThread = Pick<
+	MailboxThreadEntity,
+	| "threadId"
+	| "mailboxId"
+	| "subject"
+	| "participants"
+	| "lastActivityAt"
+	| "hasAttachments"
+	| "unreadCount"
+>;
+
+/**
+ * Mail overview for the current workspace (scoped through RLS): every email
+ * identity with its inbox, the number of unread inbox threads and the top 3
+ * unread threads per inbox. Badge and list use the same filter (snoozed
+ * threads excluded), and the window function keeps one busy inbox from
+ * starving the others.
+ */
+export const fetchMailboxOverview = cache(async () => {
+	const identityMailboxList = await fetchIdentityMailboxList();
+	const inboxIds = identityMailboxList.flatMap((entry) =>
+		entry.mailboxes
+			.filter((mailbox) => mailbox.kind === "inbox")
+			.map((mailbox) => mailbox.id),
+	);
+
+	const rankedRows = inboxIds.length
+		? await (await rlsClient())((tx) => {
+				const now = new Date();
+				const ranked = tx.$with("ranked").as(
+					tx
+						.select({
+							threadId: mailboxThreads.threadId,
+							mailboxId: mailboxThreads.mailboxId,
+							subject: mailboxThreads.subject,
+							participants: mailboxThreads.participants,
+							lastActivityAt: mailboxThreads.lastActivityAt,
+							hasAttachments: mailboxThreads.hasAttachments,
+							unreadCount: mailboxThreads.unreadCount,
+							rank: sql<number>`row_number() over (partition by ${mailboxThreads.mailboxId} order by ${mailboxThreads.lastActivityAt} desc)`.as(
+								"rank",
+							),
+							unreadThreads:
+								sql<number>`count(*) over (partition by ${mailboxThreads.mailboxId})`.as(
+									"unread_threads",
+								),
+						})
+						.from(mailboxThreads)
+						.where(
+							and(
+								inArray(mailboxThreads.mailboxId, inboxIds),
+								gt(mailboxThreads.unreadCount, 0),
+								or(
+									isNull(mailboxThreads.snoozedUntil),
+									lte(mailboxThreads.snoozedUntil, now),
+								),
+							),
+						),
+				);
+				return tx
+					.with(ranked)
+					.select()
+					.from(ranked)
+					.where(lte(ranked.rank, 3))
+					.orderBy(desc(ranked.lastActivityAt));
+			})
+		: [];
+
+	const byMailbox = new Map<
+		string,
+		{ unreadThreads: number; recentThreads: MailboxOverviewThread[] }
+	>();
+	for (const { rank: _rank, unreadThreads, ...thread } of rankedRows) {
+		const entry = byMailbox.get(thread.mailboxId) ?? {
+			unreadThreads: Number(unreadThreads),
+			recentThreads: [],
+		};
+		entry.recentThreads.push(thread);
+		byMailbox.set(thread.mailboxId, entry);
+	}
+
+	return identityMailboxList.map(({ identity, mailboxes: boxes }) => {
+		const inbox = boxes.find((mailbox) => mailbox.kind === "inbox");
+		const stats = inbox ? byMailbox.get(inbox.id) : undefined;
+		return {
+			identity: {
+				id: identity.id,
+				publicId: identity.publicId,
+				value: identity.value,
+			},
+			inbox: inbox
+				? {
+						id: inbox.id,
+						slug: inbox.slug ?? "inbox",
+						unreadThreads: stats?.unreadThreads ?? 0,
+						recentThreads: stats?.recentThreads ?? [],
+					}
+				: null,
+		};
+	});
+});
+
+export type FetchMailboxOverviewResult = Awaited<
+	ReturnType<typeof fetchMailboxOverview>
 >;
 
 export const fetchMessageAttachments = cache(async (messageId: string) => {
@@ -421,7 +538,9 @@ export async function getSignedUrlsForMessage(messageId: string) {
 				Key: attachment.path!,
 			});
 
-			const url = await getSignedUrl(s3, command, { expiresIn: 300 });
+			// Inline images and attachment links stay usable while the thread
+			// is open; 5 minutes broke them for anyone reading slowly.
+			const url = await getSignedUrl(s3, command, { expiresIn: 60 * 60 });
 
 			return {
 				...attachment,
@@ -433,8 +552,19 @@ export async function getSignedUrlsForMessage(messageId: string) {
 }
 
 export const revalidateMailbox = async (path: string) => {
+	await afterMailMutation();
 	revalidatePath(path);
 };
+
+/**
+ * Every mail mutation calls this: cached sidebar data (mailbox list, unread
+ * and sidebar counts) must not outlive a change. No-op unless
+ * ENABLE_SERVER_CACHE is on. Changes the worker applies later (moves, new
+ * mail) are only covered by the short TTLs.
+ */
+async function afterMailMutation() {
+	await invalidateServerCache();
+}
 
 const isSignaturePublicId = (
 	value: string,
@@ -481,8 +611,15 @@ function resolveSentMailbox(boxes: MailboxRow[]) {
 	);
 }
 
-/** Attachments may only come from the caller's own upload folder. */
-function assertOwnUploadPaths(attachments: unknown, userId: string) {
+/**
+ * Attachments may only come from the caller's own upload folder, or (when
+ * forwarding) be attachments of the forwarded original.
+ */
+function assertOwnUploadPaths(
+	attachments: unknown,
+	userId: string,
+	forwardedPaths: ReadonlySet<string> = new Set(),
+) {
 	if (attachments === undefined || attachments === null || attachments === "") {
 		return;
 	}
@@ -496,7 +633,10 @@ function assertOwnUploadPaths(attachments: unknown, userId: string) {
 	if (!Array.isArray(list)) throw new Error("Invalid attachments payload");
 	for (const item of list as Array<{ path?: unknown }>) {
 		if (!item?.path) continue;
-		if (!isOwnUploadKey(String(item.path), userId)) {
+		if (
+			!isOwnUploadKey(String(item.path), userId) &&
+			!forwardedPaths.has(String(item.path))
+		) {
 			throw new Error("Invalid attachment");
 		}
 	}
@@ -508,6 +648,11 @@ export async function sendMail(
 ): Promise<FormState> {
 	const decodedForm =
 		decode(formData) as any;
+
+	// Autosaved draft of this mail (lib/actions/drafts.ts); not part of the
+	// queued/scheduled payload.
+	const draftId = String(decodedForm.draftId ?? "").trim();
+	delete decodedForm.draftId;
 
 	const user = await isSignedIn();
 	if (!user?.id) {
@@ -600,8 +745,26 @@ export async function sendMail(
 		delete decodedForm.originalMessageId;
 	}
 
+	// Forwarding may include the original's attachments (the worker checks
+	// them against the original message again).
+	let forwardedPaths = new Set<string>();
+	if (decodedForm.mode === "forward" && decodedForm.originalMessageId) {
+		const rows = await rls((tx) =>
+			tx
+				.select({ path: messageAttachments.path })
+				.from(messageAttachments)
+				.where(
+					eq(
+						messageAttachments.messageId,
+						String(decodedForm.originalMessageId),
+					),
+				),
+		).catch(() => [] as { path: string }[]);
+		forwardedPaths = new Set(rows.map((row) => row.path));
+	}
+
 	try {
-		assertOwnUploadPaths(decodedForm.attachments, user.id);
+		assertOwnUploadPaths(decodedForm.attachments, user.id, forwardedPaths);
 	} catch (error) {
 		return {
 			success: false,
@@ -834,6 +997,10 @@ export async function sendMail(
 			};
 		}
 
+		// The autosaved draft became the scheduled mail.
+		if (draftId) await deleteDraft(draftId).catch(() => {});
+
+		await afterMailMutation();
 		revalidatePath(
 			"/dashboard/mail",
 		);
@@ -847,7 +1014,7 @@ export async function sendMail(
 	}
 
 	try {
-		return await addJobAndWait<FormState>(
+		const result = await addJobAndWait<FormState>(
 			"send-mail",
 			"send-and-reconcile",
 			decodedForm,
@@ -856,6 +1023,13 @@ export async function sendMail(
 				removeOnFail: { age: 24 * 3600 },
 			},
 		);
+		// Sent: drop the autosaved draft of this mail.
+		if (result?.success && draftId) {
+			await deleteDraft(draftId).catch(() => {});
+		}
+		// Sent / drafts counts changed (the worker has finished here).
+		await afterMailMutation();
+		return result;
 	} catch (error) {
 		return {
 			success: false,
@@ -1176,6 +1350,83 @@ export const fetchWebMailThreadDetail = cache(async (threadId: string) => {
 	return result;
 });
 
+/**
+ * Previous/next thread of `threadId` in the mailbox list order (see
+ * fetchMailboxThreads: newest effective activity first, snoozed threads
+ * hidden). Used by the thread toolbar when the list order is not available on
+ * the client (thread opened by URL, or at the edge of the loaded page).
+ */
+export const fetchAdjacentMailboxThreads = cache(
+	async (
+		identityPublicId: string,
+		mailboxSlug: string,
+		threadId: string,
+	): Promise<{ previousThreadId: string | null; nextThreadId: string | null }> => {
+		const empty = { previousThreadId: null, nextThreadId: null };
+		if (!identityPublicId || !mailboxSlug || !threadId) return empty;
+
+		const rls = await rlsClient();
+		const now = new Date();
+		const effectiveActivityAt = sql`COALESCE(${mailboxThreads.unsnoozedAt}, ${mailboxThreads.lastActivityAt})`;
+		const sortKey = sql`(${effectiveActivityAt}, ${mailboxThreads.lastActivityAt}, ${mailboxThreads.threadId})`;
+		const visibleInMailbox = and(
+			eq(mailboxThreads.identityPublicId, identityPublicId),
+			eq(mailboxThreads.mailboxSlug, mailboxSlug),
+			or(
+				isNull(mailboxThreads.snoozedUntil),
+				lte(mailboxThreads.snoozedUntil, now),
+			),
+		);
+
+		// One transaction for the cursor and both neighbours.
+		return rls(async (tx) => {
+			const [current] = await tx
+				.select({
+					effectiveActivityAt: sql<string>`${effectiveActivityAt}::text`,
+					lastActivityAt: sql<string>`${mailboxThreads.lastActivityAt}::text`,
+					threadId: mailboxThreads.threadId,
+				})
+				.from(mailboxThreads)
+				.where(and(visibleInMailbox, eq(mailboxThreads.threadId, threadId)))
+				.limit(1);
+
+			if (!current) return empty;
+
+			const cursor = sql`(${current.effectiveActivityAt}::timestamptz, ${current.lastActivityAt}::timestamptz, ${String(current.threadId)}::uuid)`;
+
+			const [[previous], [next]] = await Promise.all([
+				// The list is sorted descending: "previous" is the closest
+				// thread sorting above the current one.
+				tx
+					.select({ threadId: mailboxThreads.threadId })
+					.from(mailboxThreads)
+					.where(and(visibleInMailbox, sql`${sortKey} > ${cursor}`))
+					.orderBy(
+						asc(effectiveActivityAt),
+						asc(mailboxThreads.lastActivityAt),
+						asc(mailboxThreads.threadId),
+					)
+					.limit(1),
+				tx
+					.select({ threadId: mailboxThreads.threadId })
+					.from(mailboxThreads)
+					.where(and(visibleInMailbox, sql`${sortKey} < ${cursor}`))
+					.orderBy(
+						desc(effectiveActivityAt),
+						desc(mailboxThreads.lastActivityAt),
+						desc(mailboxThreads.threadId),
+					)
+					.limit(1),
+			]);
+
+			return {
+				previousThreadId: previous?.threadId ? String(previous.threadId) : null,
+				nextThreadId: next?.threadId ? String(next.threadId) : null,
+			};
+		});
+	},
+);
+
 /** The database is already updated; a missed re-index must not fail the action. */
 async function refreshSearchBestEffort(threadIds: string[]) {
 	try {
@@ -1272,6 +1523,7 @@ async function markThreadsSeen(
 		await refreshSearchBestEffort(ownedIds);
 	}
 
+	await afterMailMutation();
 	if (refresh) revalidatePath("/");
 }
 
@@ -1315,6 +1567,7 @@ async function moveThreadsToSystemFolder(
 		enqueueSearchRefresh(ownedIds),
 	]);
 
+	await afterMailMutation();
 	if (refresh) {
 		revalidatePath("/mail");
 	}
@@ -1411,6 +1664,7 @@ export const setStarForThreads = async (
 		await refreshSearchBestEffort(ownedIds);
 	}
 
+	await afterMailMutation();
 	if (refresh) revalidatePath("/");
 };
 
@@ -1564,6 +1818,7 @@ export async function deleteForever(
 			},
 		);
 
+		await afterMailMutation();
 		if (refresh) {
 			revalidatePath("/mail");
 		}
@@ -1613,6 +1868,7 @@ export async function deleteForever(
 		enqueueSearchRefresh(allowedIds),
 	]);
 
+	await afterMailMutation();
 	if (refresh) {
 		revalidatePath("/mail");
 	}
@@ -1677,6 +1933,7 @@ export async function addNewMailboxFolder(
 			);
 		}
 
+		await afterMailMutation();
 		revalidatePath("/dashboard/mail");
 		return { success: true };
 	});
@@ -1727,6 +1984,7 @@ export async function deleteMailboxFolder({
 				.where(and(eq(mailboxes.id, mailbox.id), eq(mailboxes.isDefault, false))),
 		);
 
+		await afterMailMutation();
 		revalidatePath("/dashboard/mail");
 		return { success: true };
 	}
@@ -1786,12 +2044,15 @@ export const moveToFolder = async (
 			}),
 			(threadId) => ({
 				...DEFAULT_JOB_OPTS,
-				jobId: `move:${threadId}:${fromMailboxId}->${toMailboxId}`,
+				// Per-message moves of one thread must not collapse into one job.
+				// (BullMQ allows at most two ":" in a custom id.)
+				jobId: `move:${threadId}${messageId ? `-${messageId}` : ""}:${fromMailboxId}->${toMailboxId}`,
 			}),
 		),
 		enqueueSearchRefresh(ownedIds),
 	]);
 
+	await afterMailMutation();
 	if (refresh) revalidatePath("/mail");
 };
 
@@ -1820,15 +2081,16 @@ export const fetchScheduledDraftCounts = cache(async () => {
  * thread rows (use this instead of fetchScheduledDraftCounts /
  * fetchIdentitySnoozedThreads when only the numbers are needed).
  */
-export const fetchMailSidebarCounts = cache(
+const loadMailSidebarCounts = (
 	async (): Promise<{
 		scheduledByIdentityId: Record<string, number>;
 		snoozedByIdentityId: Record<string, number>;
+		draftsByIdentityId: Record<string, number>;
 	}> => {
 		const rls = await rlsClient();
 		const now = new Date();
 
-		const [scheduled, snoozed] = await rls((tx) =>
+		const [scheduled, snoozed, drafts] = await rls((tx) =>
 			Promise.all([
 				tx
 					.select({
@@ -1851,6 +2113,21 @@ export const fetchMailSidebarCounts = cache(
 						),
 					)
 					.groupBy(mailboxThreads.identityId),
+				tx
+					.select({
+						identityId: draftMessages.identityId,
+						count: count(),
+					})
+					.from(draftMessages)
+					.where(
+						and(
+							eq(draftMessages.status, "draft"),
+							// Drafts are private to their author; RLS on this table is
+							// workspace-wide.
+							sql`${draftMessages.ownerId} = nullif(current_setting('request.jwt.claim.sub', true), '')::uuid`,
+						),
+					)
+					.groupBy(draftMessages.identityId),
 			]),
 		);
 
@@ -1864,8 +2141,14 @@ export const fetchMailSidebarCounts = cache(
 		return {
 			scheduledByIdentityId: toRecord(scheduled),
 			snoozedByIdentityId: toRecord(snoozed),
+			draftsByIdentityId: toRecord(drafts),
 		};
-	},
+	}
+);
+
+/** Cached per workspace + user (ENABLE_SERVER_CACHE), 10 s. */
+export const fetchMailSidebarCounts = cache(() =>
+	withServerCache("mail-sidebar-counts", 10, loadMailSidebarCounts),
 );
 
 export type FetchMailSidebarCountsResult = Awaited<
@@ -1916,6 +2199,7 @@ export async function deleteScheduledDraft(
 				.catch(() => 0);
 		}
 
+		await afterMailMutation();
 		revalidatePath("/dashboard/mail");
 		return { success: true };
 	});
@@ -1947,6 +2231,7 @@ export async function snoozeThread(input: {
 				.returning();
 		});
 
+		await afterMailMutation();
 		revalidatePath("/dashboard/mail");
 		return { success: true };
 	});

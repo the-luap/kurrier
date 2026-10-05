@@ -1,25 +1,31 @@
-import { Mail } from "lucide-react";
 import { Suspense } from "react";
 import Loading from "@/app/loading";
-import ContentPlaceholder from "@/components/common/content-placeholder";
 import DashboardPageHeader from "@/components/dashboard/dashboard-page-header";
-import { getDictionary, type Locale } from "@/lib/dictionaries";
+import MailboxOverview from "@/components/mailbox/mailbox-overview";
+import { getWorkspacePublicId } from "@/lib/actions/clients";
+import { fetchMailboxOverview } from "@/lib/actions/mailbox";
+import { getI18n, type Locale } from "@/lib/dictionaries";
 
-async function MailHomeContent({
+async function MailOverviewContent({
 	params,
 }: {
 	params: Promise<{ locale: Locale }>;
 }) {
 	const { locale } = await params;
-	const dict = await getDictionary(locale);
+	const [{ dict, format }, overview, workspacePublicId] = await Promise.all([
+		getI18n(locale),
+		fetchMailboxOverview(),
+		getWorkspacePublicId(),
+	]);
 
 	return (
-		<div className="flex min-h-0 flex-1 flex-col">
+		<div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
 			<DashboardPageHeader title={dict.mailbox.mailTitle} />
-			<ContentPlaceholder
-				icon={<Mail className="size-5" aria-hidden="true" />}
-				title={dict.mailbox.chooseMailbox}
-				description={dict.mailbox.selectMailboxDescription}
+			<MailboxOverview
+				overview={overview}
+				workspacePublicId={workspacePublicId}
+				dict={dict.mailbox}
+				format={format}
 			/>
 		</div>
 	);
@@ -32,7 +38,7 @@ export default function Page({
 }) {
 	return (
 		<Suspense fallback={<Loading />}>
-			<MailHomeContent params={params} />
+			<MailOverviewContent params={params} />
 		</Suspense>
 	);
 }

@@ -33,6 +33,10 @@ export const ZServerConfig = z.object({
 	// Shared secret for the Mailgun/Postmark/SendGrid inbound webhooks. Required
 	// in production (the worker rejects inbound webhooks while it is unset).
 	INBOUND_WEBHOOK_SECRET: z.string().optional(),
+	// Optional defaults for the AI reply drafts (Ollama). Users configure their
+	// own endpoint in Platform > AI; these only prefill the form.
+	OLLAMA_BASE_URL: z.string().optional(),
+	OLLAMA_MODEL: z.string().optional(),
 });
 
 /** Safe to expose to the browser */

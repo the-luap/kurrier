@@ -23,6 +23,7 @@ import {
     RemoveFormatting,
     Signature,
     Strikethrough,
+    Trash2,
     Undo2,
     X,
 } from "lucide-react";
@@ -55,6 +56,9 @@ type MailComposerFooterProps = {
     onOpenUpload: (
         upload: ComposerUpload,
     ) => void;
+    /** Discards the autosaved draft and closes the composer. */
+    onDiscard?: () => void;
+    discarding?: boolean;
 };
 
 function formatBytes(
@@ -108,6 +112,8 @@ export default function MailComposerFooter({
                                                onAttach,
                                                onRemoveUpload,
                                                onOpenUpload,
+                                               onDiscard,
+                                               discarding = false,
                                            }: MailComposerFooterProps) {
     const dict =
         useOptionalDictionary();
@@ -133,7 +139,8 @@ export default function MailComposerFooter({
 
                                 <div className="min-w-0 flex-1">
                                     {upload.status ===
-                                    "done" ? (
+                                    "done" &&
+                                    !upload.forwarded ? (
                                         <button
                                             type="button"
                                             className="block max-w-full truncate text-left text-sm font-medium hover:underline"
@@ -180,7 +187,11 @@ export default function MailComposerFooter({
                                     type="button"
                                     variant="subtle"
                                     color="gray"
-                                    aria-label="Remove attachment"
+                                    aria-label={
+                                        dict?.mailbox
+                                            ?.removeAttachment ??
+                                        "Remove attachment"
+                                    }
                                     onClick={() =>
                                         onRemoveUpload(
                                             upload.id,
@@ -557,6 +568,30 @@ export default function MailComposerFooter({
                         </Menu.Dropdown>
                     </Menu>
                 </div>
+
+                {onDiscard && (
+                    <ActionIcon
+                        type="button"
+                        variant="subtle"
+                        color="gray"
+                        className="ml-auto"
+                        loading={discarding}
+                        disabled={isPending}
+                        onClick={onDiscard}
+                        aria-label={
+                            dict?.mailbox
+                                ?.discardDraft ??
+                            "Discard draft"
+                        }
+                        title={
+                            dict?.mailbox
+                                ?.discardDraft ??
+                            "Discard draft"
+                        }
+                    >
+                        <Trash2 size={18} />
+                    </ActionIcon>
+                )}
             </div>
         </>
     );

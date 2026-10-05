@@ -445,14 +445,6 @@ export const getProviderById = async (providerId: string) => {
 	return provider;
 };
 
-export const getIdentityById = async (identityId: string) => {
-	const rls = await rlsClient();
-	const [identity] = await rls((tx) =>
-		tx.select().from(identities).where(eq(identities.id, identityId)),
-	);
-	return identity;
-};
-
 export async function initializeDomainIdentity(
 	data: Record<string, unknown>,
 ): Promise<FormState<{ identity: DomainIdentity }>> {

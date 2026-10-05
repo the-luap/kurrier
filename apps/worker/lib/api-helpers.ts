@@ -8,8 +8,27 @@ import {
 	users,
 	workspaces,
 } from "@db";
+import type { apiScopeList } from "@schema";
 import { and, eq } from "drizzle-orm";
 import { createError, type H3Event, readRawBody } from "h3";
+
+export type ApiScope = (typeof apiScopeList)[number];
+
+/**
+ * Scope sets used by the /api/kurrier routes. A key passes when it holds at
+ * least one of the listed scopes (any-of).
+ *
+ * Backward compatible: scopes are only enforced when the key carries a
+ * non-empty scopes list. Management routes (identities, webhooks, me,
+ * smtp-accounts, inbound) accept either email scope so that keys created
+ * with the old default (`emails:send` only) keep working. Only the mailbox
+ * read API (new) requires `emails:receive`, and sending `emails:send`.
+ */
+export const API_SCOPES = {
+	read: ["emails:receive"],
+	send: ["emails:send"],
+	manage: ["emails:send", "emails:receive"],
+} as const satisfies Record<string, readonly ApiScope[]>;
 
 export function apiSuccess(data: any = null) {
 	return {
@@ -62,7 +81,36 @@ function safeEqual(a: string, b: string) {
 	return crypto.timingSafeEqual(ab, bb);
 }
 
-export async function validateApiKey(event: H3Event) {
+/**
+ * Throws 403 when the key has a non-empty scopes list that contains none of
+ * `requiredScopes`. Keys without scopes and calls without required scopes
+ * are not restricted.
+ */
+export function assertApiKeyScopes(
+	keyScopes: readonly string[] | null | undefined,
+	requiredScopes: readonly ApiScope[] = [],
+) {
+	if (!requiredScopes.length || !keyScopes?.length) return;
+	if (requiredScopes.some((scope) => keyScopes.includes(scope))) return;
+
+	throw createError({
+		statusCode: 403,
+		statusMessage: `API key is missing the required scope (${requiredScopes.join(" or ")})`,
+		data: {
+			success: false,
+			error: {
+				code: "INSUFFICIENT_SCOPE",
+				message: "API key does not have the required scope",
+				requiredScopes,
+			},
+		},
+	});
+}
+
+export async function validateApiKey(
+	event: H3Event,
+	requiredScopes: readonly ApiScope[] = [],
+) {
 	const auth = event.node.req.headers.authorization;
 
 	if (!auth || !auth.startsWith("Bearer ")) {
@@ -113,6 +161,13 @@ export async function validateApiKey(event: H3Event) {
 		});
 	}
 
+	if (key.expiresAt && key.expiresAt.getTime() <= Date.now()) {
+		throw createError({
+			statusCode: 401,
+			statusMessage: "API key has expired",
+		});
+	}
+
 	const [secretMeta] = await db
 		.select()
 		.from(secretsMeta)
@@ -143,6 +198,8 @@ export async function validateApiKey(event: H3Event) {
 			statusMessage: "Invalid API key",
 		});
 	}
+
+	assertApiKeyScopes(key.scopes, requiredScopes);
 
 	return {
 		apiKey: key,
@@ -183,6 +240,8 @@ export type ApiActor = {
 	ownerId: string;
 	workspaceId: string;
 	isAdmin: boolean;
+	/** Scopes of the API key; null for the admin key (unrestricted). */
+	scopes: readonly string[] | null;
 };
 
 /**
@@ -195,6 +254,7 @@ export type ApiActor = {
 export async function resolveApiActor(
 	event: H3Event,
 	userEmail?: string | null,
+	requiredScopes: readonly ApiScope[] = [],
 ): Promise<ApiActor> {
 	if (isAdminApiRequest(event)) {
 		if (!userEmail) {
@@ -231,7 +291,12 @@ export async function resolveApiActor(
 			});
 		}
 
-		return { ownerId: user.id, workspaceId: workspace.id, isAdmin: true };
+		return {
+			ownerId: user.id,
+			workspaceId: workspace.id,
+			isAdmin: true,
+			scopes: null,
+		};
 	}
 
 	if (userEmail) {
@@ -241,14 +306,28 @@ export async function resolveApiActor(
 		});
 	}
 
-	const { apiKey, ownerId } = await validateApiKey(event);
-	return { ownerId, workspaceId: apiKey.workspaceId, isAdmin: false };
+	const { apiKey, ownerId } = await validateApiKey(event, requiredScopes);
+	return {
+		ownerId,
+		workspaceId: apiKey.workspaceId,
+		isAdmin: false,
+		scopes: apiKey.scopes,
+	};
 }
 
 export async function validateIdentityOwnership(opts: {
 	identityId: string;
 	ownerId: string;
+	/** When set, the identity must also belong to this workspace. */
+	workspaceId?: string;
 }) {
+	if (!UUID_RE.test(opts.identityId)) {
+		throw createError({
+			statusCode: 403,
+			statusMessage: "Identity not found or access denied",
+		});
+	}
+
 	const [identity] = await db
 		.select()
 		.from(identities)
@@ -256,6 +335,9 @@ export async function validateIdentityOwnership(opts: {
 			and(
 				eq(identities.id, opts.identityId),
 				eq(identities.ownerId, opts.ownerId),
+				opts.workspaceId
+					? eq(identities.workspaceId, opts.workspaceId)
+					: undefined,
 			),
 		)
 		.limit(1);
@@ -268,3 +350,6 @@ export async function validateIdentityOwnership(opts: {
 	}
 	return identity;
 }
+
+export const UUID_RE =
+	/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

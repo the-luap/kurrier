@@ -4,7 +4,8 @@ import { useSyncExternalStore } from "react";
 // intercepted @thread route. It publishes the order of the threads it shows
 // here, so the thread toolbar can offer Previous/Next without another
 // server round trip. When the thread page is opened directly (no list
-// mounted) there is no order and the buttons stay disabled.
+// mounted), or the thread is at the edge of the loaded page, the
+// server-computed neighbours passed as `fallback` are used instead.
 
 export const CLOSE_THREAD_EVENT = "kurrier:close-thread";
 
@@ -50,20 +51,32 @@ function subscribe(listener: () => void) {
 const getSnapshot = () => current;
 const getServerSnapshot = () => null;
 
+type AdjacentThreadIds = {
+	previousThreadId: string | null;
+	nextThreadId: string | null;
+};
+
 export function useAdjacentThreadHrefs(
 	threadId: string,
 	baseHref: string,
+	fallback?: AdjacentThreadIds,
 ): { previousHref: string | null; nextHref: string | null } {
 	const order = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
-	if (!order || order.baseHref !== baseHref) {
-		return { previousHref: null, nextHref: null };
-	}
+	const toHref = (id: string | null | undefined) =>
+		id ? `${baseHref}${id}` : null;
+	const fallbackHrefs = {
+		previousHref: toHref(fallback?.previousThreadId),
+		nextHref: toHref(fallback?.nextThreadId),
+	};
+	if (!order || order.baseHref !== baseHref) return fallbackHrefs;
 	const index = order.threadIds.indexOf(threadId);
-	if (index === -1) return { previousHref: null, nextHref: null };
+	if (index === -1) return fallbackHrefs;
+	// The client order wins (it is what the user sees); at the page edges it
+	// has no neighbour, so fall back to the server's.
 	const previousId = order.threadIds[index - 1];
 	const nextId = order.threadIds[index + 1];
 	return {
-		previousHref: previousId ? `${order.baseHref}${previousId}` : null,
-		nextHref: nextId ? `${order.baseHref}${nextId}` : null,
+		previousHref: previousId ? toHref(previousId) : fallbackHrefs.previousHref,
+		nextHref: nextId ? toHref(nextId) : fallbackHrefs.nextHref,
 	};
 }

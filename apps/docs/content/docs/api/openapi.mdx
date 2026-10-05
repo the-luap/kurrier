@@ -1,0 +1,38 @@
+---
+title: OpenAPI
+description: Machine-readable Kurrier API specification
+---
+
+The documentation site publishes an OpenAPI 3.1 description of the Kurrier
+API for client generators, AI tool importers and contract tests:
+
+- [`/openapi.json`](/openapi.json)
+- [`/api/openapi`](/api/openapi)
+
+Both return the same document. Its server URL is a template
+(`{origin}/api/kurrier`); set `origin` to your Kurrier API host.
+
+Every running Kurrier instance also lists its routes at `GET /api/kurrier`
+(no authentication needed).
+
+## Generate a client
+
+```bash
+npx @openapitools/openapi-generator-cli generate \
+  -i https://www.kurrier.org/openapi.json \
+  -g typescript-fetch \
+  -o ./kurrier-client
+```
+
+## Inspect
+
+```bash
+curl -s https://www.kurrier.org/openapi.json | jq '.paths | keys'
+```
+
+## Scopes for agents
+
+An agent that reads and answers mail needs a key with both scopes:
+
+- `emails:receive` — mailboxes, threads and messages
+- `emails:send` — send, compose and reply

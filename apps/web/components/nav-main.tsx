@@ -10,6 +10,7 @@ import {
 	type LucideIcon,
 	Plug,
 	Send,
+	Sparkles,
 	Vault,
 	Webhook
 } from "lucide-react";
@@ -70,6 +71,13 @@ export function NavMain({
 			title: dict.dashboard.overview,
 			url: `/w/${workspacePublicId}/dashboard/platform/overview`,
 			icon: LayoutDashboard,
+			items: [],
+		},
+		// Personal AI settings: available to every workspace member.
+		{
+			title: dict.ai.navTitle,
+			url: `/w/${workspacePublicId}/dashboard/platform/ai`,
+			icon: Sparkles,
 			items: [],
 		},
 		...(workspaceRole === "owner"

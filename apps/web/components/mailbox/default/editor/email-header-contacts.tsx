@@ -14,10 +14,13 @@ import { searchContactsForCompose } from "@/lib/actions/calendar";
 export default function EmailHeaderContacts({
 	name,
 	toEmail,
+	defaultValues,
 	maxTags,
 	onChange,
 }: {
 	toEmail?: string;
+	/** Initial addresses (e.g. a restored draft); wins over toEmail. */
+	defaultValues?: string[];
 	maxTags?: number;
 	onChange?: (value: string[]) => void;
 	name: string;
@@ -92,7 +95,7 @@ export default function EmailHeaderContacts({
 
 	return (
 		<TagsInput
-			defaultValue={toEmail ? [toEmail] : []}
+			defaultValue={defaultValues ?? (toEmail ? [toEmail] : [])}
 			searchValue={searchValue}
 			onSearchChange={searchContacts}
 			data={options}

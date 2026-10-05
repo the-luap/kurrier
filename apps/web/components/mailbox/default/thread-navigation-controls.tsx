@@ -14,6 +14,9 @@ type Props = {
 	backHref: string;
 	threadId: string;
 	messageCount: number;
+	/** Server-computed neighbours, used when the client has no list order. */
+	fallbackPreviousThreadId?: string | null;
+	fallbackNextThreadId?: string | null;
 };
 
 function isTypingTarget(target: EventTarget | null) {
@@ -39,6 +42,8 @@ export default function ThreadNavigationControls({
 	backHref,
 	threadId,
 	messageCount,
+	fallbackPreviousThreadId = null,
+	fallbackNextThreadId = null,
 }: Props) {
 	const router = useRouter();
 	const i18n = useOptionalI18n();
@@ -49,6 +54,10 @@ export default function ThreadNavigationControls({
 	const { previousHref, nextHref } = useAdjacentThreadHrefs(
 		threadId,
 		`${backHref}/threads/`,
+		{
+			previousThreadId: fallbackPreviousThreadId,
+			nextThreadId: fallbackNextThreadId,
+		},
 	);
 
 	const navigate = useCallback(

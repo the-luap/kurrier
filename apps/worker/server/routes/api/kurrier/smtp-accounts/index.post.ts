@@ -4,6 +4,7 @@ import { defineEventHandler } from "h3";
 import {
 	apiError,
 	apiSuccess,
+	API_SCOPES,
 	resolveApiActor,
 	validateJSONBody,
 } from "../../../../../lib/api-helpers";
@@ -33,6 +34,7 @@ export default defineEventHandler(async (event) => {
 	const { ownerId, workspaceId } = await resolveApiActor(
 		event,
 		parsed.data.userEmail,
+		API_SCOPES.manage,
 	);
 	const config = smtpConfigFromInput(parsed.data);
 

@@ -6,6 +6,11 @@ import { useParams } from "next/navigation";
 import * as React from "react";
 import { useOptionalDictionary } from "@/components/providers/dictionary-provider";
 import { Button } from "@/components/ui/button";
+import {
+    type InitialDraft,
+    OPEN_DRAFT_EVENT,
+    type OpenDraftDetail,
+} from "./draft-events";
 import type MailComposerComponent from "./mail-composer";
 
 // The composer (TipTap, Mantine RTE, signature rendering) is only needed once
@@ -44,6 +49,24 @@ export default function MailComposerLauncher({
 
     const [open, setOpen] = React.useState(false);
     const [minimized, setMinimized] = React.useState(false);
+    // Compose draft opened from the drafts list (null = new message).
+    const [initialDraft, setInitialDraft] =
+        React.useState<InitialDraft>(null);
+    // Fresh composer for every open (a closed one flushed its draft).
+    const [session, setSession] = React.useState(0);
+
+    React.useEffect(() => {
+        const listener = (event: Event) => {
+            const detail = (event as CustomEvent<OpenDraftDetail>).detail;
+            if (!detail?.id) return;
+            setInitialDraft({ id: detail.id, payload: detail.payload });
+            setSession((value) => value + 1);
+            setOpen(true);
+            setMinimized(false);
+        };
+        window.addEventListener(OPEN_DRAFT_EVENT, listener);
+        return () => window.removeEventListener(OPEN_DRAFT_EVENT, listener);
+    }, []);
 
     const activeIdentityPublicId = React.useMemo(() => {
         const paramValues = Object.values(params).flatMap((value) =>
@@ -56,6 +79,10 @@ export default function MailComposerLauncher({
     }, [params, identityMailboxes]);
 
     const handleOpen = () => {
+        if (!open) {
+            setInitialDraft(null);
+            setSession((value) => value + 1);
+        }
         setOpen(true);
         setMinimized(false);
     };
@@ -63,6 +90,7 @@ export default function MailComposerLauncher({
     const handleClose = React.useCallback(() => {
         setOpen(false);
         setMinimized(false);
+        setInitialDraft(null);
     }, []);
 
     const handleMinimize = () => {
@@ -165,6 +193,8 @@ export default function MailComposerLauncher({
 
                     <div className={minimized ? "hidden" : "block"}>
                         <MailComposer
+                            key={`${session}:${initialDraft?.id ?? "new"}`}
+                            initialDraft={initialDraft}
                             publicConfig={publicConfig}
                             identityMailboxes={identityMailboxes}
                             activeIdentityPublicId={activeIdentityPublicId}

@@ -15,7 +15,8 @@ async function loadEn() {
 		validation,
 		actions,
 		vault,
-		releases
+		releases,
+		ai
 	] = await Promise.all([
 		import("@/lib/dictionaries/en/common.json").then((m) => m.default),
 		import("@/lib/dictionaries/en/auth.json").then((m) => m.default),
@@ -29,6 +30,7 @@ async function loadEn() {
 		import("@/lib/dictionaries/en/actions.json").then((m) => m.default),
 		import("@/lib/dictionaries/en/vault.json").then((m) => m.default),
 		import("@/lib/dictionaries/en/releases.json").then((m) => m.default),
+		import("@/lib/dictionaries/en/ai.json").then((m) => m.default),
 	]);
 
 	return {
@@ -44,7 +46,8 @@ async function loadEn() {
 		validation,
 		actions,
 		vault,
-		releases
+		releases,
+		ai
 	};
 }
 
@@ -65,7 +68,8 @@ async function loadPtBr(): Promise<Dictionary> {
 		validation,
 		actions,
 		vault,
-		releases
+		releases,
+		ai
 	] = await Promise.all([
 		import("@/lib/dictionaries/pt-BR/common.json").then((m) => m.default),
 		import("@/lib/dictionaries/pt-BR/auth.json").then((m) => m.default),
@@ -79,6 +83,7 @@ async function loadPtBr(): Promise<Dictionary> {
 		import("@/lib/dictionaries/pt-BR/actions.json").then((m) => m.default),
 		import("@/lib/dictionaries/pt-BR/vault.json").then((m) => m.default),
 		import("@/lib/dictionaries/pt-BR/releases.json").then((m) => m.default),
+		import("@/lib/dictionaries/pt-BR/ai.json").then((m) => m.default),
 	]);
 
 	return {
@@ -94,7 +99,8 @@ async function loadPtBr(): Promise<Dictionary> {
 		validation,
 		actions,
 		vault,
-		releases
+		releases,
+		ai
 	} as Dictionary;
 }
 
@@ -111,7 +117,8 @@ async function loadKo(): Promise<Dictionary> {
 		validation,
 		actions,
 		vault,
-		releases
+		releases,
+		ai
 	] = await Promise.all([
 		import("@/lib/dictionaries/ko/common.json").then((m) => m.default),
 		import("@/lib/dictionaries/ko/auth.json").then((m) => m.default),
@@ -125,6 +132,7 @@ async function loadKo(): Promise<Dictionary> {
 		import("@/lib/dictionaries/ko/actions.json").then((m) => m.default),
 		import("@/lib/dictionaries/ko/vault.json").then((m) => m.default),
 		import("@/lib/dictionaries/ko/releases.json").then((m) => m.default),
+		import("@/lib/dictionaries/ko/ai.json").then((m) => m.default),
 	]);
 
 	return {
@@ -140,7 +148,8 @@ async function loadKo(): Promise<Dictionary> {
 		validation,
 		actions,
 		vault,
-		releases
+		releases,
+		ai
 	} as Dictionary;
 }
 
@@ -157,7 +166,8 @@ async function loadRu(): Promise<Dictionary> {
 		validation,
 		actions,
 		vault,
-		releases
+		releases,
+		ai
 	] = await Promise.all([
 		import("@/lib/dictionaries/ru/common.json").then((m) => m.default),
 		import("@/lib/dictionaries/ru/auth.json").then((m) => m.default),
@@ -171,6 +181,7 @@ async function loadRu(): Promise<Dictionary> {
 		import("@/lib/dictionaries/ru/actions.json").then((m) => m.default),
 		import("@/lib/dictionaries/ru/vault.json").then((m) => m.default),
 		import("@/lib/dictionaries/ru/releases.json").then((m) => m.default),
+		import("@/lib/dictionaries/ru/ai.json").then((m) => m.default),
 	]);
 
 	return {
@@ -186,7 +197,8 @@ async function loadRu(): Promise<Dictionary> {
 		validation,
 		actions,
 		vault,
-		releases
+		releases,
+		ai
 	} as Dictionary;
 }
 
@@ -203,7 +215,8 @@ async function loadPl(): Promise<Dictionary> {
 		validation,
 		actions,
 		vault,
-		releases
+		releases,
+		ai
 	] = await Promise.all([
 		import("@/lib/dictionaries/pl/common.json").then((m) => m.default),
 		import("@/lib/dictionaries/pl/auth.json").then((m) => m.default),
@@ -217,6 +230,7 @@ async function loadPl(): Promise<Dictionary> {
 		import("@/lib/dictionaries/pl/actions.json").then((m) => m.default),
 		import("@/lib/dictionaries/pl/vault.json").then((m) => m.default),
 		import("@/lib/dictionaries/pl/releases.json").then((m) => m.default),
+		import("@/lib/dictionaries/pl/ai.json").then((m) => m.default),
 	]);
 
 	return {
@@ -232,7 +246,8 @@ async function loadPl(): Promise<Dictionary> {
 		validation,
 		actions,
 		vault,
-		releases
+		releases,
+		ai
 	} as Dictionary;
 }
 

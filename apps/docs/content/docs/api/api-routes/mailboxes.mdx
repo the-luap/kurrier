@@ -1,0 +1,201 @@
+---
+title: Mailboxes and Messages
+description: Read mailboxes, threads and messages through Kurrier's API
+---
+
+Read endpoints for external clients such as AI agents, helpdesk integrations
+and backend automations.
+
+All routes below are relative to:
+
+```text
+https://your-domain.com/api/kurrier
+```
+
+For authentication, see the [authentication guide](/docs/api/authentication).
+
+Required scope: `emails:receive`.
+
+### Access rules
+
+Every request acts inside the **workspace of the API key**. A key can read the
+mailboxes of the email identities in that workspace that the key's user owns,
+is assigned to, or that are shared with the workspace — the same identities the
+user sees in the web app. Mail of other workspaces is never returned.
+
+Mailboxes and messages accept either their `id` (uuid) or their short
+`publicId`. Threads are addressed by uuid.
+
+### Pagination
+
+List endpoints take `limit` (1–100, default `50`) and `offset` (0–10 000,
+default `0`) and return a `pagination` object:
+
+```json
+{ "limit": 50, "offset": 0, "nextOffset": 50 }
+```
+
+`nextOffset` is `null` on the last page.
+
+### Message bodies
+
+List responses leave message bodies out. Request them explicitly:
+
+| Parameter | Adds |
+|-----------|------|
+| `includeText=true` | `text` and `textAsHtml` |
+| `includeHtml=true` | `html` |
+| `includeHeaders=true` | `headers` (parsed headers) |
+
+`GET /messages/{id}` includes `text`, `textAsHtml` and `html` by default
+(`includeHtml=false` / `includeText=false` to skip). Attachments are returned
+as metadata (`filename`, `contentType`, `sizeBytes`, `cid`, `isInline`).
+
+---
+
+## List mailboxes
+
+### `GET /mailboxes`
+
+Email identities with their mailboxes (standard folders first).
+
+| Parameter | Description |
+|-----------|-------------|
+| `identityId` | Only this identity (uuid or publicId) |
+
+```bash
+curl https://your-domain.com/api/kurrier/mailboxes \
+  -H "Authorization: Bearer $KURRIER_API_KEY"
+```
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "identity": {
+        "id": "1a9b317a-8a84-493a-b9f8-83a3800861e2",
+        "publicId": "x1Yz2AbC3d",
+        "kind": "email",
+        "value": "info@example.com",
+        "displayName": "Info",
+        "status": "verified",
+        "sharedWithWorkspace": false
+      },
+      "mailboxes": [
+        { "id": "2ba57828-…", "publicId": "Qw3…", "kind": "inbox", "name": "Inbox", "slug": "inbox", "isDefault": true }
+      ]
+    }
+  ]
+}
+```
+
+### `GET /identities/{id}/mailboxes`
+
+The same entry for a single identity.
+
+---
+
+## Mailbox overview
+
+### `GET /mailboxes/overview`
+
+Like `GET /mailboxes`, and every mailbox additionally carries `unreadCount`,
+`unreadThreads`, `totalThreads` and — for inboxes — up to three
+`recentThreads` with unread messages that are not snoozed. Handy for
+dashboards and agents that need a quick summary before picking a mailbox.
+
+---
+
+## List mailbox threads
+
+### `GET /mailboxes/{mailboxId}/threads`
+
+Threads of a mailbox, newest activity first.
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `limit`, `offset` | Pagination | `50`, `0` |
+| `unread` | `true`: only threads with unread messages | — |
+
+```bash
+curl "https://your-domain.com/api/kurrier/mailboxes/2ba57828-d11b-4e48-81f3-a5182515bf42/threads?limit=20" \
+  -H "Authorization: Bearer $KURRIER_API_KEY"
+```
+
+```json
+{
+  "success": true,
+  "data": {
+    "mailbox": { "id": "2ba57828-…", "kind": "inbox", "name": "Inbox" },
+    "threads": [
+      {
+        "threadId": "7d4d2d9e-…",
+        "mailboxId": "2ba57828-…",
+        "subject": "Example",
+        "previewText": "Hi there…",
+        "messageCount": 2,
+        "unreadCount": 1,
+        "starred": false,
+        "lastActivityAt": "2026-05-16T00:00:00.000Z"
+      }
+    ],
+    "pagination": { "limit": 20, "offset": 0, "nextOffset": 20 }
+  }
+}
+```
+
+---
+
+## List mailbox messages
+
+### `GET /mailboxes/{mailboxId}/messages`
+
+Messages of a mailbox, newest first. Takes the pagination and body parameters.
+
+---
+
+## List thread messages
+
+### `GET /threads/{threadId}/messages`
+
+Messages of a thread, oldest first. Only messages in mailboxes the key can
+read are returned. Takes the pagination and body parameters.
+
+```bash
+curl "https://your-domain.com/api/kurrier/threads/7d4d2d9e-1111-2222-3333-444444444444/messages?includeText=true" \
+  -H "Authorization: Bearer $KURRIER_API_KEY"
+```
+
+---
+
+## List messages
+
+### `GET /messages`
+
+Messages across all readable mailboxes, newest first. `GET /emails` is an
+alias.
+
+| Parameter | Description |
+|-----------|-------------|
+| `mailboxId` | Only this mailbox (uuid or publicId) |
+| `threadId` | Only this thread (uuid) |
+| `unread` | `true`: only unseen messages |
+| `limit`, `offset` | Pagination |
+| `includeText`, `includeHtml`, `includeHeaders` | Bodies, see above |
+
+---
+
+## Get a message
+
+### `GET /messages/{id}`
+
+One message by uuid or publicId, including its bodies. `GET /emails/{id}` is
+an alias.
+
+```bash
+curl https://your-domain.com/api/kurrier/messages/3c152a84-6559-4094-a1da-3f1a3209866d \
+  -H "Authorization: Bearer $KURRIER_API_KEY"
+```
+
+To answer it, see [`POST /email/reply`](/docs/api/api-routes/email#post-emailreply).

@@ -9,7 +9,6 @@
 // import {getWorkspacePublicId} from "@/lib/actions/clients";
 // import {isSignedIn} from "@/lib/actions/auth";
 // import {fetchWorkspaceIdentities, fetchWorkspaces} from "@/lib/actions/workspace";
-// import ComposeMail from "@/components/mailbox/default/compose-mail";
 // import IdentityMailboxesList from "@/components/dashboard/identity-mailboxes-list";
 // import {DynamicContextProvider} from "@/hooks/use-dynamic-context";
 // import {getPublicEnv, LabelScope} from "@schema";

@@ -604,6 +604,14 @@ export async function startRealtimeForIdentity(
 
 	(client as any).__kurrierRealtimeStarted = true;
 
+	// IDLE only reports new INBOX mail. After a reconnect, catch up on
+	// anything that arrived while the connection was down.
+	if (isReconnect) {
+		void deltaFetch(identityId, imapInstances).catch((err) => {
+			console.error(`[realtime:${identityId}] catch-up sync failed`, err);
+		});
+	}
+
 	/*
 	 * Do not await the lifetime of the IDLE connection.
 	 */

@@ -12,6 +12,7 @@ import {
 	fetchMailboxThreadLabels,
 } from "@/lib/actions/labels";
 import {
+	fetchAdjacentMailboxThreads,
 	fetchIdentityMailboxList,
 	fetchMailbox,
 	fetchThreadMailSubscriptions,
@@ -48,6 +49,7 @@ export default async function ThreadDetail({
 		allLabels,
 		labelsByThreadId,
 		identityMailboxes,
+		adjacent,
 	] = await Promise.all([
 		fetchMailbox(identityPublicId, mailboxSlug).catch(() => null),
 		fetchWebMailThreadDetail(threadId),
@@ -58,6 +60,11 @@ export default async function ThreadDetail({
 		}),
 		fetchMailboxThreadLabels([{ threadId }]),
 		fetchIdentityMailboxList(),
+		// Fallback for Previous/Next when the client has no list order
+		// (thread opened by URL, or at the edge of the loaded page).
+		fetchAdjacentMailboxThreads(identityPublicId, mailboxSlug, threadId).catch(
+			() => ({ previousThreadId: null, nextThreadId: null }),
+		),
 	]);
 
 	if (!mailboxResult) {
@@ -120,6 +127,8 @@ export default async function ThreadDetail({
 				backHref={backHref}
 				threadId={threadId}
 				messageCount={messages.length}
+				fallbackPreviousThreadId={adjacent.previousThreadId}
+				fallbackNextThreadId={adjacent.nextThreadId}
 			/>
 
 			{hasUnread && (

@@ -1,4 +1,5 @@
 import { db, mailboxes, messages, mailboxThreads } from "@db";
+import { upsertMailboxThreadItem } from "@common";
 import { and, eq, sql } from "drizzle-orm";
 import { ImapFlow } from "imapflow";
 import { initSmtpClient } from "./imap-client";
@@ -22,6 +23,7 @@ export const moveMail = async (
 		op,
 		toMailboxId,
 		moveImap,
+		messageId,
 	} = data;
 
 	// Source mailbox
@@ -67,16 +69,17 @@ export const moveMail = async (
 	const destPath: string =
 		(destMailboxRow.metaData as any)?.imap?.path ?? destMailboxRow.name;
 
-	// Messages in thread scoped to the source mailbox
+	// Messages in thread scoped to the source mailbox (only the one message
+	// for a single-message action).
+	const sourceScope = and(
+		eq(messages.threadId, threadId),
+		eq(messages.mailboxId, fromMailboxId),
+		messageId ? eq(messages.id, messageId) : undefined,
+	);
 	const threadMsgs = await db
 		.select({ id: messages.id, meta: messages.metaData })
 		.from(messages)
-		.where(
-			and(
-				eq(messages.threadId, threadId),
-				eq(messages.mailboxId, fromMailboxId),
-			),
-		);
+		.where(sourceScope);
 	if (threadMsgs.length === 0) return;
 
 	if (moveImap) {
@@ -140,15 +143,16 @@ export const moveMail = async (
       `;
 		}
 
-		await tx
-			.update(messages)
-			.set(set)
-			.where(
-				and(
-					eq(messages.threadId, threadId),
-					eq(messages.mailboxId, fromMailboxId),
-				),
-			);
+		await tx.update(messages).set(set).where(sourceScope);
+
+		if (messageId) {
+			await moveSingleMessageSummary(tx, {
+				threadId,
+				fromMailboxId,
+				messageId,
+			});
+			return;
+		}
 
 		await tx
 			.update(mailboxThreads)
@@ -165,3 +169,78 @@ export const moveMail = async (
 			);
 	});
 };
+
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/**
+ * After one message of a thread moved: the destination row gains it (upsert
+ * aggregates the destination mailbox's messages of the thread), and the
+ * source row is recomputed from what is left there, or removed when nothing
+ * is left.
+ */
+async function moveSingleMessageSummary(
+	tx: Tx,
+	{
+		threadId,
+		fromMailboxId,
+		messageId,
+	}: { threadId: string; fromMailboxId: string; messageId: string },
+) {
+	await upsertMailboxThreadItem(messageId, tx);
+
+	const remaining = sql`
+		select ${messages.id} as id, ${messages.seen} as seen,
+			${messages.flagged} as flagged,
+			${messages.hasAttachments} as has_attachments,
+			coalesce(${messages.date}, ${messages.createdAt}) as at
+		from ${messages}
+		where ${messages.threadId} = ${threadId}
+			and ${messages.mailboxId} = ${fromMailboxId}
+	`;
+
+	const [{ left }] = await tx
+		.select({ left: sql<number>`count(*)::int` })
+		.from(messages)
+		.where(
+			and(
+				eq(messages.threadId, threadId),
+				eq(messages.mailboxId, fromMailboxId),
+			),
+		);
+
+	if (!left) {
+		await tx
+			.delete(mailboxThreads)
+			.where(
+				and(
+					eq(mailboxThreads.threadId, threadId),
+					eq(mailboxThreads.mailboxId, fromMailboxId),
+				),
+			);
+		return;
+	}
+
+	// Exact recompute: upsertMailboxThreadItem only ever grows the timeline
+	// and the starred/attachment flags, which is wrong after a removal.
+	await tx
+		.update(mailboxThreads)
+		.set({
+			messageCount: sql`(select count(*) from (${remaining}) r)`,
+			unreadCount: sql`(select count(*) filter (where not r.seen) from (${remaining}) r)`,
+			starred: sql`(select coalesce(bool_or(r.flagged), false) from (${remaining}) r)`,
+			hasAttachments: sql`(select coalesce(bool_or(r.has_attachments), false) from (${remaining}) r)`,
+			lastActivityAt: sql`(select max(r.at) from (${remaining}) r)`,
+			firstMessageAt: sql`(select min(r.at) from (${remaining}) r)`,
+			previewText: sql`coalesce((
+				select ${messages.snippet} from ${messages}
+				where ${messages.id} = (select r.id from (${remaining}) r order by r.at desc limit 1)
+			), ${mailboxThreads.previewText})`,
+			updatedAt: new Date(),
+		})
+		.where(
+			and(
+				eq(mailboxThreads.threadId, threadId),
+				eq(mailboxThreads.mailboxId, fromMailboxId),
+			),
+		);
+}

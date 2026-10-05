@@ -31,7 +31,8 @@ import {
 	workspaces,
 } from "@db";
 import { createMailer } from "@providers";
-import { and, eq, isNotNull } from "drizzle-orm";
+import { and, eq, inArray, isNotNull } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
 import addressparser from "addressparser";
 import { getRedis, workerOptions } from "../../lib/get-redis";
 import {GetObjectCommand, PutObjectCommand} from "@aws-sdk/client-s3";
@@ -48,6 +49,9 @@ type AttachmentDownload = {
 	name: string;
 	sizeBytes: number;
 	contentType?: string;
+	/** Attachment of the forwarded original (stored under its own key). */
+	forwarded?: boolean;
+	buffer?: Buffer;
 };
 
 export default defineNitroPlugin(async (nitroApp) => {
@@ -341,6 +345,10 @@ export default defineNitroPlugin(async (nitroApp) => {
 					identityOwnerId: mailbox.identity.ownerId,
 					workspaceId: mailbox.identity.workspaceId,
 				},
+				// Forwarding may include the original's attachments.
+				decodedForm.mode === "forward" && decodedForm.originalMessageId
+					? String(decodedForm.originalMessageId)
+					: null,
 			);
 
 			const data: MailComposeInput = {
@@ -497,14 +505,31 @@ export default defineNitroPlugin(async (nitroApp) => {
 
 
 				if (attachmentBlobs.length) {
-					await tx.insert(messageAttachments).values(
-						attachmentBlobs.map((attachmentBlob) => ({
-							...attachmentBlob.item,
-							ownerId: newMessage.ownerId,
-							workspaceId: mailbox.mailbox.workspaceId,
-							messageId: newMessage.id,
-						})),
-					);
+					// Forwarded attachments get their own copy: (bucket, path) is
+					// unique and the original may be deleted independently.
+					const items = (
+						await Promise.all(
+							attachmentBlobs.map(async (attachmentBlob) => {
+								if (!attachmentBlob.forwarded) return attachmentBlob.item;
+								const path = await storeForwardedCopy(
+									attachmentBlob,
+									newMessage.ownerId,
+									newMessage.id,
+								);
+								return path ? { ...attachmentBlob.item, path } : null;
+							}),
+						)
+					).filter((item) => item !== null);
+					if (items.length) {
+						await tx.insert(messageAttachments).values(
+							items.map((item) => ({
+								...item,
+								ownerId: newMessage.ownerId,
+								workspaceId: mailbox.mailbox.workspaceId,
+								messageId: newMessage.id,
+							})),
+						);
+					}
 				}
 
 				await upsertMailboxThreadItem(newMessage.id, tx);
@@ -729,9 +754,66 @@ ${origHtml ? extractBodyHtml(origHtml) : `<pre style="white-space:pre-wrap;margi
 		return allowed;
 	}
 
+	/**
+	 * Attachments of the forwarded original, by storage path. Only messages of
+	 * the sending identity's workspace (the id comes from the client).
+	 */
+	async function forwardableAttachments(
+		originalMessageId: string,
+		workspaceId: string,
+		paths: string[],
+	) {
+		if (paths.length === 0) return new Map<string, typeof messageAttachments.$inferSelect>();
+		const rows = await db
+			.select()
+			.from(messageAttachments)
+			.where(
+				and(
+					eq(messageAttachments.messageId, originalMessageId),
+					eq(messageAttachments.workspaceId, workspaceId),
+					inArray(messageAttachments.path, paths),
+				),
+			);
+		return new Map(rows.map((row) => [row.path, row]));
+	}
+
+	/** Copies a forwarded attachment under the sent message; null on failure. */
+	async function storeForwardedCopy(
+		attachment: AttachmentDownload,
+		ownerId: string,
+		messageId: string,
+	): Promise<string | null> {
+		const safeName =
+			attachment.name.replace(/[^\w.-]+/g, "_").slice(-120) || "attachment";
+		const key = `private/${ownerId}/${messageId}/${randomUUID()}-${safeName}`;
+		try {
+			await s3.send(
+				new PutObjectCommand({
+					Bucket: serverConfig.S3_BUCKET,
+					Key: key,
+					Body:
+						attachment.buffer ??
+						Buffer.from(await attachment.blob.arrayBuffer()),
+					ContentType: String(
+						attachment.item.contentType || "application/octet-stream",
+					),
+				}),
+			);
+			return key;
+		} catch (error) {
+			// The mail is already sent; only the stored copy is missing.
+			console.error("[send-mail] could not store forwarded attachment", {
+				messageId,
+				error: (error as Error)?.message,
+			});
+			return null;
+		}
+	}
+
 	async function fetchAttachmentBlobs(
 		attachmentsString: string,
 		owner: { identityOwnerId: string; workspaceId: string },
+		forwardedFromMessageId: string | null = null,
 	): Promise<AttachmentDownload[]> {
 		let attachments: unknown = [];
 		try {
@@ -749,9 +831,19 @@ ${origHtml ? extractBodyHtml(origHtml) : `<pre style="white-space:pre-wrap;margi
 		// the worker's bucket credentials: only allow files from the upload
 		// folder of a user of the sending identity's workspace
 		// (`private/<userId>/...`), never other users' EMLs or attachments.
+		// When forwarding, attachments of the original message (same
+		// workspace, verified against message_attachments) are allowed too.
 		const allowed = await allowedUploadOwners(owner);
+		const forwarded = forwardedFromMessageId
+			? await forwardableAttachments(
+					forwardedFromMessageId,
+					owner.workspaceId,
+					(candidates as any[]).map((a) => String(a.path)),
+				)
+			: new Map<string, typeof messageAttachments.$inferSelect>();
 		for (const a of candidates as any[]) {
 			const path = String(a.path);
+			if (forwarded.has(path)) continue;
 			const [prefix, userId, ...rest] = path.split("/");
 			if (
 				prefix !== "private" ||
@@ -769,8 +861,9 @@ ${origHtml ? extractBodyHtml(origHtml) : `<pre style="white-space:pre-wrap;margi
 		// mail without its attachments.
 		return await Promise.all(
 			candidates.map(async (attachment: any): Promise<AttachmentDownload> => {
+				const original = forwarded.get(String(attachment.path));
 				const command = new GetObjectCommand({
-					Bucket: serverConfig.S3_BUCKET,
+					Bucket: original?.bucketId || serverConfig.S3_BUCKET,
 					Key: String(attachment.path),
 				});
 
@@ -781,6 +874,29 @@ ${origHtml ? extractBodyHtml(origHtml) : `<pre style="white-space:pre-wrap;margi
 				}
 
 				const buffer = await streamToBuffer(response.Body);
+
+				if (original) {
+					// Name and type from the stored original, not the client.
+					const contentType =
+						original.contentType || "application/octet-stream";
+					const name = original.filenameOriginal || "attachment";
+					return {
+						item: MessageAttachmentInsertSchema.parse({
+							messageId: original.messageId,
+							bucketId: serverConfig.S3_BUCKET,
+							path: original.path,
+							filenameOriginal: name,
+							contentType,
+							sizeBytes: buffer.length,
+							checksum: original.checksum,
+						}),
+						blob: new Blob([new Uint8Array(buffer)], { type: contentType }),
+						name,
+						sizeBytes: buffer.length,
+						forwarded: true,
+						buffer,
+					};
+				}
 
 				const item = MessageAttachmentInsertSchema.parse(attachment);
 				const uint8 = new Uint8Array(buffer);

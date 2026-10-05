@@ -1,40 +1,102 @@
 ---
 title: Email
-description: Send email through Kurrier's unified API
+description: Send and reply to email through Kurrier's unified API
 ---
 
-Kurrier exposes a single, focused endpoint for sending email.
+Send new messages and reply to existing ones from your Identities (which map
+to a provider account such as SES, SMTP, Gmail, JMAP, Mailgun, Postmark,
+SendGrid, etc.). Sends are queued on Kurrier's send worker — the same pipeline
+the web app uses — and the sent message is stored in the identity's Sent
+mailbox.
 
 For more information on how to authenticate with the Kurrier API, see the [authentication guide](/docs/api/authentication).
+
+Required scope: `emails:send`. The identity must belong to the API key's
+workspace and be owned by, assigned to or shared with the key's user.
 
 
 ### POST /email/send
 
+`POST /email/compose` is an alias.
 
 | Field | Description | Example |
 |-------|-------------|---------|
-| **identityId** *(required)* | The Kurrier Identity to send from | `"id_12345"` |
-| **to** *(required)* | One recipient email addresses | `"ada@example.com"` |
+| **identityId** *(required)* | The Kurrier Identity to send from | `"1a9b317a-8a84-493a-b9f8-83a3800861e2"` |
+| **to** *(required)* | One recipient email address | `"ada@example.com"` |
 | **subject** *(required)* | Subject line of the email | `"Welcome to Kurrier!"` |
 | **html** *(required unless `text` is provided)* | HTML version of the email body | `"<p>Hello!</p>"` |
 | **text** *(required unless `html` is provided)* | Plain-text version of the email body | `"Hello!"` |
-| **cc** | CC recipients | `"manager@your.co,ops@your.co"` |
-| **bcc** | BCC recipients | `"audit@your.co,gm@your.co"` |
-| **attachments** | Attachments | `[{ "filename": "photo.jpg", "contentType": "image/jpeg", "content": "BASE64_STRING_HERE" }, ...]` |
+| **cc** | CC recipients (string or array) | `["manager@your.co", "ops@your.co"]` |
+| **bcc** | BCC recipients (string or array) | `["audit@your.co"]` |
+| **attachments** | Attachments, base64 encoded (25 MB in total) | `[{ "filename": "photo.jpg", "contentType": "image/jpeg", "content": "BASE64_STRING_HERE" }, ...]` |
 
 
+```bash
+curl -X POST https://your-domain.com/api/kurrier/email/send \
+  -H "Authorization: Bearer $KURRIER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "identityId": "1a9b317a-8a84-493a-b9f8-83a3800861e2",
+    "to": "ada@example.com",
+    "subject": "Hello",
+    "text": "Hi Ada!"
+  }'
+```
 
-Send an email using one of your configured Identities (which in turn map to a provider account such as SES, SMTP, Mailgun, Postmark, SendGrid, etc.).
+### POST /email/reply
 
+Replies to a message the API key can read (see
+[Mailboxes and Messages](/docs/api/api-routes/mailboxes)). Kurrier threads the
+reply (`In-Reply-To` / `References`), files it into the original thread,
+quotes the original and — unless you pass `subject` — uses
+`Re: <original subject>`.
+
+| Field | Description |
+|-------|-------------|
+| **originalMessageId** *(required unless `threadId`)* | Message to answer (uuid or publicId) |
+| **threadId** *(required unless `originalMessageId`)* | Answer the latest readable message of this thread |
+| **html** / **text** *(one required)* | Reply body |
+| **identityId** | Identity to send from. Defaults to the identity of the original's mailbox |
+| **to** | Recipients. Defaults to the original's `Reply-To`, else its `From` |
+| **cc**, **bcc** | Additional recipients (string or array) |
+| **subject** | Overrides the `Re:` subject |
+| **attachments** | Same format as `/email/send` |
+
+```bash
+curl -X POST https://your-domain.com/api/kurrier/email/reply \
+  -H "Authorization: Bearer $KURRIER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "originalMessageId": "3c152a84-6559-4094-a1da-3f1a3209866d",
+    "text": "Thanks, got it!"
+  }'
+```
 
 
 ### Response
 
-On success, Kurrier returns a JSON payload with a unique message id:
+Both endpoints answer as soon as the message is queued:
 
-```
+```json
 {
-  "messageId": "3c152a84-6559-4094-a1da-3f1a3209866d"
+  "success": true,
+  "data": {
+    "messageId": "9a0c2f7e-4c1b-4c55-9d0f-3b7f0a5b8e21",
+    "status": "queued"
+  }
 }
 ```
 
+Replies also return `originalMessageId` and `threadId`. Once the worker has
+sent the message it is stored under `messageId`, so
+`GET /messages/{messageId}` returns it.
+
+### Errors
+
+| Status | Meaning |
+|--------|---------|
+| `400` | Invalid body, or the identity has no Sent mailbox |
+| `401` | Missing, invalid, revoked or expired API key |
+| `403` | Key lacks `emails:send`, or no access to the identity |
+| `404` | Reply: original message not found in the key's workspace |
+| `413` | Attachments larger than 25 MB in total |

@@ -13,6 +13,7 @@ import {
 	FileText,
 	Folder,
 	Inbox,
+	LayoutDashboard,
 	MoreVertical,
 	Send,
 	Trash2,
@@ -27,6 +28,7 @@ import {
 	useOptionalDictionary,
 	useOptionalI18n,
 } from "@/components/providers/dictionary-provider";
+import { useSidebar } from "@/components/ui/sidebar";
 import type {
 	FetchIdentityMailboxListResult,
 	FetchMailboxUnreadCountsResult,
@@ -169,15 +171,27 @@ function IdentityExtraCounts({
 	isActiveIdentity: boolean;
 	onNavigate?: () => void;
 }) {
-	const { scheduledByIdentityId, snoozedByIdentityId } =
+	const { scheduledByIdentityId, snoozedByIdentityId, draftsByIdentityId } =
 		use(sidebarCountsPromise);
 	const scheduledCount = scheduledByIdentityId[identity.id] ?? 0;
 	const snoozedCount = snoozedByIdentityId[identity.id] ?? 0;
+	const draftsCount = draftsByIdentityId[identity.id] ?? 0;
 
 	const dict = useOptionalDictionary();
 
 	return (
 		<>
+			{draftsCount > 0 && (
+				<ExtraLink
+					href={`/w/${workspacePublicId}/dashboard/mail/${identity.publicId}/unsent`}
+					active={isActiveIdentity && currentSlug === "unsent"}
+					icon={<FileText size={16} className="shrink-0 text-amber-600 dark:text-amber-300" />}
+					label={dict?.mailbox?.folderDrafts ?? "Drafts"}
+					count={draftsCount}
+					onNavigate={onNavigate}
+				/>
+			)}
+
 			{scheduledCount > 0 && (
 				<ExtraLink
 					href={`/w/${workspacePublicId}/dashboard/mail/${identity.publicId}/scheduled`}
@@ -431,6 +445,17 @@ export default function IdentityMailboxesList({
 
 	const router = useRouter();
 
+	// On mobile the list lives in the sidebar sheet: close it after a click,
+	// even when the link points at the current page (no pathname change).
+	const { isMobile, setOpenMobile } = useSidebar();
+	const handleNavigate = React.useCallback(() => {
+		onComplete?.();
+		if (isMobile) setOpenMobile(false);
+	}, [onComplete, isMobile, setOpenMobile]);
+
+	const overviewHref = `/w/${workspacePublicId}/dashboard/mail`;
+	const isOverviewActive = pathname.replace(/\/+$/, "").endsWith("/dashboard/mail");
+
 	const identityNav = React.useMemo(
 		() =>
 			identityMailboxes.map(({ identity, mailboxes }) => {
@@ -451,6 +476,27 @@ export default function IdentityMailboxesList({
 
 	return (
 		<div className="min-w-0 space-y-2 px-3 pb-4">
+			<Link
+				href={overviewHref}
+				prefetch={false}
+				onClick={handleNavigate}
+				aria-current={isOverviewActive ? "page" : undefined}
+				className={cn(
+					"relative mt-2 flex min-w-0 items-center gap-2 rounded-md border border-transparent px-2 py-1.5 text-sm font-medium transition-colors",
+					"hover:border-sidebar-border hover:bg-sidebar-accent/80 hover:text-sidebar-accent-foreground",
+					isOverviewActive &&
+						"border-primary/20 bg-primary/10 text-sidebar-accent-foreground shadow-sm dark:border-primary/30 dark:bg-primary/20",
+				)}
+			>
+				{isOverviewActive ? (
+					<span className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-primary" />
+				) : null}
+				<LayoutDashboard className="h-4 w-4 shrink-0 text-primary" />
+				<span className="min-w-0 truncate">
+					{dict?.mailbox?.overviewNav ?? "Overview"}
+				</span>
+			</Link>
+
 			<div className="my-2 min-w-0">
 				<Select
 					className="min-w-0"
@@ -466,6 +512,7 @@ export default function IdentityMailboxesList({
 						},
 					}}
 					onChange={(publicId) => {
+						handleNavigate();
 						router.push(
 							`/w/${workspacePublicId}/dashboard/mail/${publicId}/inbox`,
 						);
@@ -504,7 +551,7 @@ export default function IdentityMailboxesList({
 									identity={identity}
 									workspacePublicId={workspacePublicId}
 									activeSlug={activeSlug}
-									onNavigate={onComplete}
+									onNavigate={handleNavigate}
 								/>
 							))}
 						</div>
@@ -516,7 +563,7 @@ export default function IdentityMailboxesList({
 								workspacePublicId={workspacePublicId}
 								currentSlug={currentSlug}
 								isActiveIdentity={isActiveIdentity}
-								onNavigate={onComplete}
+								onNavigate={handleNavigate}
 							/>
 						</Suspense>
 					</div>

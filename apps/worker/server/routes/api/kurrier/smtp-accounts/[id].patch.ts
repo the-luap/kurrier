@@ -10,6 +10,7 @@ import { SmtpAccountUpdateSchema } from "@schema";
 import { eq } from "drizzle-orm";
 import { defineEventHandler, getRouterParam } from "h3";
 import {
+	API_SCOPES,
 	apiError,
 	apiSuccess,
 	isAdminApiRequest,
@@ -27,7 +28,7 @@ export default defineEventHandler(async (event) => {
 	// Admin API key: any account resolves; regular keys only patch their own.
 	const ownerId = isAdminApiRequest(event)
 		? null
-		: (await validateApiKey(event)).ownerId;
+		: (await validateApiKey(event, API_SCOPES.manage)).ownerId;
 	const id = getRouterParam(event, "id");
 
 	if (!id) {

@@ -1,14 +1,18 @@
 import { defineEventHandler, getRouterParam } from "h3";
-import {apiSuccess, validateApiKey, validateIdentityOwnership} from "../../../../../lib/api-helpers";
+import {
+	API_SCOPES,
+	apiSuccess,
+	validateApiKey,
+	validateIdentityOwnership,
+} from "../../../../../lib/api-helpers";
 
 export default defineEventHandler(async (event) => {
-
-	const { ownerId } = await validateApiKey(event);
+	const { ownerId, apiKey } = await validateApiKey(event, API_SCOPES.manage);
 	const id = getRouterParam(event, "id");
 	const identity = await validateIdentityOwnership({
 		identityId: String(id),
 		ownerId,
+		workspaceId: apiKey.workspaceId,
 	});
 	return apiSuccess(identity);
-
 });

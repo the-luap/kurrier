@@ -1,20 +1,29 @@
-import { createError, defineEventHandler } from "h3";
-import {EmailSendSchema, getServerEnv} from "@schema";
-import { db, mailboxes } from "@db";
-import { and, eq } from "drizzle-orm";
-import { getRedis } from "../../../../../lib/get-redis";
-import { s3 } from "../../../../../lib/create-s3-client";
+import { EmailSendSchema } from "@schema";
+import { createError, defineEventHandler, getQuery } from "h3";
 import {
+	API_SCOPES,
 	apiSuccess,
-	validateApiKey, validateIdentityOwnership,
+	resolveApiActor,
 	validateJSONBody,
 } from "../../../../../lib/api-helpers";
-import { extension } from "mime-types";
-import {PutObjectCommand} from "@aws-sdk/client-s3";
+import {
+	enqueueSend,
+	findSendableIdentity,
+	findSentMailbox,
+	uploadApiAttachments,
+} from "../../../../../lib/api/send";
 
+// POST /api/kurrier/email/send (alias: /api/kurrier/email/compose)
+// Sends a new message from an identity of the API key's workspace through
+// the regular send-mail worker.
 export default defineEventHandler(async (event) => {
-	const { ownerId } = await validateApiKey(event);
 	const { json } = await validateJSONBody(event);
+	const userEmail = json?.userEmail ?? getQuery(event).userEmail;
+	const actor = await resolveApiActor(
+		event,
+		userEmail ? String(userEmail) : undefined,
+		API_SCOPES.send,
+	);
 
 	const parsed = EmailSendSchema.safeParse(json);
 
@@ -33,73 +42,39 @@ export default defineEventHandler(async (event) => {
 	}
 
 	const data = parsed.data;
-	const identity = await validateIdentityOwnership({identityId: data.identityId, ownerId: ownerId});
-	const id = crypto.randomUUID();
+	const identity = await findSendableIdentity(actor, data.identityId);
 	if (!identity) {
 		throw createError({
-			statusCode: 400,
-			statusMessage: "Invalid identityId",
+			statusCode: 403,
+			statusMessage: "Identity not found or access denied",
 		});
 	}
 
-	const [sentMailbox] = await db
-		.select()
-		.from(mailboxes)
-		.where(
-			and(
-				eq(mailboxes.identityId, data.identityId),
-				eq(mailboxes.slug, "sent"),
-			),
-		);
+	const sentMailbox = await findSentMailbox(identity.id, identity.workspaceId);
+	const newMessageId = crypto.randomUUID();
 
-	if (!sentMailbox) {
-		throw createError({
-			statusCode: 400,
-			statusMessage: "Sent mailbox not found for the given identityId",
-		});
-	}
+	const attachments = await uploadApiAttachments({
+		uploaderId: actor.ownerId,
+		messageId: newMessageId,
+		attachments: data.attachments,
+	});
 
-	const payload = {
-		...data,
-		newMessageId: id,
+	await enqueueSend({
+		identityId: identity.id,
+		to: data.to,
+		cc: data.cc,
+		bcc: data.bcc,
+		subject: data.subject,
+		text: data.text,
+		html: data.html,
+		newMessageId,
+		apiMessageId: newMessageId,
 		messageMailboxId: "",
 		sentMailboxId: String(sentMailbox.id),
 		mailboxId: String(sentMailbox.id),
-		mode: "compose"
-	} as any;
+		mode: "compose",
+		attachments,
+	});
 
-	const { S3_BUCKET } = getServerEnv();
-
-	const attachments = [];
-
-	for (const file of data?.attachments || []) {
-		const ext = extension(file.contentType) || "dat";
-		const path = `private/${identity.ownerId}/${payload.newMessageId}/${crypto.randomUUID()}.${ext}`;
-
-		const buffer = Buffer.from(file.content, "base64");
-
-		await s3.send(
-			new PutObjectCommand({
-				Bucket: S3_BUCKET,
-				Key: path,
-				Body: buffer,
-				ContentType: file.contentType,
-			}),
-		);
-
-		attachments.push({
-			path,
-			messageId: payload.newMessageId,
-			bucketId: S3_BUCKET,
-			filenameOriginal: file.filename,
-			contentType: file.contentType,
-			sizeBytes: buffer.length,
-		});
-	}
-
-	payload.attachments = JSON.stringify(attachments);
-	const { sendMailQueue } = await getRedis();
-	await sendMailQueue.add("send-and-reconcile", payload);
-
-	return apiSuccess({ messageId: payload.newMessageId });
+	return apiSuccess({ messageId: newMessageId, status: "queued" });
 });
