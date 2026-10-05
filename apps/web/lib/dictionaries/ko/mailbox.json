@@ -29,5 +29,6 @@
 	"draftDiscarded": "임시 보관 메일 삭제됨",
 	"draftRestored": "임시 보관 메일을 복원했습니다",
 	"discardDraft": "임시 보관 메일 삭제",
-	"removeAttachment": "첨부 파일 제거"
+	"removeAttachment": "첨부 파일 제거",
+	"attachmentOpenFailed": "첨부 파일을 열 수 없습니다."
 }

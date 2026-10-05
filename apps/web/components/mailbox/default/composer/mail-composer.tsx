@@ -986,16 +986,23 @@ export default function MailComposer({
                 return;
             }
 
-            const { url } =
-                await createAttachmentDownloadUrl(
-                    upload.path,
-                );
+            try {
+                const { url } =
+                    await createAttachmentDownloadUrl(
+                        upload.path,
+                    );
 
-            window.open(
-                url,
-                "_blank",
-                "noopener,noreferrer",
-            );
+                window.open(
+                    url,
+                    "_blank",
+                    "noopener,noreferrer",
+                );
+            } catch {
+                toast.error(
+                    dict?.mailbox.attachmentOpenFailed ??
+                        "Could not open the attachment.",
+                );
+            }
         };
 
     const submittedSignaturePublicId =

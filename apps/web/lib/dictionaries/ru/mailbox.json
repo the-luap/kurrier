@@ -392,5 +392,6 @@
 	"draftDiscarded": "Черновик удалён",
 	"draftRestored": "Черновик восстановлен",
 	"discardDraft": "Удалить черновик",
-	"removeAttachment": "Удалить вложение"
+	"removeAttachment": "Удалить вложение",
+	"attachmentOpenFailed": "Не удалось открыть вложение."
 }

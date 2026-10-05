@@ -392,5 +392,6 @@
 	"draftDiscarded": "Rascunho descartado",
 	"draftRestored": "Seu rascunho foi restaurado",
 	"discardDraft": "Descartar rascunho",
-	"removeAttachment": "Remover anexo"
+	"removeAttachment": "Remover anexo",
+	"attachmentOpenFailed": "Não foi possível abrir o anexo."
 }

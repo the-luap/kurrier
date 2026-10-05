@@ -1036,20 +1036,40 @@ export const deleteEmailIdentity = async (
 	clientIdentity: FetchUserIdentitiesResult[number],
 ) => {
 	return handleAction(async () => {
-		// The argument comes from the browser. Reload the row through RLS so
-		// only an identity of the caller's workspace can be deleted, and use
-		// the stored provider/account data instead of the client copy.
-		const rls = await rlsClient();
-		const [userIdentity] = await rls((tx) =>
-			tx
-				.select()
-				.from(identities)
-				.leftJoin(smtpAccounts, eq(identities.smtpAccountId, smtpAccounts.id))
-				.leftJoin(providers, eq(identities.providerId, providers.id))
-				.where(eq(identities.id, String(clientIdentity?.identities?.id)))
-				.limit(1),
-		);
+		// The argument comes from the browser: reload the row from the
+		// caller's workspace and use the stored provider/account data instead
+		// of the client copy. Owners/admins may delete any identity of the
+		// workspace (also ones restricted to other members, which RLS hides);
+		// other members only identities they can see.
+		const identityId = String(clientIdentity?.identities?.id);
+		const [workspaceId, workspaceRole] = await Promise.all([
+			getWorkspaceId(),
+			getWorkspaceRole(),
+		]);
+		const [userIdentity] = await db
+			.select()
+			.from(identities)
+			.leftJoin(smtpAccounts, eq(identities.smtpAccountId, smtpAccounts.id))
+			.leftJoin(providers, eq(identities.providerId, providers.id))
+			.where(
+				and(
+					eq(identities.id, identityId),
+					eq(identities.workspaceId, workspaceId),
+				),
+			)
+			.limit(1);
 		if (!userIdentity) throw new Error("Identity not found");
+		if (workspaceRole !== "owner" && workspaceRole !== "admin") {
+			const rls = await rlsClient();
+			const [visible] = await rls((tx) =>
+				tx
+					.select({ id: identities.id })
+					.from(identities)
+					.where(eq(identities.id, identityId))
+					.limit(1),
+			);
+			if (!visible) throw new Error("Identity not found");
+		}
 		const identity = userIdentity.identities;
 		const isGoogle = identity?.metaData?.provider === "google";
 

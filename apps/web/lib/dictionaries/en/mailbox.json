@@ -392,5 +392,6 @@
 	"draftDiscarded": "Draft discarded",
 	"draftRestored": "Restored your draft",
 	"discardDraft": "Discard draft",
-	"removeAttachment": "Remove attachment"
+	"removeAttachment": "Remove attachment",
+	"attachmentOpenFailed": "Could not open the attachment."
 }

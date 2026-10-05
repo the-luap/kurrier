@@ -863,7 +863,9 @@ ${origHtml ? extractBodyHtml(origHtml) : `<pre style="white-space:pre-wrap;margi
 			candidates.map(async (attachment: any): Promise<AttachmentDownload> => {
 				const original = forwarded.get(String(attachment.path));
 				const command = new GetObjectCommand({
-					Bucket: original?.bucketId || serverConfig.S3_BUCKET,
+					// Stored attachments all live in S3_BUCKET; message_attachments
+					// rows of received mail carry a logical bucketId ("attachments").
+					Bucket: serverConfig.S3_BUCKET,
 					Key: String(attachment.path),
 				});
 

@@ -2188,7 +2188,14 @@ export async function deleteScheduledDraft(
 		const deleted = await rls((tx) =>
 			tx
 				.delete(draftMessages)
-				.where(eq(draftMessages.id, String(decodedForm.draftId)))
+				.where(
+					and(
+						eq(draftMessages.id, String(decodedForm.draftId)),
+						// Only scheduled sends; autosaved drafts are private and
+						// RLS on this table is workspace-wide.
+						eq(draftMessages.status, "scheduled"),
+					),
+				)
 				.returning({ id: draftMessages.id }),
 		);
 
