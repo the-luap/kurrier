@@ -24,21 +24,35 @@ import {FetchWorkspacesResult, switchWorkSpace} from "@/lib/actions/workspace";
 import { LanguageSwitcherSubmenu } from "@/components/common/language-switcher";
 import { useOptionalDictionary } from "@/components/providers/dictionary-provider";
 
+// Every dashboard section mounts its own sidebar, so cache the resolved URL
+// per email for the lifetime of the tab instead of calling the server action
+// on every section switch / router.refresh().
+const gravatarCache = new Map<string, string>();
+
 export function NavUser({ workspacePublicId, user, userWorkspaces }: { workspacePublicId: string | undefined, user: FetchIsSignedInResult, userWorkspaces: FetchWorkspacesResult }) {
 	const { isMobile } = useSidebar();
 	const dict = useOptionalDictionary();
-	const [gravatarUrl, setGravatarUrl] = useState<string | null>(null);
-
-	const fetchGravatar = async () => {
-		const avatar = await getGravatarUrl(String(user?.email));
-		setGravatarUrl(avatar);
-	};
+	const email = user?.email;
+	const [gravatarUrl, setGravatarUrl] = useState<string | null>(
+		() => (email && gravatarCache.get(email)) || null,
+	);
 
 	useEffect(() => {
-		if (user) {
-			fetchGravatar();
+		if (!email) return;
+		const cached = gravatarCache.get(email);
+		if (cached) {
+			setGravatarUrl(cached);
+			return;
 		}
-	}, [user]);
+		let cancelled = false;
+		getGravatarUrl(email).then((avatar) => {
+			gravatarCache.set(email, avatar);
+			if (!cancelled) setGravatarUrl(avatar);
+		});
+		return () => {
+			cancelled = true;
+		};
+	}, [email]);
 
 	return (
 		<SidebarMenu>

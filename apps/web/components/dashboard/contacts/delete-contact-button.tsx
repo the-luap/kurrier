@@ -9,7 +9,7 @@ import { responsiveModalActionsClassName } from "@/components/common/modal-actio
 import { useOptionalDictionary } from "@/components/providers/dictionary-provider";
 
 type DeleteContactButtonProps = {
-	contact: ContactEntity;
+	contact: Pick<ContactEntity, "id" | "firstName" | "lastName">;
 	workspacePublicId: string;
 	onDeleteAction: (id: string) => Promise<{ success: boolean }>;
 };
@@ -58,6 +58,8 @@ function DeleteContactButton({
 	return (
 		<ActionIcon
 			onClick={confirmDeleteContact}
+			aria-label={dict?.contacts?.deleteContact ?? "Delete Contact"}
+			title={dict?.contacts?.deleteContact ?? "Delete Contact"}
 			size="md"
 			className={"-mt-1"}
 			variant={"subtle"}

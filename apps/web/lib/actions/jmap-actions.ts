@@ -31,18 +31,17 @@ import {
 import { and, eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { decode } from "decode-formdata";
-import { getRedis } from "@/lib/actions/get-redis";
+import { getQueue } from "@/lib/actions/get-redis";
 
 const PROVIDERS_PATH =
     "/w/[workspaceId]/dashboard/platform/providers";
 
-export async function initializeJmapIdentity(
+// Internal (not a server action): callers pass an identity they just created.
+async function initializeJmapIdentity(
     identityId: string,
     workspaceId: string,
 ) {
-    const { jmapQueue } = await getRedis();
-
-    await jmapQueue.add(
+    await getQueue("jmap-worker").add(
         "jmap:backfill-discover",
         {
             identityId,

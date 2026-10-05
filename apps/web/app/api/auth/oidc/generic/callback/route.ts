@@ -3,7 +3,7 @@ import argon2 from "argon2";
 import crypto from "node:crypto";
 import { cookies } from "next/headers";
 import { connection, NextRequest, NextResponse } from "next/server";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import {
 	authAccounts,
 	authProviders,
@@ -165,7 +165,7 @@ export async function GET(request: NextRequest) {
 		let [existingUser] = await db
 			.select()
 			.from(users)
-			.where(eq(users.email, email))
+			.where(sql`lower(${users.email}) = lower(${email})`)
 			.limit(1);
 
 		if (!existingUser) {

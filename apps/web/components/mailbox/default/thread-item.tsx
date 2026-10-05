@@ -1,96 +1,95 @@
-import { getMessageAddress, getMessageName } from "@common/mail-client";
-import type { MessageEntity } from "@db";
-import { Avatar } from "@mantine/core";
-import { getPublicEnv } from "@schema";
-import React from "react";
+import type { MailSubscriptionEntity, MessageEntity } from "@db";
+import type { PublicConfig } from "@schema";
 import { Container } from "@/components/common/containers";
-import EmailRenderer from "@/components/mailbox/default/email-renderer";
-import EmailViewer from "@/components/mailbox/default/email-viewer";
+import EmailRenderer, {
+	type MessageAttachmentWithUrl,
+} from "@/components/mailbox/default/email-renderer";
 import RenderInvite from "@/components/mailbox/default/render-invite";
-import { fetchEventPreviewItems } from "@/lib/actions/calendar";
+import type { FetchEventPreviewItemsResult } from "@/lib/actions/calendar";
 import type {
 	FetchLabelsResult,
 	FetchMailboxThreadLabelsResult,
 } from "@/lib/actions/labels";
-import {
-	type FetchThreadMailSubsResult,
-	fetchIdentityMailboxList,
-	fetchMessageAttachments,
-	getSignedUrlsForMessage,
-} from "@/lib/actions/mailbox";
+import type { FetchIdentityMailboxListResult } from "@/lib/actions/mailbox";
 
-export default async function ThreadItem({
+type Preview =
+	| FetchEventPreviewItemsResult
+	| { calendarEvent: null; attendees: null; identity: null };
+
+export default function ThreadItem({
 	message,
 	threadIndex,
 	numberOfMessages,
 	threadId,
 	activeMailboxId,
+	activeMailboxKind,
 	markSmtp,
-	identityPublicId,
 	mailSubscription,
 	allLabels,
 	labelsByThreadId,
+	identityMailboxes,
+	attachments,
+	preview,
+	cidUrls,
+	publicConfig,
+	backHref,
 }: {
 	message: MessageEntity;
 	threadIndex: number;
 	numberOfMessages: number;
 	threadId: string;
 	activeMailboxId: string;
+	activeMailboxKind: string;
 	markSmtp: boolean;
-	identityPublicId: string;
-	mailSubscription: FetchThreadMailSubsResult["byMessageId"] | null;
+	mailSubscription: MailSubscriptionEntity | null;
 	allLabels: FetchLabelsResult;
 	labelsByThreadId: FetchMailboxThreadLabelsResult;
+	identityMailboxes: FetchIdentityMailboxListResult;
+	attachments: MessageAttachmentWithUrl[];
+	preview: Preview;
+	/** Lower-cased content id -> signed URL of the inline image. */
+	cidUrls: Record<string, string>;
+	publicConfig: PublicConfig;
+	backHref: string;
 }) {
-	const attachments = await getSignedUrlsForMessage(message.id);
-	const publicConfig = getPublicEnv();
-	const preview = await fetchEventPreviewItems(attachments, identityPublicId);
-	const identityMailboxes = await fetchIdentityMailboxList();
+	// The message goes to the client once (the renderer hands it to the body
+	// viewer and the inspector). textAsHtml is a second HTML copy of the text
+	// part that no client component reads.
+	const clientMessage: MessageEntity = { ...message, textAsHtml: null };
 
 	return (
-		<>
-			<Container variant="wide">
-				<div className={"grid grid-cols-12 p-3"}>
-					<div className={"md:col-span-1 hidden"}>
-						<Avatar
-							name={
-								getMessageName(message, "from") ||
-								getMessageAddress(message, "from") ||
-								""
-							}
-							color="initials"
-						/>
-					</div>
-					<div className={"col-span-12 md:col-span-11"}>
-						{preview?.calendarEvent &&
-							preview?.attendees &&
-							preview?.identity && (
-								<RenderInvite
-									calendarEvent={preview.calendarEvent}
-									attendees={preview.attendees ?? []}
-									identity={preview.identity}
-								/>
-							)}
+		<Container variant="wide">
+			<div className={"grid grid-cols-12 p-3"}>
+				<div className={"col-span-12 md:col-span-11"}>
+					{preview?.calendarEvent &&
+						preview?.attendees &&
+						preview?.identity && (
+							<RenderInvite
+								calendarEvent={preview.calendarEvent}
+								attendees={preview.attendees ?? []}
+								identity={preview.identity}
+							/>
+						)}
 
-						<EmailRenderer
-							threadIndex={threadIndex}
-							numberOfMessages={numberOfMessages}
-							message={message}
-							attachments={attachments}
-							publicConfig={publicConfig}
-							threadId={threadId}
-							markSmtp={markSmtp}
-							activeMailboxId={activeMailboxId}
-							mailSubscription={mailSubscription}
-							identityMailboxes={identityMailboxes}
-							allLabels={allLabels}
-							labelsByThreadId={labelsByThreadId}
-						>
-							<EmailViewer message={message} />
-						</EmailRenderer>
-					</div>
+					<EmailRenderer
+						threadIndex={threadIndex}
+						numberOfMessages={numberOfMessages}
+						message={clientMessage}
+						attachments={attachments}
+						publicConfig={publicConfig}
+						threadId={threadId}
+						markSmtp={markSmtp}
+						activeMailboxId={activeMailboxId}
+						activeMailboxKind={activeMailboxKind}
+						mailSubscription={mailSubscription}
+						identityMailboxes={identityMailboxes}
+						allLabels={allLabels}
+						labelsByThreadId={labelsByThreadId}
+						backHref={backHref}
+						cidUrls={cidUrls}
+					/>
 				</div>
-			</Container>
-		</>
+			</div>
+		</Container>
 	);
 }

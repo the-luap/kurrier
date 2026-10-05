@@ -25,27 +25,26 @@ export default async function LabelPage({
 		1,
 		Number((resolvedSearchParams.page as string | undefined) ?? 1),
 	);
-	const { activeMailbox, mailboxSync } = await fetchMailbox(
-		identityPublicId,
-		mailboxSlug,
-	);
-
-	const identityMailboxes = await fetchIdentityMailboxList();
-	const globalLabels = await fetchLabelsByIdentityPublicId({
-		identityPublicId,
-		scope: "thread",
-	});
-
-	const { threads: mailboxThreads, total } = await fetchMailboxThreadsByLabel(
-		identityPublicId,
-		mailboxSlug,
-		labelSlug,
-		page
-	);
+	// Independent loaders: one round trip instead of a waterfall.
+	const [
+		{ activeMailbox, mailboxSync },
+		identityMailboxes,
+		globalLabels,
+		{ threads: mailboxThreads, total },
+		workspacePublicId,
+	] = await Promise.all([
+		fetchMailbox(identityPublicId, mailboxSlug),
+		fetchIdentityMailboxList(),
+		fetchLabelsByIdentityPublicId({
+			identityPublicId,
+			scope: "thread",
+		}),
+		fetchMailboxThreadsByLabel(identityPublicId, mailboxSlug, labelSlug, page),
+		getWorkspacePublicId(),
+	]);
 
 	const labelsByThreadId = await fetchMailboxThreadLabels(mailboxThreads);
 	const label = globalLabels.find((l) => l.slug === labelSlug);
-	const workspacePublicId = await getWorkspacePublicId()
 
 	return (
 		<div className="flex flex-1 flex-col gap-4 p-4 mb-12">

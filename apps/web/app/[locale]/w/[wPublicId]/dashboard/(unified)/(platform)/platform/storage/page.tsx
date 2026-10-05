@@ -18,8 +18,10 @@ export default async function ProvidersPage({
 	params: Promise<{ locale: string }>;
 }) {
 	const { locale } = await params;
-	const dict = await getDictionary(locale);
-	const workspacePublicId = await getWorkspacePublicId();
+	const [dict, workspacePublicId] = await Promise.all([
+		getDictionary(locale),
+		getWorkspacePublicId(),
+	]);
 
 	if (!DISTRIBUTION_CONFIG.features.drive) {
 		redirect(
@@ -27,11 +29,12 @@ export default async function ProvidersPage({
 		);
 	}
 
-	const { canCreateStorageVolume } = await access("canCreateStorageVolume");
-
-	const userProviders = await syncProviders();
 	const rls = await rlsClient();
-	const vols = await rls((tx) => tx.select().from(driveVolumes));
+	const [{ canCreateStorageVolume }, userProviders, vols] = await Promise.all([
+		access("canCreateStorageVolume"),
+		syncProviders(),
+		rls((tx) => tx.select().from(driveVolumes)),
+	]);
 
 	return (
 		<>

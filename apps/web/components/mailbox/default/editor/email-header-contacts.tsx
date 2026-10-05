@@ -7,7 +7,7 @@ import {
 	type TagsInputProps,
 } from "@mantine/core";
 import type { ComposeContact } from "@schema";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import ContactSuggestionItem from "@/components/mailbox/default/editor/contact-suggestion-item";
 import { searchContactsForCompose } from "@/lib/actions/calendar";
 
@@ -36,19 +36,46 @@ export default function EmailHeaderContacts({
 		});
 	};
 
-	const searchContacts = async (value: string) => {
+	const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const requestIdRef = useRef(0);
+
+	useEffect(
+		() => () => {
+			if (debounceRef.current) clearTimeout(debounceRef.current);
+		},
+		[],
+	);
+
+	// Debounce the server lookup and drop out-of-order responses so fast
+	// typing neither floods the server nor shows stale suggestions.
+	const searchContacts = (value: string) => {
 		setSearchValue(value);
+		if (debounceRef.current) clearTimeout(debounceRef.current);
 
-		const rowsContacts = await searchContactsForCompose(value);
-		const rows = uniqueByEmail(rowsContacts);
+		if (!value.trim()) {
+			requestIdRef.current++;
+			setOptions([]);
+			return;
+		}
 
-		const mapped: ComboboxItem[] = rows.map((row) => ({
-			value: row.email,
-			label: `${row.name} <${row.email}>`,
-			avatar: row.avatar,
-		}));
+		debounceRef.current = setTimeout(async () => {
+			const requestId = ++requestIdRef.current;
+			try {
+				const rowsContacts = await searchContactsForCompose(value);
+				if (requestId !== requestIdRef.current) return;
+				const rows = uniqueByEmail(rowsContacts);
 
-		setOptions(mapped);
+				setOptions(
+					rows.map((row) => ({
+						value: row.email,
+						label: `${row.name} <${row.email}>`,
+						avatar: row.avatar,
+					})),
+				);
+			} catch {
+				if (requestId === requestIdRef.current) setOptions([]);
+			}
+		}, 200);
 	};
 
 	const renderOption: TagsInputProps["renderOption"] = ({ option }) => (

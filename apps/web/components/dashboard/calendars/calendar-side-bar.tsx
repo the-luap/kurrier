@@ -1,6 +1,6 @@
 "use client";
 
-import React, {use, useEffect, useState} from "react";
+import { use, useEffect, useState } from "react";
 import { DatePicker, type DatePickerProps } from "@mantine/dates";
 import dayjs, { Dayjs } from "dayjs";
 import { setSidebarWidth } from "@/lib/utils";
@@ -42,7 +42,7 @@ function CalendarSideBar({
 	const activeView: CalendarViewType =
 		(params.view as CalendarViewType) ?? "week";
 
-	const initialDay: Dayjs =
+	const routeDay: Dayjs =
 		params.year && params.month && params.day
 			? dayjs()
 					.year(Number(params.year))
@@ -50,28 +50,24 @@ function CalendarSideBar({
 					.date(Number(params.day))
 			: today;
 
-	const [selected, setSelected] = useState<Dayjs | null>(initialDay);
-	const [calendarDate, setCalendarDate] = useState<Date>(initialDay.toDate());
+	const [selected, setSelected] = useState<Dayjs | null>(routeDay);
+	const [calendarDate, setCalendarDate] = useState<Date>(routeDay.toDate());
+
+	// Re-sync the picker when the route date changes. Done during render
+	// (keyed on primitive params) instead of in an effect that depended on a
+	// fresh `dayjs()` instance every render.
+	const routeKey = `${params.year ?? ""}-${params.month ?? ""}-${params.day ?? ""}`;
+	const [syncedRouteKey, setSyncedRouteKey] = useState(routeKey);
+	if (syncedRouteKey !== routeKey) {
+		setSyncedRouteKey(routeKey);
+		setSelected(routeDay);
+		setCalendarDate(routeDay.toDate());
+	}
 
 	useEffect(() => {
 		setSidebarWidth("300px");
 		return () => setSidebarWidth("250px");
 	}, []);
-
-	useEffect(() => {
-		if (params.year && params.month && params.day) {
-			const newValue = dayjs()
-				.year(Number(params.year))
-				.month(Number(params.month) - 1)
-				.date(Number(params.day));
-
-			setSelected(newValue);
-			setCalendarDate(newValue.toDate());
-		} else {
-			setSelected(today);
-			setCalendarDate(today.toDate());
-		}
-	}, [params.year, params.month, params.day, today]);
 
 	const buildPath = (view: CalendarViewType, d: Dayjs, pathPublicId?: string) => {
 		const id = pathPublicId || publicId;

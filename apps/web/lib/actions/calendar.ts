@@ -37,7 +37,7 @@ import {
 import { decode } from "decode-formdata";
 import { revalidatePath } from "next/cache";
 import { Dayjs } from "dayjs";
-import { getRedis } from "@/lib/actions/get-redis";
+import { addJobAndWait, getQueue } from "@/lib/actions/get-redis";
 import { dayjsExtended, getDayjsTz } from "@common/day-js-extended";
 import { calendarEventAttendees } from "@db";
 import { PgTransaction } from "drizzle-orm/pg-core";
@@ -355,12 +355,17 @@ export async function upsertCalendarEvent(
 			if (eventId && String(eventId).length > 0) {
 				const parsedPayload = CalendarEventUpdateSchema.parse(payload);
 
-				await tx
+				// RLS: only an event of the caller's workspace is updated; the
+				// worker job below runs with the service role.
+				const [updated] = await tx
 					.update(calendarEvents)
 					.set(parsedPayload)
-					.where(eq(calendarEvents.id, String(eventId)));
+					.where(eq(calendarEvents.id, String(eventId)))
+					.returning({ id: calendarEvents.id });
 
-				finalEventId = String(eventId);
+				if (!updated) throw new Error("calendar.eventNotFound");
+
+				finalEventId = updated.id;
 			} else {
 				const parsedPayload = CalendarEventInsertSchema.parse(payload);
 				const [calendarEvent] = await tx
@@ -391,10 +396,15 @@ export async function upsertCalendarEvent(
 			throw new Error("calendar.failedToPersistEvent");
 		}
 
-		const { davQueue } = await getRedis();
-		await davQueue.add(
+		await getQueue("dav-worker").add(
 			eventId ? "dav:calendar:update-event" : "dav:calendar:create-event",
 			{ eventId: finalEventId, notifyAttendees: notify },
+			{
+				attempts: 3,
+				backoff: { type: "exponential", delay: 1500 },
+				removeOnComplete: true,
+				removeOnFail: { age: 7 * 24 * 3600 },
+			},
 		);
 
 		revalidatePath("/dashboard/calendar");
@@ -743,6 +753,46 @@ export type FetchContactsForAttendeesResult = Awaited<
 	ReturnType<typeof getContactsForAttendeeIds>
 >;
 
+/**
+ * Queue an iTIP reply after checking through RLS that the event and the
+ * attendee belong to the caller's workspace (the worker uses the service
+ * role and would otherwise answer for any event).
+ */
+async function sendItipReply(
+	input: { eventId: string; attendeeId: string },
+	partstat: "accepted" | "declined" | "tentative",
+) {
+	const eventId = String(input.eventId ?? "");
+	const attendeeId = String(input.attendeeId ?? "");
+	if (!eventId || !attendeeId) throw new Error("calendar.eventNotFound");
+
+	const rls = await rlsClient();
+	const [row] = await rls((tx) =>
+		tx
+			.select({ attendeeId: calendarEventAttendees.id })
+			.from(calendarEventAttendees)
+			.innerJoin(
+				calendarEvents,
+				eq(calendarEvents.id, calendarEventAttendees.eventId),
+			)
+			.where(
+				and(
+					eq(calendarEventAttendees.id, attendeeId),
+					eq(calendarEvents.id, eventId),
+				),
+			)
+			.limit(1),
+	);
+	if (!row) throw new Error("calendar.eventNotFound");
+
+	await addJobAndWait(
+		"dav-worker",
+		"dav:calendar:itip-reply",
+		{ eventId, attendeeId, partstat },
+		{ removeOnComplete: true, removeOnFail: { age: 24 * 3600 } },
+	);
+}
+
 export async function yesCalendarInvite(
 	_prev: FormState,
 	formData: FormData,
@@ -754,13 +804,7 @@ export async function yesCalendarInvite(
 			attendeeId: string;
 		};
 
-		const { davQueue, davEvents } = await getRedis();
-		const job = await davQueue.add("dav:calendar:itip-reply", {
-			eventId: decodedForm.eventId,
-			attendeeId: decodedForm.attendeeId,
-			partstat: "accepted",
-		});
-		await job.waitUntilFinished(davEvents);
+		await sendItipReply(decodedForm, "accepted");
 		revalidatePath("/dashboard/calendar");
 		return { success: true };
 	});
@@ -777,13 +821,7 @@ export async function noCalendarInvite(
 			attendeeId: string;
 		};
 
-		const { davQueue, davEvents } = await getRedis();
-		const job = await davQueue.add("dav:calendar:itip-reply", {
-			eventId: decodedForm.eventId,
-			attendeeId: decodedForm.attendeeId,
-			partstat: "declined",
-		});
-		await job.waitUntilFinished(davEvents);
+		await sendItipReply(decodedForm, "declined");
 		revalidatePath("/dashboard/calendar");
 		return { success: true };
 	});
@@ -800,13 +838,7 @@ export async function maybeCalendarInvite(
 			attendeeId: string;
 		};
 
-		const { davQueue, davEvents } = await getRedis();
-		const job = await davQueue.add("dav:calendar:itip-reply", {
-			eventId: decodedForm.eventId,
-			attendeeId: decodedForm.attendeeId,
-			partstat: "tentative",
-		});
-		await job.waitUntilFinished(davEvents);
+		await sendItipReply(decodedForm, "tentative");
 		revalidatePath("/dashboard/calendar");
 		return { success: true };
 	});

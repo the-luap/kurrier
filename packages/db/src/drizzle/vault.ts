@@ -1,4 +1,4 @@
-import {and, eq} from "drizzle-orm";
+import {and, eq, inArray} from "drizzle-orm";
 import { createDrizzleClientInstance } from "./drizzle-client";
 import { secretsMeta } from "./schema";
 import { createDb } from "./init-db";
@@ -164,6 +164,49 @@ export async function getSecret(
 	};
 
 	return { metaSecret: meta, vault };
+}
+
+/**
+ * Batched getSecret: one RLS transaction and one SELECT for all ids.
+ * Throws like getSecret when any id is missing or not visible.
+ */
+export async function getSecrets(
+	session: string,
+	ids: string[],
+	workspaceId?: string,
+) {
+	const unique = Array.from(new Set(ids.filter(Boolean).map(String)));
+	const result = new Map<
+		string,
+		{ metaSecret: typeof secretsMeta.$inferSelect; vault: DecryptedEntity }
+	>();
+	if (!unique.length) return result;
+
+	const { rls } = await createDrizzleClientInstance(session, { workspaceId });
+	const rows = await rls((tx) =>
+		tx.select().from(secretsMeta).where(inArray(secretsMeta.id, unique)),
+	);
+
+	for (const meta of rows) {
+		const value = decrypt({
+			encryptedValue: (meta as any).encryptedValue,
+			iv: (meta as any).iv,
+			authTag: (meta as any).authTag,
+		});
+		result.set(String(meta.id), {
+			metaSecret: meta,
+			vault: {
+				id: String(meta.id),
+				name: (meta as any).name ?? null,
+				description: (meta as any).description ?? null,
+				decrypted_secret: value,
+			},
+		});
+	}
+
+	if (result.size !== unique.length) throw new Error("Not found or not allowed");
+
+	return result;
 }
 
 export async function updateSecret(

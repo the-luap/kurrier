@@ -7,7 +7,8 @@ on:
 
 jobs:
   build-and-push:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    # Upstream release flow only; never runs in forks (fork images: build-images.yml).
+    if: ${{ github.repository == 'kurrier-org/kurrier' && github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

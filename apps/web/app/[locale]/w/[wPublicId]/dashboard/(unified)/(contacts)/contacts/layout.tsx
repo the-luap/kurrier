@@ -19,29 +19,44 @@ export default async function ContactsLayout({
 	params: Promise<{ locale: string }>;
 }) {
 	const { locale } = await params;
-	const dict = await getDictionary(locale);
 	const rls = await rlsClient();
-	const rows = await rls((tx) =>
-		tx
-			.select({
-				contact: contacts,
-				labelSlug: labels.slug,
-			})
-			.from(contacts)
-			.leftJoin(contactLabels, eq(contactLabels.contactId, contacts.id))
-			.leftJoin(labels, eq(labels.id, contactLabels.labelId)),
-	);
+
+	// Only the columns the list renders: this array is serialized into the
+	// client component, so full rows (vCard, notes, addresses, phones, DAV
+	// metadata, ...) for every contact would bloat the RSC payload.
+	const [dict, rows, workspacePublicId, [userBook]] = await Promise.all([
+		getDictionary(locale),
+		rls((tx) =>
+			tx
+				.select({
+					contact: {
+						id: contacts.id,
+						publicId: contacts.publicId,
+						firstName: contacts.firstName,
+						lastName: contacts.lastName,
+						company: contacts.company,
+						emails: contacts.emails,
+						profilePictureXs: contacts.profilePictureXs,
+						addressBookId: contacts.addressBookId,
+					},
+					labelSlug: labels.slug,
+				})
+				.from(contacts)
+				.leftJoin(contactLabels, eq(contactLabels.contactId, contacts.id))
+				.leftJoin(labels, eq(labels.id, contactLabels.labelId)),
+		),
+		getWorkspacePublicId(),
+		rls((tx) => tx.select().from(addressBooks).limit(1)),
+	]);
 
 	const grouped = new Map<string, ContactWithFavorite & { labels: string[] }>();
 
 	for (const row of rows) {
-		const existing =
-			grouped.get(row.contact.id) ??
-			({
-				...row.contact,
-				isFavorite: false,
-				labels: [],
-			} as ContactWithFavorite & { labels: string[] });
+		const existing = grouped.get(row.contact.id) ?? {
+			...row.contact,
+			isFavorite: false,
+			labels: [],
+		};
 
 		if (row.labelSlug && !existing.labels.includes(row.labelSlug)) {
 			existing.labels.push(row.labelSlug);
@@ -73,9 +88,6 @@ export default async function ContactsLayout({
 			return { path: key, signedUrl };
 		}),
 	);
-
-	const workspacePublicId = await getWorkspacePublicId();
-	const [userBook] = await rls((tx) => tx.select().from(addressBooks));
 
 	return (
 		<>

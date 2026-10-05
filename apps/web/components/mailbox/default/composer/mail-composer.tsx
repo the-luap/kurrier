@@ -46,6 +46,10 @@ import {
     type EmailSignatureResult,
 } from "@/lib/actions/email-signatures";
 
+import {
+    toEmailHtml,
+    validateAttachment,
+} from "./composer-utils";
 import MailComposerBody from "./mail-composer-body";
 import MailComposerFooter from "./mail-composer-footer";
 import MailComposerHeader from "./mail-composer-header";
@@ -214,14 +218,18 @@ export default function MailComposer({
         },
         onUpdate: ({ editor }) => {
             setHtml(
-                editor
-                    .getHTML()
-                    .trim(),
+                toEmailHtml(
+                    editor.getHTML(),
+                ),
             );
 
+            // Single line breaks between paragraphs in the plain-text part.
             setText(
                 editor
-                    .getText()
+                    .getText({
+                        blockSeparator:
+                            "\n",
+                    })
                     .trim(),
             );
         },
@@ -342,7 +350,23 @@ export default function MailComposer({
         dict,
     ]);
 
+    // React to each send result once: the parent passes an inline onClose,
+    // so this effect re-runs on every parent render and would repeat the
+    // toast (and the close) for the same result.
+    const handledFormStateRef =
+        useRef<FormState | null>(null);
+
     useEffect(() => {
+        if (
+            handledFormStateRef.current ===
+            formState
+        ) {
+            return;
+        }
+
+        handledFormStateRef.current =
+            formState;
+
         if (formState.error) {
             toast.error(
                 dict?.common?.error ??
@@ -377,6 +401,25 @@ export default function MailComposer({
     const uploadFile = async (
         file: File,
     ) => {
+        const validationError =
+            validateAttachment(
+                file,
+                dict,
+            );
+
+        if (validationError) {
+            toast.error(
+                dict?.common?.error ??
+                "Error",
+                {
+                    description:
+                    validationError,
+                },
+            );
+
+            return;
+        }
+
         const uploadId = uuidv4();
 
         setUploads((current) => [

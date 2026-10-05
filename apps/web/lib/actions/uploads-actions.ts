@@ -9,6 +9,7 @@ import {s3} from "@/lib/create-s3-client";
 import {emailAssets, messages} from "@db";
 import {eq} from "drizzle-orm";
 import {getWorkspaceId, rlsClient} from "@/lib/actions/clients";
+import {isOwnUploadKey} from "@/lib/upload-keys";
 
 export async function createAttachmentUploadUrl(input: {
     fileName: string;
@@ -19,11 +20,16 @@ export async function createAttachmentUploadUrl(input: {
     if (!user) throw new Error("Unauthorized");
     const { S3_BUCKET } = getServerEnv();
 
-    const ext = input.fileName.includes(".")
-        ? input.fileName.split(".").pop()
+    // Only a safe extension and folder name end up in the key.
+    const rawExt = input.fileName.includes(".")
+        ? String(input.fileName.split(".").pop() ?? "")
         : "";
+    const ext = /^[A-Za-z0-9]{1,16}$/.test(rawExt) ? rawExt : "";
+    const folder = /^[A-Za-z0-9_-]{1,100}$/.test(String(input.messageId ?? ""))
+        ? String(input.messageId)
+        : crypto.randomUUID();
 
-    const key = `private/${user.id}/${input.messageId}/${crypto.randomUUID()}${
+    const key = `private/${user.id}/${folder}/${crypto.randomUUID()}${
         ext ? `.${ext}` : ""
     }`;
 
@@ -47,6 +53,11 @@ export async function createAttachmentUploadUrl(input: {
 export async function createAttachmentDownloadUrl(path: string) {
     const user = await isSignedIn();
     if (!user) throw new Error("Unauthorized");
+    // Only the caller's own composer uploads; message attachments, EMLs and
+    // drive files have their own (RLS-checked) download paths.
+    if (!isOwnUploadKey(String(path ?? ""), user.id)) {
+        throw new Error("Not found");
+    }
     const { S3_BUCKET } = getServerEnv();
     const command = new GetObjectCommand({
         Bucket: S3_BUCKET!,
@@ -92,6 +103,22 @@ export async function uploadContactProfileAction(params: {
     thumbPath: string;
 }) {
     const { mainFile, thumbFile, mainPath, thumbPath } = params;
+
+    // This action writes to the bucket with the server's credentials: only
+    // signed-in users, only into their own contacts folder, images only.
+    const user = await isSignedIn();
+    if (!user) throw new Error("Unauthorized");
+    const contactsPrefix = `private/${user.id}/contacts/`;
+    for (const path of [mainPath, thumbPath]) {
+        if (!String(path ?? "").startsWith(contactsPrefix) || !isOwnUploadKey(String(path), user.id)) {
+            throw new Error("Invalid upload path");
+        }
+    }
+    for (const file of [mainFile, thumbFile]) {
+        if (!String(file?.type ?? "").startsWith("image/") || file.size > 20 * 1024 * 1024) {
+            throw new Error("Invalid image");
+        }
+    }
 
     const mainBuffer = Buffer.from(await mainFile.arrayBuffer());
     const thumbBuffer = Buffer.from(await thumbFile.arrayBuffer());

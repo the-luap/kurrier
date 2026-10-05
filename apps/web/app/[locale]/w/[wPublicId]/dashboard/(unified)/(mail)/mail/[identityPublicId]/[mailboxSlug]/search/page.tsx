@@ -43,29 +43,34 @@ export default async function SearchPage({
 		);
 	}
 
-	const { activeMailbox } = await fetchMailbox(identityPublicId, mailboxSlug);
 	const publicConfig = await getPublicEnv();
 
-	let items: ThreadHit[] = [];
-	let totalThreads = 0;
-	let totalMessages = 0;
+	// Independent loaders: one round trip instead of a waterfall.
+	const [{ activeMailbox }, searchResult, identityMailboxes, globalLabels] =
+		await Promise.all([
+			fetchMailbox(identityPublicId, mailboxSlug),
+			q.trim()
+				? initSearch(
+						q,
+						workspacePublicId,
+						identityPublicId,
+						mailboxSlug,
+						has,
+						unread,
+						starred,
+						page,
+					)
+				: Promise.resolve(null),
+			fetchIdentityMailboxList(),
+			fetchLabelsByIdentityPublicId({
+				identityPublicId,
+				scope: "thread",
+			}),
+		]);
 
-	if (q.trim()) {
-		const res = await initSearch(
-			q,
-			workspacePublicId,
-			identityPublicId,
-			mailboxSlug,
-			has,
-			unread,
-			starred,
-			page,
-		);
-
-		items = res.items ?? [];
-		totalThreads = res.totalThreads ?? items.length;
-		totalMessages = res.totalMessages ?? items.length;
-	}
+	const items: ThreadHit[] = searchResult?.items ?? [];
+	const totalThreads = searchResult?.totalThreads ?? items.length;
+	const totalMessages = searchResult?.totalMessages ?? items.length;
 
 	const total = totalThreads || items.length;
 	const totalPages = Math.max(1, Math.ceil((total || 1) / PAGE_SIZE));
@@ -76,12 +81,6 @@ export default async function SearchPage({
 		threadIds.length > 0
 			? await fetchMailboxThreadsList(activeMailbox.id, threadIds)
 			: { threads: [] };
-
-	const identityMailboxes = await fetchIdentityMailboxList();
-	const globalLabels = await fetchLabelsByIdentityPublicId({
-		identityPublicId,
-		scope: "thread",
-	});
 
 	const labelsByThreadId =
 		threads.length > 0 ? await fetchMailboxThreadLabels(threads) : {};

@@ -132,6 +132,16 @@ export default function MailIdentities({
 		() => userIdentities.filter((i) => i.identities.kind === "domain"),
 		[userIdentities],
 	);
+	const incomingByIdentityId = useMemo(
+		() =>
+			new Map(
+				userIdentities.map((i) => [
+					i.identities.id,
+					!!i.identities.incomingDomain,
+				]),
+			),
+		[userIdentities],
+	);
 
 	const [query, setQuery] = React.useState("");
 
@@ -823,7 +833,12 @@ export default function MailIdentities({
 															</>
 														) : (
 															<EmailIdentityStatus
-																userIdentity={userIdentity}
+																incoming={
+																	!!userIdentity.identities.domainIdentityId &&
+																	!!incomingByIdentityId.get(
+																		userIdentity.identities.domainIdentityId,
+																	)
+																}
 															/>
 														)}
 													</div>

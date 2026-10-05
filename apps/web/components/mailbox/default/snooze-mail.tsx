@@ -1,16 +1,19 @@
 "use client";
 
-import React, { useMemo, useState } from "react";
-import { Button, Divider, Modal, Tooltip } from "@mantine/core";
-import { useDisclosure } from "@mantine/hooks";
-import { DateTimePicker } from "@mantine/dates";
-import { getTimeZones } from "@vvo/tzdb";
-import { getDayjsTz } from "@common/day-js-extended";
-import { Dayjs } from "dayjs";
-import { CalendarClock, Clock4, X } from "lucide-react";
-import { snoozeThread } from "@/lib/actions/mailbox";
+import { Tooltip } from "@mantine/core";
+import { Clock4 } from "lucide-react";
+import dynamic from "next/dynamic";
+import { useState } from "react";
+import { toast } from "sonner";
 import { useOptionalI18n } from "@/components/providers/dictionary-provider";
+import { snoozeThread } from "@/lib/actions/mailbox";
 
+// Loaded on first open: keeps @vvo/tzdb, @mantine/dates and two Modals out
+// of every mailbox row.
+const SnoozeMailDialog = dynamic(
+	() => import("@/components/mailbox/default/snooze-mail-dialog"),
+	{ ssr: false },
+);
 
 type Props = {
 	mailboxThreadId: string;
@@ -30,49 +33,20 @@ export default function SnoozeMail({
 		initialSnoozedUntil,
 	);
 	const [saving, setSaving] = useState(false);
-
-	const [presetsOpened, presetsDisclosure] = useDisclosure(false);
-	const [pickerOpened, pickerDisclosure] = useDisclosure(false);
-
-	const localTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-	const tzs = getTimeZones();
-	const tzName = tzs.find((tz) => tz.group.includes(localTz));
-	const dayjsTz = getDayjsTz(localTz);
-
-	const presets = useMemo(
-		() => [
-			{
-				label: dict?.mailbox?.laterToday ?? "Later today",
-				date: dayjsTz().add(2, "h"),
-			},
-			{
-				label: dict?.mailbox?.tomorrowMorning ?? "Tomorrow morning",
-				date: dayjsTz().endOf("d").add(8, "h").add(1, "m"),
-			},
-			{
-				label: dict?.mailbox?.tomorrowAfternoon ?? "Tomorrow afternoon",
-				date: dayjsTz().endOf("d").add(13, "h").add(1, "m"),
-			},
-			{
-				label: dict?.mailbox?.mondayMorning ?? "Monday morning",
-				date: dayjsTz().endOf("w").add(8, "h").add(1, "m"),
-			},
-		],
-		[dayjsTz, dict],
-	);
-
-	const [pickerValue, setPickerValue] = useState<Dayjs>(() => dayjsTz());
-	const pickerDateValue = useMemo(
-		() => (pickerValue.isValid() ? pickerValue.toDate() : null),
-		[pickerValue],
-	);
+	const [dialogOpen, setDialogOpen] = useState(false);
+	// Mount the (lazy) dialog on first open and keep it mounted afterwards so
+	// the Modal open/close transitions still play.
+	const [dialogLoaded, setDialogLoaded] = useState(false);
 
 	const snoozed = !!snoozedUntil;
-
-	const label = useMemo(() => {
-		if (!snoozedUntil) return dict?.mailbox?.snooze ?? "Snooze";
-		return `${dict?.mailbox?.snoozedBullet ?? "Snoozed • "}${format?.date(snoozedUntil, { dateStyle: "medium", timeStyle: "short" }) ?? ""}`;
-	}, [snoozedUntil, dict]);
+	const label = snoozedUntil
+		? `${dict?.mailbox?.snoozedBullet ?? "Snoozed • "}${
+				format?.date(snoozedUntil, {
+					dateStyle: "medium",
+					timeStyle: "short",
+				}) ?? snoozedUntil.toLocaleString()
+			}`
+		: (dict?.mailbox?.snooze ?? "Snooze");
 
 	async function commit(next: Date | null) {
 		if (saving) return;
@@ -86,8 +60,12 @@ export default function SnoozeMail({
 			});
 
 			setSnoozedUntil(next);
-			presetsDisclosure.close();
-			pickerDisclosure.close();
+			setDialogOpen(false);
+		} catch (error) {
+			toast.error(dict?.mailbox?.actionFailed ?? "Action failed", {
+				description: error instanceof Error ? error.message : undefined,
+				position: "bottom-left",
+			});
 		} finally {
 			setSaving(false);
 		}
@@ -95,110 +73,28 @@ export default function SnoozeMail({
 
 	return (
 		<>
-			<Modal
-				centered
-				opened={pickerOpened}
-				onClose={pickerDisclosure.close}
-				title={
-					<span className="text-xl">{dict?.mailbox?.snooze ?? "Snooze"}</span>
-				}
-				size="sm"
-				zIndex={1003}
-			>
-				<DateTimePicker
-					label={dict?.mailbox?.pickDateAndTime ?? "Pick date and time"}
-					placeholder={dict?.mailbox?.pickDateAndTime ?? "Pick date and time"}
-					value={pickerDateValue}
-					onChange={(val) => {
-						if (!val) return;
-						const d = dayjsTz(val);
-						if (d.isValid()) setPickerValue(d);
-					}}
-					valueFormat={
-						format?.hourCycle() === "h23" || format?.hourCycle() === "h24"
-							? "DD.MM.YYYY HH:mm"
-							: "DD MMM hh:mm A"
-					}
-					popoverProps={{ zIndex: 1004 }}
-					className="my-4"
-					timePickerProps={{
-						withDropdown: true,
-						popoverProps: { withinPortal: false },
-						format:
-							format?.hourCycle() === "h23" || format?.hourCycle() === "h24"
-								? "24h"
-								: "12h",
-					}}
-					disabled={saving}
+			{dialogLoaded && (
+				<SnoozeMailDialog
+					opened={dialogOpen}
+					saving={saving}
+					onCommit={(next) => void commit(next)}
+					onClose={() => setDialogOpen(false)}
 				/>
-
-				<Button
-					fullWidth
-					loading={saving}
-					onClick={() => {
-						if (!pickerValue?.isValid?.()) return;
-						commit(pickerValue.toDate());
-					}}
-				>
-					{dict?.mailbox?.snooze ?? "Snooze"}
-				</Button>
-			</Modal>
-
-			<Modal
-				centered
-				opened={presetsOpened}
-				closeOnClickOutside={false}
-				onClose={presetsDisclosure.close}
-				title={
-					<span className="text-xl">{dict?.mailbox?.snooze ?? "Snooze"}</span>
-				}
-				size="sm"
-				zIndex={1001}
-			>
-				<div className="my-2 p-2 font-semibold">
-					{tzName?.alternativeName} ({tzName?.abbreviation})
-				</div>
-
-				{presets.map((preset) => (
-					<button
-						key={preset.label}
-						type="button"
-						disabled={saving}
-						className="w-full items-center px-2 text-left rounded hover:bg-gray-100 flex gap-4 justify-between dark:hover:bg-neutral-700 disabled:opacity-50"
-						onClick={() => commit(preset.date.toDate())}
-					>
-						<span className="my-1">{preset.label}</span>
-						<span>{format?.date(preset.date.toDate(), { dateStyle: "medium", timeStyle: "short" }) ?? ""}</span>
-					</button>
-				))}
-
-				<Divider my="lg" variant="dashed" />
-
-				<Button
-					leftSection={<CalendarClock size={16} />}
-					variant="light"
-					fullWidth
-					disabled={saving}
-					onClick={() => {
-						presetsDisclosure.close();
-						pickerDisclosure.open();
-					}}
-				>
-					{dict?.mailbox?.pickDateAndTime ?? "Pick date and time"}
-				</Button>
-			</Modal>
+			)}
 
 			<div className="inline-flex items-center gap-1 mx-1">
 				<Tooltip label={label} withArrow position="top" openDelay={250}>
 					<button
 						type="button"
 						disabled={saving}
+						aria-label={label}
 						onClick={() => {
 							if (snoozed) {
-								commit(null);
+								void commit(null);
 								return;
 							}
-							presetsDisclosure.open();
+							setDialogLoaded(true);
+							setDialogOpen(true);
 						}}
 					>
 						<Clock4 size={16} />

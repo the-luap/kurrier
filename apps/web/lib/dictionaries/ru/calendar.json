@@ -3,6 +3,8 @@
 	"emptyTitle": "Пока нет календаря",
 	"emptyDescription": "Подключите почтовый адрес, чтобы создать календарь.",
 	"today": "Сегодня",
+	"previousPeriod": "Назад",
+	"nextPeriod": "Вперёд",
 	"viewDay": "день",
 	"viewWeek": "неделя",
 	"viewMonth": "месяц",
@@ -77,5 +79,6 @@
   "intervalDaysCount": {"one": "день", "few": "дня", "many": "дней", "other": "дня"},
   "intervalWeeksCount": {"one": "неделя", "few": "недели", "many": "недель", "other": "недели"},
   "intervalMonthsCount": {"one": "месяц", "few": "месяца", "many": "месяцев", "other": "месяца"},
-  "intervalYearsCount": {"one": "год", "few": "года", "many": "лет", "other": "года"}
+  "intervalYearsCount": {"one": "год", "few": "года", "many": "лет", "other": "года"},
+  "eventNotFound": "Событие не найдено."
 }

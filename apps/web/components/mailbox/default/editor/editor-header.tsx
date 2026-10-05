@@ -134,7 +134,6 @@ function EditorHeader({ focusOnSubject }: { focusOnSubject?: () => void }) {
 					<RecipientRow label={dict?.mailbox?.to ?? "To"}>
 						<EmailHeaderContacts
 							name="to"
-							maxTags={1}
 							toEmail={toEmail}
 							onChange={handleRecipientChange}
 						/>

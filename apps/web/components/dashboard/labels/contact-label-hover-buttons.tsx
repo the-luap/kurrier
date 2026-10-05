@@ -9,7 +9,7 @@ import {
 import { useOptionalDictionary } from "@/components/providers/dictionary-provider";
 
 type ContactLabelHoverButtonsProps = {
-	contact: ContactEntity;
+	contact: Pick<ContactEntity, "id">;
 	allLabels: LabelEntity[];
 	labelsByContactId: FetchContactLabelsByIdResult;
 };

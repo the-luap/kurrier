@@ -3,6 +3,8 @@
 	"emptyTitle": "No calendar yet",
 	"emptyDescription": "Connect an email identity to create your calendar.",
 	"today": "Today",
+	"previousPeriod": "Previous",
+	"nextPeriod": "Next",
 	"viewDay": "day",
 	"viewWeek": "week",
 	"viewMonth": "month",
@@ -77,5 +79,6 @@
   "intervalDaysCount": {"one": "day", "other": "days", "few": "days", "many": "days"},
   "intervalWeeksCount": {"one": "week", "other": "weeks", "few": "weeks", "many": "weeks"},
   "intervalMonthsCount": {"one": "month", "other": "months", "few": "months", "many": "months"},
-  "intervalYearsCount": {"one": "year", "other": "years", "few": "years", "many": "years"}
+  "intervalYearsCount": {"one": "year", "other": "years", "few": "years", "many": "years"},
+  "eventNotFound": "Event not found."
 }

@@ -17,24 +17,26 @@ export default async function SnoozedPage({
 	const { identityPublicId, locale } = await params;
 	const dict = await getDictionary(locale);
 	const publicConfig = await getPublicEnv();
-	const identityMailboxes = await fetchIdentityMailboxList();
-	const globalLabels = await fetchLabels();
-
-	const { threads } = await fetchIdentitySnoozedThreads();
-	const labelsByThreadId =
-		threads.length > 0 ? await fetchMailboxThreadLabels(threads) : {};
-
-	const firstMailboxSlug = threads[0]?.mailboxSlug || "inbox";
-	const { activeMailbox } = await fetchMailbox(
-		identityPublicId,
-		firstMailboxSlug,
-	);
+	// Independent loaders: one round trip instead of a waterfall.
+	const [identityMailboxes, globalLabels, { threads }, workspacePublicId] =
+		await Promise.all([
+			fetchIdentityMailboxList(),
+			fetchLabels(),
+			fetchIdentitySnoozedThreads(),
+			getWorkspacePublicId(),
+		]);
 
 	const filteredThreads = threads.filter(
 		(thread) => thread.identityPublicId === identityPublicId,
 	);
+	const firstMailboxSlug = filteredThreads[0]?.mailboxSlug || "inbox";
 
-	const workspacePublicId = await getWorkspacePublicId();
+	const [labelsByThreadId, { activeMailbox }] = await Promise.all([
+		filteredThreads.length > 0
+			? fetchMailboxThreadLabels(filteredThreads)
+			: Promise.resolve({}),
+		fetchMailbox(identityPublicId, firstMailboxSlug),
+	]);
 
 	return (
 		<div className="p-4 space-y-4">
@@ -42,7 +44,7 @@ export default async function SnoozedPage({
 				<h1 className="text-lg font-semibold">{dict.mailbox.snoozed}</h1>
 				<div className="text-sm text-muted-foreground">
 					{dict.mailbox.threadsCountPrefix}
-					{threads.length}
+					{filteredThreads.length}
 				</div>
 			</header>
 

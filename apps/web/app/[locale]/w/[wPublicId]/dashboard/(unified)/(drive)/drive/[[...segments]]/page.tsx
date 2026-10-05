@@ -5,12 +5,9 @@ import DriveEntriesGrid from "@/components/dashboard/drive/drive-entries-grid";
 import NewUploadButton from "@/components/dashboard/drive/new-upload-button";
 import { Button } from "@/components/ui/button";
 import { getWorkspacePublicId } from "@/lib/actions/clients";
-import {
-	fetchCloudListPath,
-	fetchVolumes,
-	normalizeWithinPath,
-} from "@/lib/actions/drive";
+import { fetchCloudListPath } from "@/lib/actions/drive";
 import { getDictionary, type Locale } from "@/lib/dictionaries";
+import { getDriveRouteContext, getDriveVolumes } from "./route-context";
 
 export default async function Page({
 									   params,
@@ -18,12 +15,14 @@ export default async function Page({
 	params: Promise<{ locale: Locale; segments?: string[] }>;
 }) {
 	const { locale, segments } = await params;
-	const dict = await getDictionary(locale);
-	const ctx = await normalizeWithinPath(segments ?? []);
-	const workspacePublicId = await getWorkspacePublicId();
+	const [dict, ctx, workspacePublicId] = await Promise.all([
+		getDictionary(locale),
+		getDriveRouteContext(segments),
+		getWorkspacePublicId(),
+	]);
 
 	if (!ctx.driveVolume) {
-		const volumes = await fetchVolumes();
+		const volumes = await getDriveVolumes();
 		const storageHref = `/w/${workspacePublicId}/dashboard/platform/storage`;
 
 		if (volumes.length === 0) {

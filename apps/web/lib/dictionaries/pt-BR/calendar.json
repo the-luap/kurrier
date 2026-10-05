@@ -3,6 +3,8 @@
 	"emptyTitle": "Nenhum calendário ainda",
 	"emptyDescription": "Conecte uma identidade de e-mail para criar seu calendário.",
 	"today": "Hoje",
+	"previousPeriod": "Anterior",
+	"nextPeriod": "Próximo",
 	"viewDay": "dia",
 	"viewWeek": "semana",
 	"viewMonth": "mês",
@@ -77,5 +79,6 @@
   "intervalDaysCount": {"one": "dia", "other": "dias", "few": "dias", "many": "dias"},
   "intervalWeeksCount": {"one": "semana", "other": "semanas", "few": "semanas", "many": "semanas"},
   "intervalMonthsCount": {"one": "mês", "other": "meses", "few": "meses", "many": "meses"},
-  "intervalYearsCount": {"one": "ano", "other": "anos", "few": "anos", "many": "anos"}
+  "intervalYearsCount": {"one": "ano", "other": "anos", "few": "anos", "many": "anos"},
+  "eventNotFound": "Evento não encontrado."
 }

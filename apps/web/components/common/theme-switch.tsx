@@ -1,31 +1,34 @@
 import { Switch } from "@mantine/core";
 import { IconMoonStars, IconSun } from "@tabler/icons-react";
-import React, { useEffect, useMemo, useState } from "react";
+import { useSyncExternalStore } from "react";
 import { useAppearance } from "@/components/providers/appearance-provider";
 import { useOptionalDictionary } from "@/components/providers/dictionary-provider";
+
+const DARK_QUERY = "(prefers-color-scheme: dark)";
+
+function subscribePrefersDark(onChange: () => void) {
+	const mq = window.matchMedia(DARK_QUERY);
+	mq.addEventListener("change", onChange);
+	return () => mq.removeEventListener("change", onChange);
+}
+
+// Hydration-safe (server snapshot = false) and follows OS changes, unlike a
+// one-off `window.matchMedia` read memoized on mount.
+function usePrefersDark() {
+	return useSyncExternalStore(
+		subscribePrefersDark,
+		() => window.matchMedia(DARK_QUERY).matches,
+		() => false,
+	);
+}
 
 function ThemeSwitch({ onComplete }: { onComplete?: () => void }) {
 	const { mode, setMode } = useAppearance();
 	const dict = useOptionalDictionary();
+	const prefersDark = usePrefersDark();
 
-	const [mounted, setMounted] = useState(false);
-
-	useEffect(() => {
-		setMounted(true);
-	}, []);
-
-	const prefersDark = useMemo(() => {
-		if (typeof window === "undefined") return false;
-		return window.matchMedia("(prefers-color-scheme: dark)").matches;
-	}, []);
-
-	const isDark = useMemo(() => {
-		if (mode === "dark") return true;
-		if (mode === "light") return false;
-		return prefersDark; // mode === "system"
-	}, [mode, prefersDark]);
-
-	if (!mounted) return null;
+	const isDark =
+		mode === "dark" ? true : mode === "light" ? false : prefersDark;
 
 	return (
 		<Switch
@@ -33,7 +36,7 @@ function ThemeSwitch({ onComplete }: { onComplete?: () => void }) {
 			checked={!isDark}
 			onChange={(e) => {
 				setMode(e.currentTarget.checked ? "light" : "dark");
-				onComplete && onComplete();
+				onComplete?.();
 			}}
 			onLabel={<IconSun size={16} stroke={2.5} />}
 			offLabel={<IconMoonStars size={16} stroke={2.5} />}

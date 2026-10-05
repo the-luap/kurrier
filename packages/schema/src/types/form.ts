@@ -48,12 +48,28 @@ function toMessage(e: unknown): string {
 	}
 }
 
+/**
+ * Next.js implements redirect()/notFound() by throwing. Those errors must
+ * reach the framework instead of being turned into a form error.
+ */
+function isNextControlFlowError(e: unknown): boolean {
+	if (!e || typeof e !== "object") return false;
+	const digest = (e as { digest?: unknown }).digest;
+	return (
+		typeof digest === "string" &&
+		(digest.startsWith("NEXT_REDIRECT") ||
+			digest.startsWith("NEXT_HTTP_ERROR_FALLBACK") ||
+			digest === "NEXT_NOT_FOUND")
+	);
+}
+
 export async function handleAction<T extends FormState<any>>(
 	fn: () => Promise<T>,
 ): Promise<T> {
 	try {
 		return await fn();
 	} catch (e) {
+		if (isNextControlFlowError(e)) throw e;
 		return {
 			success: false,
 			error: toMessage(e),

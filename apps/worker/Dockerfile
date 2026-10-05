@@ -13,8 +13,12 @@ WORKDIR /repo/apps/worker
 ENV NITRO_PRESET=node-server
 RUN pnpm run build
 
-RUN rm -rf .output/server/node_modules/.nitro/nodemailer@9.0.6 \
-    && cp -RL node_modules/nodemailer .output/server/node_modules/.nitro/nodemailer@9.0.6
+# Replace nitro's traced nodemailer copy with the full package (whatever
+# version the lockfile resolves, so a nodemailer bump does not break this).
+RUN for d in .output/server/node_modules/nodemailer .output/server/node_modules/.nitro/nodemailer@*; do \
+      [ -d "$d" ] || continue; \
+      rm -rf "$d" && cp -RL node_modules/nodemailer "$d"; \
+    done
 
 FROM node:24.20.0-alpine
 WORKDIR /app

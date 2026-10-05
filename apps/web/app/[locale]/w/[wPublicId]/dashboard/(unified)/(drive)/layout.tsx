@@ -12,7 +12,7 @@ import { SidebarInset } from "@/components/ui/sidebar";
 import { DynamicContextProvider } from "@/hooks/use-dynamic-context";
 import { isSignedIn } from "@/lib/actions/auth";
 import { getWorkspacePublicId } from "@/lib/actions/clients";
-import { fetchVolumes } from "@/lib/actions/drive";
+import { getDriveVolumes } from "./drive/[[...segments]]/route-context";
 import { DISTRIBUTION_CONFIG } from "@distribution/config";
 import WorkspaceLogo from "@/components/common/workspace-logo";
 
@@ -25,7 +25,7 @@ async function DriveDashboard({ children }: { children: React.ReactNode }) {
 		redirect(`/w/${workspacePublicId}/dashboard/mail`);
 	}
 
-	const [vols, user] = await Promise.all([fetchVolumes(), isSignedIn()]);
+	const [vols, user] = await Promise.all([getDriveVolumes(), isSignedIn()]);
 
 	const initialState: DriveState = {
 		localVolumes: [],

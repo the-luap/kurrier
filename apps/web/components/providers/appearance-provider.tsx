@@ -6,6 +6,7 @@ import React, {
 	useContext,
 	useEffect,
 	useMemo,
+	useRef,
 	useState,
 	useTransition,
 } from "react";
@@ -27,7 +28,11 @@ type AppearanceCtx = {
 	pending: boolean;
 };
 
+type ResolvedMode = "light" | "dark";
+
 const Ctx = createContext<AppearanceCtx | null>(null);
+
+const DARK_QUERY = "(prefers-color-scheme: dark)";
 
 function applyMode(isDark: boolean) {
 	const el = document.documentElement;
@@ -38,13 +43,16 @@ function applyMode(isDark: boolean) {
 }
 
 export function AppearanceProvider({
-									   children,
-									   initialTheme,
-									   initialMode,
-								   }: {
+	children,
+	initialTheme,
+	initialMode,
+	initialResolved,
+}: {
 	children: React.ReactNode;
 	initialTheme: ThemeName;
 	initialMode: ThemeMode;
+	/** Value of the resolved-mode cookie the server rendered with (if any). */
+	initialResolved?: ResolvedMode;
 }) {
 	const router = useRouter();
 	const [pending, start] = useTransition();
@@ -53,6 +61,9 @@ export function AppearanceProvider({
 	const [mode, setModeState] = useState<ThemeMode>(initialMode);
 
 	const activeTheme = workspaceTheme ?? theme;
+	// Last resolved value persisted in the cookie; avoids a server action round
+	// trip on every page load in "system" mode when nothing changed.
+	const persistedResolved = useRef<ResolvedMode | undefined>(initialResolved);
 
 	useEffect(() => {
 		setThemeState(initialTheme);
@@ -63,21 +74,21 @@ export function AppearanceProvider({
 	}, [activeTheme]);
 
 	useEffect(() => {
-		if (mode === "dark") {
-			applyMode(true);
+		if (mode === "dark" || mode === "light") {
+			applyMode(mode === "dark");
+			// setModeServer already stores the resolved cookie for explicit modes.
+			persistedResolved.current = mode;
 			return;
 		}
 
-		if (mode === "light") {
-			applyMode(false);
-			return;
-		}
-
-		const media = window.matchMedia("(prefers-color-scheme: dark)");
+		const media = window.matchMedia(DARK_QUERY);
 
 		const syncSystemMode = (isDark: boolean) => {
 			applyMode(isDark);
-			void setResolvedServer(isDark ? "dark" : "light");
+			const resolved: ResolvedMode = isDark ? "dark" : "light";
+			if (persistedResolved.current === resolved) return;
+			persistedResolved.current = resolved;
+			void setResolvedServer(resolved);
 		};
 
 		syncSystemMode(media.matches);
@@ -106,7 +117,7 @@ export function AppearanceProvider({
 				router.refresh();
 			});
 		},
-		[workspaceTheme, router, start],
+		[workspaceTheme, router],
 	);
 
 	const setMode = useCallback(
@@ -116,7 +127,7 @@ export function AppearanceProvider({
 			const isDark =
 				nextMode === "dark" ||
 				(nextMode === "system" &&
-					window.matchMedia("(prefers-color-scheme: dark)").matches);
+					window.matchMedia(DARK_QUERY).matches);
 
 			applyMode(isDark);
 
@@ -125,7 +136,7 @@ export function AppearanceProvider({
 				router.refresh();
 			});
 		},
-		[router, start],
+		[router],
 	);
 
 	const value = useMemo(

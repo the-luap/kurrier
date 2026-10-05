@@ -1,8 +1,7 @@
 import {
     fetchIdentityMailboxList,
-    fetchIdentitySnoozedThreads,
     fetchMailboxUnreadCounts,
-    fetchScheduledDraftCounts
+    fetchMailSidebarCounts,
 } from "@/lib/actions/mailbox";
 import {getWorkspacePublicId} from "@/lib/actions/clients";
 import {fetchLabelsWithCounts} from "@/lib/actions/labels";
@@ -26,16 +25,16 @@ async function IdentityMailboxesListWrapper() {
         getWorkspacePublicId()
     ]);
 
-    const scheduledDraftsPromise = fetchScheduledDraftCounts();
-    const snoozedThreadsPromise = fetchIdentitySnoozedThreads()
+    // Streams in after the folder tree: counts only, no draft payloads or
+    // whole thread rows.
+    const sidebarCountsPromise = fetchMailSidebarCounts();
 
     return (
         <>
             <IdentityMailboxesList
                 identityMailboxes={identityMailboxes}
                 unreadCounts={unreadCounts}
-                scheduledDraftsPromise={scheduledDraftsPromise}
-                snoozedThreadsPromise={snoozedThreadsPromise}
+                sidebarCountsPromise={sidebarCountsPromise}
                 workspacePublicId={workspacePublicId}
             />
 

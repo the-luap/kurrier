@@ -4,7 +4,7 @@ import {
 	apiKeys, createSecret, davAccounts,
 	db, deleteSecretAdmin, draftMessages, driveEntries,
 	driveVolumes,
-	getSecret, googleAccounts,
+	getSecret, getSecrets, googleAccounts,
 	identities,
 	IdentityCreate,
 	IdentityEntity,
@@ -25,6 +25,7 @@ import {
 	DomainIdentityFormSchema,
 	FormState, getCustomEmailProviders,
 	getPublicEnv,
+	getServerEnv,
 	handleAction,
 	MailboxKindDisplay,
 	materializeCustomEmailProvider,
@@ -51,10 +52,10 @@ import { z } from "zod";
 import slugify from "@sindresorhus/slugify";
 import {getWorkspaceId, getWorkspaceRole, rlsClient} from "@/lib/actions/clients";
 import { v4 as uuidv4 } from "uuid";
-import {backfillGoogleMailboxes, backfillMailboxes, clearImapClients} from "@/lib/actions/mailbox";
+import {queueGmailBackfill, queueImapBackfill, queueStopIdle} from "@/lib/mail-jobs";
 import { kvGet } from "@common";
 import { nanoid } from "nanoid";
-import { getRedis } from "@/lib/actions/get-redis";
+import { addJobAndWait, getQueue } from "@/lib/actions/get-redis";
 import {
 	checkDefaultWorkspaceIdentity,
 } from "@/lib/actions/workspace";
@@ -70,6 +71,16 @@ import { access } from "@/lib/actions/shared";
 
 const DASHBOARD_PATH = "/w/[workspaceId]/dashboard/providers";
 const CURRENT_API_VERSION = 1;
+
+// Mailgun, Postmark and SendGrid can't send custom headers, so the worker
+// also accepts the inbound webhook secret as a ?token= query parameter.
+const withInboundWebhookToken = (url: string) => {
+	const secret = getServerEnv().INBOUND_WEBHOOK_SECRET;
+	if (!secret) return url;
+	const withToken = new URL(url);
+	withToken.searchParams.set("token", secret);
+	return withToken.toString();
+};
 
 export const syncProviders = async () => {
 	const rls = await rlsClient();
@@ -353,11 +364,19 @@ export async function fetchDecryptedSecrets({
 		return q;
 	});
 
+	// One RLS round trip for all secrets instead of one client and
+	// transaction per row.
+	const workspaceId = rows.length ? await getWorkspaceId() : undefined;
+	const secretsById = await getSecrets(
+		session,
+		rows.map((r) => String(r.metaId)),
+		workspaceId,
+	);
+
 	return Promise.all(
 		rows.map(async (r) => {
 			const metaId = String(r.metaId);
-			const workspaceId = await getWorkspaceId();
-			const { vault } = await getSecret(session, metaId, workspaceId);
+			const { vault } = secretsById.get(metaId)!;
 
 			const payload = {
 				linkRow: r.linkRow,
@@ -467,7 +486,9 @@ export async function initializeDomainIdentity(
 			const { WEB_URL } = getPublicEnv();
 			const localTunnelUrl = await kvGet("local-tunnel-url");
 			const url = localTunnelUrl ? localTunnelUrl : WEB_URL;
-			opts.webHookUrl = `${url}/api/v1/hooks/sendgrid/inbound`;
+			opts.webHookUrl = withInboundWebhookToken(
+				`${url}/api/v1/hooks/sendgrid/inbound`,
+			);
 		}
 		const identity = await mailer.addDomain(String(data?.value), opts);
 
@@ -533,9 +554,13 @@ export async function verifyDomainIdentity(
 			const localTunnelUrl = await kvGet("local-tunnel-url");
 			const url = localTunnelUrl ? localTunnelUrl : WEB_URL;
 			if (providerAccount?.provider?.type === "mailgun") {
-				opts.webHookUrl = `${url}/api/v1/hooks/${providerAccount?.provider?.type}/mime`;
+				opts.webHookUrl = withInboundWebhookToken(
+					`${url}/api/v1/hooks/${providerAccount?.provider?.type}/mime`,
+				);
 			} else {
-				opts.webHookUrl = `${url}/api/v1/hooks/${providerAccount?.provider?.type}/inbound`;
+				opts.webHookUrl = withInboundWebhookToken(
+					`${url}/api/v1/hooks/${providerAccount?.provider?.type}/inbound`,
+				);
 			}
 		}
 
@@ -594,19 +619,44 @@ const initializeEmailIdentity = async (
 	});
 };
 
-export const initializeMailboxes = async (emailIdentity: IdentityEntity, userId: string, workspaceId: string) => {
+export const initializeMailboxes = async (clientIdentity: IdentityEntity, _userId: string, _workspaceId: string) => {
+	// Exported server action: never trust the identity object passed in.
+	// Reload it and require it to live in the caller's (membership-checked)
+	// workspace. Not an RLS select: a freshly created identity that is not
+	// shared and not assigned to the creator is invisible through RLS.
+	const sessionUser = await isSignedIn();
+	if (!sessionUser?.id) throw new Error("Not authenticated");
+	const currentWorkspaceId = await getWorkspaceId();
+	const [emailIdentity] = await db
+		.select()
+		.from(identities)
+		.where(
+			and(
+				eq(identities.id, String(clientIdentity?.id)),
+				eq(identities.workspaceId, currentWorkspaceId),
+			),
+		)
+		.limit(1);
+	if (!emailIdentity) throw new Error("Identity not found");
 	if (emailIdentity.kind !== "email") return;
 
-	if ((emailIdentity.metaData as any)?.provider === "google") {
-		await backfillGoogleMailboxes(
-			emailIdentity.id,
-			emailIdentity.workspaceId,
+	const isRemote =
+		(emailIdentity.metaData as any)?.provider === "google" ||
+		Boolean(emailIdentity.smtpAccountId);
+	if (isRemote && !(await access("canSyncMail")).canSyncMail) {
+		console.info(
+			`[backfill:${emailIdentity.id}] mail sync disabled for workspace ${emailIdentity.workspaceId}`,
 		);
 		return;
 	}
 
+	if ((emailIdentity.metaData as any)?.provider === "google") {
+		await queueGmailBackfill(emailIdentity.id, emailIdentity.workspaceId);
+		return;
+	}
+
 	if (emailIdentity.smtpAccountId) {
-		await backfillMailboxes(emailIdentity.id, emailIdentity.workspaceId);
+		await queueImapBackfill(emailIdentity.id, emailIdentity.workspaceId);
 		return;
 	}
 
@@ -623,8 +673,8 @@ export const initializeMailboxes = async (emailIdentity: IdentityEntity, userId:
 	const rls = await rlsClient();
 	await rls(async (tx) => {
 		await tx.insert(mailboxes).values(rows).onConflictDoNothing().returning();
-		const { davQueue } = await getRedis();
-		await davQueue.add("dav:create-identity", { identityId: emailIdentity.id, userId, workspaceId }, { jobId: `identity-dav-bootstrap-${emailIdentity.id}` });
+		// Server-side values only: the arguments come from the caller.
+		await getQueue("dav-worker").add("dav:create-identity", { identityId: emailIdentity.id, userId: sessionUser.id, workspaceId: emailIdentity.workspaceId }, { jobId: `identity-dav-bootstrap-${emailIdentity.id}`, removeOnComplete: true, removeOnFail: { age: 7 * 24 * 3600 } });
 		return
 	});
 	return rows;
@@ -973,16 +1023,8 @@ export const deleteDomainIdentity = async (
 	});
 };
 
-const cleanupIdentity = async (identityId: string, workspaceId: string) => {
-	const { davQueue, davEvents } = await getRedis();
-	const job = await davQueue.add("dav:delete:identity", { identityId , workspaceId }, { jobId: `identity-dav-cleanup-${identityId}` });
-	await job.waitUntilFinished(davEvents);
-};
-
 const enqueueIdentityCleanup = async (identityId: string, workspaceId: string) => {
-	const { davQueue } = await getRedis();
-
-	await davQueue.add(
+	await getQueue("dav-worker").add(
 		"dav:delete:identity",
 		{ identityId, workspaceId },
 		{
@@ -999,9 +1041,23 @@ const enqueueIdentityCleanup = async (identityId: string, workspaceId: string) =
 };
 
 export const deleteEmailIdentity = async (
-	userIdentity: FetchUserIdentitiesResult[number],
+	clientIdentity: FetchUserIdentitiesResult[number],
 ) => {
 	return handleAction(async () => {
+		// The argument comes from the browser. Reload the row through RLS so
+		// only an identity of the caller's workspace can be deleted, and use
+		// the stored provider/account data instead of the client copy.
+		const rls = await rlsClient();
+		const [userIdentity] = await rls((tx) =>
+			tx
+				.select()
+				.from(identities)
+				.leftJoin(smtpAccounts, eq(identities.smtpAccountId, smtpAccounts.id))
+				.leftJoin(providers, eq(identities.providerId, providers.id))
+				.where(eq(identities.id, String(clientIdentity?.identities?.id)))
+				.limit(1),
+		);
+		if (!userIdentity) throw new Error("Identity not found");
 		const identity = userIdentity.identities;
 		const isGoogle = identity?.metaData?.provider === "google";
 
@@ -1039,7 +1095,7 @@ export const deleteEmailIdentity = async (
 				});
 			}
 		} else {
-			await clearImapClients(identity.id);
+			await queueStopIdle(identity.id);
 		}
 
 		await enqueueIdentityCleanup(identity.id, identity.workspaceId);
@@ -1439,13 +1495,17 @@ export type FetchUserAPIKeysResult = Awaited<
 
 
 export const regenerateDavPassword = async () => {
-	const { davEvents, davQueue } = await getRedis();
 	const user = await isSignedIn();
+	if (!user?.id) throw new Error("Not authenticated");
 	const workspaceId = await getWorkspaceId();
-	const job = await davQueue.add("dav:update-password", { userId: user?.id, workspaceId });
-	await job.waitUntilFinished(davEvents);
+	const result = await addJobAndWait(
+		"dav-worker",
+		"dav:update-password",
+		{ userId: user.id, workspaceId },
+		{ removeOnComplete: true, removeOnFail: { age: 24 * 3600 } },
+	);
 	revalidatePath("/w/[workspaceId]/dashboard/platform/sync-services");
-	return job.returnvalue;
+	return result;
 };
 
 export async function addNewVolume(_prev: FormState, formData: FormData) {

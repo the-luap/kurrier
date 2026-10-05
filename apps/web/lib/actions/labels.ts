@@ -1,6 +1,5 @@
 "use server";
 
-import { isGmailIdentity } from "@common";
 import { PAGE_SIZE } from "@common/mail-client";
 import {
 	contactLabels,
@@ -19,7 +18,8 @@ import { decode } from "decode-formdata";
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { getWorkspaceId, rlsClient } from "@/lib/actions/clients";
-import { getRedis } from "@/lib/actions/get-redis";
+import { addBulkAndWait, addJobAndWait } from "@/lib/actions/get-redis";
+import { isGmailMetaData } from "@/lib/mail-jobs";
 import type { FetchMailboxThreadsResult } from "@/lib/actions/mailbox";
 
 const DEFAULT_JOB_OPTS = {
@@ -144,13 +144,17 @@ export type FetchContactLabelsWithCountResult = Awaited<
 	ReturnType<typeof fetchContactLabelsWithCounts>
 >;
 
+// Only labels of the caller's workspace (RLS).
 async function fetchDescendantLabelIds(parentId: string): Promise<string[]> {
-	const rows = await db
-		.select({
-			id: labels.id,
-			parentId: labels.parentId,
-		})
-		.from(labels);
+	const rls = await rlsClient();
+	const rows = await rls((tx) =>
+		tx
+			.select({
+				id: labels.id,
+				parentId: labels.parentId,
+			})
+			.from(labels),
+	);
 
 	const childrenByParent = new Map<string, string[]>();
 
@@ -175,10 +179,36 @@ async function fetchDescendantLabelIds(parentId: string): Promise<string[]> {
 }
 
 async function enqueueGmailJob(name: string, data: Record<string, unknown>) {
-	const { gmailQueue, gmailEvents } = await getRedis();
+	await addJobAndWait("gmail-worker", name, data, DEFAULT_JOB_OPTS);
+}
 
-	const job = await gmailQueue.add(name, data, DEFAULT_JOB_OPTS);
-	await job.waitUntilFinished(gmailEvents);
+/**
+ * Labels visible through RLS (the caller's workspace), with whether their
+ * identity is a Gmail identity. Gmail jobs run with the service role, so
+ * they are only queued for labels returned here.
+ */
+async function fetchOwnedLabels(labelIds: string[]) {
+	const ids = Array.from(new Set(labelIds.filter(Boolean).map(String)));
+	if (!ids.length) return [];
+	const rls = await rlsClient();
+	const rows = await rls((tx) =>
+		tx
+			.select({ label: labels, identityMeta: identities.metaData })
+			.from(labels)
+			.leftJoin(identities, eq(identities.id, labels.identityId))
+			.where(inArray(labels.id, ids)),
+	);
+	return rows.map((row) => {
+		const gmailLabelId = (row.label.metaData as any)?.gmail?.labelId as
+			| string
+			| undefined;
+		return {
+			label: row.label,
+			isGmail:
+				Boolean(row.label.identityId) && isGmailMetaData(row.identityMeta),
+			gmailLabelId: gmailLabelId ?? null,
+		};
+	});
 }
 
 export async function addNewLabel(
@@ -201,22 +231,30 @@ export async function addNewLabel(
 
 		let isGmail = false;
 
+		const rls = await rlsClient();
+
 		if (decodedForm.scope === "thread") {
-			const [identity] = await db
-				.select()
-				.from(identities)
-				.where(eq(identities.publicId, String(decodedForm.identityPublicId)))
-				.limit(1);
+			// RLS: only an identity of the caller's workspace.
+			const [identity] = await rls((tx) =>
+				tx
+					.select({ id: identities.id, metaData: identities.metaData })
+					.from(identities)
+					.where(eq(identities.publicId, String(decodedForm.identityPublicId)))
+					.limit(1),
+			);
 
 			if (!identity) {
 				return { success: false, error: "labels.invalidIdentity" };
 			}
 
 			payload.identityId = identity.id;
-			isGmail = await isGmailIdentity(identity.id);
+			isGmail = isGmailMetaData(identity.metaData);
 		}
 
-		const rls = await rlsClient();
+		if (payload.parentId) {
+			const [parent] = await fetchOwnedLabels([String(payload.parentId)]);
+			if (!parent) return { success: false, error: "Invalid parent label" };
+		}
 
 		const newLabelRows = await rls((tx) =>
 			tx
@@ -248,25 +286,35 @@ export async function addLabelToThread({
 	labelId: string;
 }): Promise<FormState> {
 	return handleAction(async () => {
-		const [thread] = await db
-			.select({
-				ownerId: mailboxThreads.ownerId,
-				workspaceId: mailboxThreads.workspaceId,
-			})
-			.from(mailboxThreads)
-			.where(
-				and(
-					eq(mailboxThreads.threadId, threadId),
-					eq(mailboxThreads.mailboxId, mailboxId),
-				),
-			)
-			.limit(1);
+		const rls = await rlsClient();
+
+		// Thread and label must both be the caller's (RLS) before the worker
+		// is asked to label anything.
+		const [[thread], [owned]] = await Promise.all([
+			rls((tx) =>
+				tx
+					.select({
+						ownerId: mailboxThreads.ownerId,
+						workspaceId: mailboxThreads.workspaceId,
+					})
+					.from(mailboxThreads)
+					.where(
+						and(
+							eq(mailboxThreads.threadId, threadId),
+							eq(mailboxThreads.mailboxId, mailboxId),
+						),
+					)
+					.limit(1),
+			),
+			fetchOwnedLabels([labelId]),
+		]);
 
 		if (!thread) {
 			throw new Error(`Mailbox thread not found: ${threadId} / ${mailboxId}`);
 		}
-
-		const rls = await rlsClient();
+		if (!owned) {
+			throw new Error("Label not found");
+		}
 
 		await rls((tx) =>
 			tx
@@ -281,23 +329,12 @@ export async function addLabelToThread({
 				.onConflictDoNothing(),
 		);
 
-		const [label] = await db
-			.select()
-			.from(labels)
-			.where(eq(labels.id, labelId))
-			.limit(1);
-
-		if (label?.identityId) {
-			const isGmail = await isGmailIdentity(label.identityId);
-			const gmailLabelId = (label.metaData as any)?.gmail?.labelId;
-
-			if (isGmail && gmailLabelId) {
-				await enqueueGmailJob("gmail:thread-label:add", {
-					threadId,
-					mailboxId,
-					labelId,
-				});
-			}
+		if (owned.isGmail && owned.gmailLabelId) {
+			await enqueueGmailJob("gmail:thread-label:add", {
+				threadId,
+				mailboxId,
+				labelId,
+			});
 		}
 
 		revalidatePath("/");
@@ -317,7 +354,7 @@ export async function removeLabelFromThread({
 	return handleAction(async () => {
 		const rls = await rlsClient();
 
-		await rls((tx) =>
+		const removed = await rls((tx) =>
 			tx
 				.delete(mailboxThreadLabels)
 				.where(
@@ -326,26 +363,19 @@ export async function removeLabelFromThread({
 						eq(mailboxThreadLabels.mailboxId, mailboxId),
 						eq(mailboxThreadLabels.labelId, labelId),
 					),
-				),
+				)
+				.returning({ labelId: mailboxThreadLabels.labelId }),
 		);
 
-		const [label] = await db
-			.select()
-			.from(labels)
-			.where(eq(labels.id, labelId))
-			.limit(1);
+		// Only a row RLS let us delete proves thread and label are ours.
+		const [owned] = removed.length ? await fetchOwnedLabels([labelId]) : [];
 
-		if (label?.identityId) {
-			const isGmail = await isGmailIdentity(label.identityId);
-			const gmailLabelId = (label.metaData as any)?.gmail?.labelId;
-
-			if (isGmail && gmailLabelId) {
-				await enqueueGmailJob("gmail:thread-label:remove", {
-					threadId,
-					mailboxId,
-					labelId,
-				});
-			}
+		if (owned?.isGmail && owned.gmailLabelId) {
+			await enqueueGmailJob("gmail:thread-label:remove", {
+				threadId,
+				mailboxId,
+				labelId,
+			});
 		}
 
 		revalidatePath("/");
@@ -531,49 +561,41 @@ export type FetchMailboxThreadsByLabelResult = Awaited<
 
 export const deleteLabel = async ({ id }: { id: string }) => {
 	try {
-		const labelIdsToDelete = [id, ...(await fetchDescendantLabelIds(id))];
-
-		const rows = await db
-			.select()
-			.from(labels)
-			.where(inArray(labels.id, labelIdsToDelete));
-
-		const { gmailQueue } = await getRedis();
-
-		for (const label of rows) {
-			const isGmail = label.identityId
-				? await isGmailIdentity(label.identityId)
-				: false;
-
-			const gmailLabelId = (label.metaData as any)?.gmail?.labelId;
-
-			if (isGmail && gmailLabelId) {
-				await gmailQueue.add(
-					"gmail:label:delete",
-					{ labelId: label.id },
-					DEFAULT_JOB_OPTS,
-				);
-			}
-
-			// if (isGmail && gmailLabelId) {
-			// 	await enqueueGmailJob("gmail:label:delete", {
-			// 		labelId: label.id,
-			// 	});
-			// }
+		// Ownership first (RLS), then the Gmail jobs, then the rows: the
+		// worker reads the label row, so it must still exist while the job
+		// runs.
+		const owned = await fetchOwnedLabels([id]);
+		if (!owned.length) {
+			return { success: false, error: "Label not found" };
 		}
+
+		const labelIdsToDelete = [id, ...(await fetchDescendantLabelIds(id))];
+		const rows = await fetchOwnedLabels(labelIdsToDelete);
+		const ownedIds = rows.map((row) => row.label.id);
+
+		await addBulkAndWait(
+			"gmail-worker",
+			rows
+				.filter((row) => row.isGmail && row.gmailLabelId)
+				.map((row) => ({
+					name: "gmail:label:delete",
+					data: { labelId: row.label.id },
+					opts: DEFAULT_JOB_OPTS,
+				})),
+		);
 
 		const rls = await rlsClient();
 
 		await rls(async (tx) => {
 			await tx
 				.delete(mailboxThreadLabels)
-				.where(inArray(mailboxThreadLabels.labelId, labelIdsToDelete));
+				.where(inArray(mailboxThreadLabels.labelId, ownedIds));
 
 			await tx
 				.delete(contactLabels)
-				.where(inArray(contactLabels.labelId, labelIdsToDelete));
+				.where(inArray(contactLabels.labelId, ownedIds));
 
-			await tx.delete(labels).where(inArray(labels.id, labelIdsToDelete));
+			await tx.delete(labels).where(inArray(labels.id, ownedIds));
 		});
 
 		revalidatePath("/");
@@ -596,13 +618,22 @@ export const updateLabel = async ({
 	color: string;
 }) => {
 	try {
-		const [oldLabel] = await db
-			.select()
-			.from(labels)
-			.where(eq(labels.id, id))
-			.limit(1);
+		const [owned] = await fetchOwnedLabels([id]);
+		if (!owned) {
+			return { success: false, error: "Label not found" };
+		}
+		if (parentId) {
+			if (parentId === id) {
+				return { success: false, error: "Invalid parent label" };
+			}
+			const [parent] = await fetchOwnedLabels([parentId]);
+			if (!parent) return { success: false, error: "Invalid parent label" };
+		}
 
 		const descendantIds = await fetchDescendantLabelIds(id);
+		if (parentId && descendantIds.includes(parentId)) {
+			return { success: false, error: "Invalid parent label" };
+		}
 
 		const rls = await rlsClient();
 
@@ -619,16 +650,15 @@ export const updateLabel = async ({
 				.where(eq(labels.id, id)),
 		);
 
-		const isGmail = oldLabel?.identityId
-			? await isGmailIdentity(oldLabel.identityId)
-			: false;
-
-		if (isGmail) {
-			for (const labelId of [id, ...descendantIds]) {
-				await enqueueGmailJob("gmail:label:update", {
-					labelId,
-				});
-			}
+		if (owned.isGmail) {
+			await addBulkAndWait(
+				"gmail-worker",
+				[id, ...descendantIds].map((labelId) => ({
+					name: "gmail:label:update",
+					data: { labelId },
+					opts: DEFAULT_JOB_OPTS,
+				})),
+			);
 		}
 
 		revalidatePath("/");

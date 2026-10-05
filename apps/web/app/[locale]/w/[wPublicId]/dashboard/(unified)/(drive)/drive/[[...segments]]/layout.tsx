@@ -8,7 +8,7 @@ import { Separator } from "@/components/ui/separator";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { isSignedIn } from "@/lib/actions/auth";
 import { getWorkspacePublicId } from "@/lib/actions/clients";
-import { normalizeWithinPath } from "@/lib/actions/drive";
+import { getDriveRouteContext } from "./route-context";
 
 async function DriveHeader({
 	params,
@@ -22,7 +22,7 @@ async function DriveHeader({
 	const { segments } = await params;
 
 	const [ctx, user, workspacePublicId] = await Promise.all([
-		normalizeWithinPath(segments ?? []),
+		getDriveRouteContext(segments),
 		isSignedIn(),
 		getWorkspacePublicId(),
 	]);

@@ -10,7 +10,6 @@ import {
 import { decode } from "decode-formdata";
 import { eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
-import React from "react";
 import NewContactForm from "@/components/dashboard/contacts/new-contact-form";
 import { isSignedIn } from "@/lib/actions/auth";
 import { getWorkspacePublicId, rlsClient } from "@/lib/actions/clients";
@@ -21,7 +20,7 @@ import { getDictionary, type Locale } from "@/lib/dictionaries";
 async function Page({
 	params,
 }: {
-	params: { contactsPublicId: string; locale: Locale };
+	params: Promise<{ contactsPublicId: string; locale: Locale }>;
 }) {
 	const { contactsPublicId, locale } = await params;
 
@@ -39,21 +38,22 @@ async function Page({
 		);
 	}
 
-	let profilePictureUrl: string | null = null;
-
-	if (contact.profilePicture) {
-		const { S3_BUCKET } = getServerEnv();
-		const command = new GetObjectCommand({
-			Bucket: S3_BUCKET!,
-			Key: contact.profilePicture,
-		});
-
-		profilePictureUrl = await getSignedUrl(s3, command, {
-			expiresIn: 600,
-		});
-	}
-
-	const user = await isSignedIn();
+	// Independent lookups in parallel; skip signing when there is no picture.
+	const { S3_BUCKET } = getServerEnv();
+	const [profilePictureUrl, user, workspacePublicId] = await Promise.all([
+		contact.profilePicture
+			? getSignedUrl(
+					s3,
+					new GetObjectCommand({
+						Bucket: S3_BUCKET,
+						Key: contact.profilePicture,
+					}),
+					{ expiresIn: 600 },
+				)
+			: Promise.resolve(null),
+		isSignedIn(),
+		getWorkspacePublicId(),
+	]);
 	const publicConfig = getPublicEnv();
 	const updateContactAction = async (_prev: FormState, formData: FormData) => {
 		"use server";
@@ -91,8 +91,6 @@ async function Page({
 			return { success: true, data: updatedContact };
 		});
 	};
-	const workspacePublicId = await getWorkspacePublicId();
-
 	return (
 		<NewContactForm
 			contact={contact}

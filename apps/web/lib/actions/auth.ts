@@ -5,35 +5,30 @@ import { APP_VERSION } from "@common";
 import { db, identities, users, workspaceMembers, workspaces } from "@db";
 import {type FormState, getPublicEnv, getServerEnv, handleAction} from "@schema";
 import argon2 from "argon2";
-import { Queue, QueueEvents } from "bullmq";
 import { decode } from "decode-formdata";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { type JWTPayload, jwtVerify, SignJWT } from "jose";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
-import { getRedis } from "@/lib/actions/get-redis";
+import { cache } from "react";
+import { getQueue } from "@/lib/actions/get-redis";
 import { updateWorkSpaceContext } from "@/lib/actions/workspace";
 import { DISTRIBUTION_CONFIG } from "@distribution/config";
 import { withLocale } from "@/lib/utils";
 import { kurrierServer } from "@distribution/kurrier-server";
 
 const initProviders = async (userId: string, workspaceId: string) => {
-	const { REDIS_PASSWORD, REDIS_HOST, REDIS_PORT } = getServerEnv();
-
-	const redisConnection = {
-		connection: {
-			host: REDIS_HOST || "redis",
-			port: Number(REDIS_PORT || 6379),
-			password: REDIS_PASSWORD,
-		},
-	};
-
-	const commonWorkerQueue = new Queue("common-worker", redisConnection);
-	const commonWorkerEvents = new QueueEvents("common-worker", redisConnection);
-
-	await commonWorkerEvents.waitUntilReady();
-	await commonWorkerQueue.add("sync-providers", { userId, workspaceId });
+	// Shared per-process queue: a new Queue + QueueEvents per signup leaked
+	// two Redis connections each time.
+	await getQueue("common-worker").add(
+		"sync-providers",
+		{ userId, workspaceId },
+		{ removeOnComplete: true, removeOnFail: { age: 7 * 24 * 3600 } },
+	);
 };
+
+/** Emails are stored and looked up lower-cased and trimmed. */
+const normalizeEmail = (email: string) => String(email ?? "").trim().toLowerCase();
 
 const createUserWorkspace = async (userId: string, name?: string) => {
 	await kurrierServer.hooks.run("workspace.beforeCreate", {
@@ -56,9 +51,7 @@ const applyPendingMigrations = async (
 	workspaceId: string,
 	email: string,
 ) => {
-	const { migrationWorkerQueue } = await getRedis();
-
-	await migrationWorkerQueue.add(
+	await getQueue("migration-worker").add(
 		"migration:run-for-user-after-signup",
 		{ userId, workspaceId, email },
 		{
@@ -102,10 +95,12 @@ export async function createUserWithWorkspace(opts: {
 	passwordHash: string;
 	workspaceName?: string;
 }) {
+	const email = normalizeEmail(opts.email);
 	const [existing] = await db
 		.select()
 		.from(users)
-		.where(eq(users.email, opts.email));
+		.where(sql`lower(${users.email}) = ${email}`)
+		.limit(1);
 
 	if (existing) {
 		return { error: "auth.accountAlreadyExists" };
@@ -114,7 +109,7 @@ export async function createUserWithWorkspace(opts: {
 	const [user] = await db
 		.insert(users)
 		.values({
-			email: opts.email,
+			email,
 			passwordHash: opts.passwordHash,
 		})
 		.returning();
@@ -131,7 +126,7 @@ export async function createUserWithWorkspace(opts: {
 		.onConflictDoNothing();
 
 	await initProviders(user.id, workspace.id);
-	await applyPendingMigrations(user.id, workspace.id, opts.email);
+	await applyPendingMigrations(user.id, workspace.id, email);
 
 	return user;
 }
@@ -156,17 +151,27 @@ export async function login(
 		};
 	}
 
-	const { email, password, locale } = decode(formData) as {
+	const { email: rawEmail, password, locale } = decode(formData) as {
 		email: string;
 		password: string;
 		locale?: string;
 	};
+	const email = normalizeEmail(rawEmail);
 
 	if (!email || !password) {
 		return { error: "auth.missingCredentials" };
 	}
 
-	const [user] = await db.select().from(users).where(eq(users.email, email));
+	// Exact match first (index), then a case-insensitive match for accounts
+	// created before emails were normalized.
+	let [user] = await db.select().from(users).where(eq(users.email, email));
+	if (!user) {
+		[user] = await db
+			.select()
+			.from(users)
+			.where(sql`lower(${users.email}) = ${email}`)
+			.limit(1);
+	}
 
 	if (!user || !user.passwordHash) {
 		return { error: "auth.invalidCredentials" };
@@ -255,7 +260,9 @@ export async function verifyAndDecode(
 	}
 }
 
-export async function isSignedIn() {
+// Deduplicated per request: every rlsClient() call used to verify the JWT
+// and select the user again.
+const isSignedInCached = cache(async () => {
 	const cookieStore = await cookies();
 	const token = cookieStore.get("session")?.value;
 
@@ -279,6 +286,10 @@ export async function isSignedIn() {
 	}
 
 	return user;
+});
+
+export async function isSignedIn() {
+	return isSignedInCached();
 }
 
 export type FetchIsSignedInResult = Awaited<ReturnType<typeof isSignedIn>>;

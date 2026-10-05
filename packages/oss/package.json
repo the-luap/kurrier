@@ -15,7 +15,7 @@
 		"@heroicons/react": "^2.2.0"
 	},
 	"peerDependencies": {
-		"next": "16.3.3",
+		"next": "16.3.8",
 		"react": "19.2.6",
 		"react-dom": "19.2.6",
 		"lucide-react": "^1.37.0"

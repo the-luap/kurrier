@@ -1,6 +1,5 @@
 import { providerSecrets, smtpAccountSecrets } from "@db";
 import { ProviderLabels } from "@schema";
-import React from "react";
 import MailIdentities from "@/components/dashboard/identities/mail-identities";
 import { Separator } from "@/components/ui/separator";
 import { SidebarTrigger } from "@/components/ui/sidebar";
@@ -8,7 +7,7 @@ import {
 	fetchDecryptedSecrets,
 	fetchGoogleAccounts,
 	fetchUserIdentities,
-	getProviderById,
+	syncProviders,
 } from "@/lib/actions/dashboard";
 import {
 	fetchWorkspace,
@@ -21,8 +20,20 @@ import {getWorkspaceRole} from "@/lib/actions/clients";
 
 async function Page({ params }: { params: Promise<{ locale: string }> }) {
 	const { locale } = await params;
-	const dict = await getDictionary(locale);
-	const [userSmtpAccounts, userProviderAccounts] = await Promise.all([
+	// Every lookup is independent (only the member list needs the workspace
+	// id), so run them in parallel instead of one after another.
+	const [
+		dict,
+		userSmtpAccounts,
+		userProviderAccounts,
+		userIdentities,
+		googleAccounts,
+		userProviders,
+		workspace,
+		workspaceUserIdentities,
+		workspaceRole,
+	] = await Promise.all([
+		getDictionary(locale),
 		fetchDecryptedSecrets({
 			linkTable: smtpAccountSecrets,
 			foreignCol: smtpAccountSecrets.accountId,
@@ -33,9 +44,16 @@ async function Page({ params }: { params: Promise<{ locale: string }> }) {
 			foreignCol: providerSecrets.providerId,
 			secretIdCol: providerSecrets.secretId,
 		}),
+		fetchUserIdentities(),
+		fetchGoogleAccounts(),
+		// One query for all providers instead of one getProviderById per account.
+		syncProviders(),
+		fetchWorkspace(),
+		workspaceIdentityAssignments(),
+		getWorkspaceRole(),
 	]);
-	const userIdentities = await fetchUserIdentities();
-	const googleAccounts = await fetchGoogleAccounts();
+	const providersById = new Map(userProviders.map((p) => [p.id, p]));
+	const workspaceMembersPromise = fetchWorkspaceMembers(workspace.id);
 
 	const options = [];
 	const emailProviderTypes = ["ses", "mailgun", "postmark"];
@@ -44,7 +62,7 @@ async function Page({ params }: { params: Promise<{ locale: string }> }) {
 		const secret = parseSecret(providerAccount);
 
 		if (secret.verified) {
-			const provider = await getProviderById(
+			const provider = providersById.get(
 				String(providerAccount.linkRow.providerId),
 			);
 
@@ -91,13 +109,7 @@ async function Page({ params }: { params: Promise<{ locale: string }> }) {
 		}
 	}
 
-	const workspace = await fetchWorkspace();
-	const [workspaceMembers, workspaceUserIdentities, workspaceRole] =
-		await Promise.all([
-			fetchWorkspaceMembers(workspace.id),
-			workspaceIdentityAssignments(),
-			getWorkspaceRole(),
-		]);
+	const workspaceMembers = await workspaceMembersPromise;
 	const canManageIdentityAccess =
 		workspaceRole === "owner" || workspaceRole === "admin";
 

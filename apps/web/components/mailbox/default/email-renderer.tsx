@@ -1,32 +1,50 @@
-// @ts-nocheck
 "use client";
 
 import { getMessageAddress, getMessageName } from "@common/mail-client";
-import type { MessageAttachmentEntity, MessageEntity } from "@db";
-import { Temporal } from "@js-temporal/polyfill";
+import type {
+	MailSubscriptionEntity,
+	MessageAttachmentEntity,
+	MessageEntity,
+} from "@db";
 import { ActionIcon, Button, Menu, Modal } from "@mantine/core";
 import { useDisclosure } from "@mantine/hooks";
-import type { PublicConfig } from "@schema";
+import type { AddressObjectJSON, PublicConfig } from "@schema";
 import slugify from "@sindresorhus/slugify";
-import { Code, Download, EllipsisVertical, Forward, Reply } from "lucide-react";
+import {
+	Ban,
+	Code,
+	Download,
+	EllipsisVertical,
+	Forward,
+	Mail,
+	Reply,
+	Trash2,
+} from "lucide-react";
 import dynamic from "next/dynamic";
-import { useParams } from "next/navigation";
-import type React from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useParams, useRouter } from "next/navigation";
+import { useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { toast } from "sonner";
 
 import ThreadLabelHoverButtons from "@/components/dashboard/labels/thread-label-hover-buttons";
-import MailComposer from "@/components/mailbox/default/composer/mail-composer";
 import EditorAttachmentItem from "@/components/mailbox/default/editor/editor-attachment-item";
+import EmailViewer from "@/components/mailbox/default/email-viewer";
 import MailUnsubscriber from "@/components/mailbox/default/mail-unsubscriber";
+import {
+	formatDateTime,
+	useIsClient,
+} from "@/components/mailbox/default/thread-list-utils";
+import { CLOSE_THREAD_EVENT } from "@/components/mailbox/default/thread-navigation-store";
 import { useOptionalI18n } from "@/components/providers/dictionary-provider";
 import type {
 	FetchLabelsResult,
 	FetchMailboxThreadLabelsResult,
 } from "@/lib/actions/labels";
 import {
+	deleteForever,
 	type FetchIdentityMailboxListResult,
-	type FetchThreadMailSubsResult,
-	markAsRead,
+	markAsUnread,
+	moveToSpam,
+	moveToTrash,
 } from "@/lib/actions/mailbox";
 import { getRawMessageDownloadUrl } from "@/lib/actions/uploads-actions";
 
@@ -34,19 +52,82 @@ const InspectorBar = dynamic(
 	() => import("@/components/dashboard/inspector/inspector-bar"),
 	{
 		ssr: true,
-		loading: () => (
-			<div className="my-5 rounded-xl border bg-card p-6 text-sm text-muted-foreground">
-				Loading message inspector…
-			</div>
-		),
+		loading: () => <InspectorLoading />,
 	},
 );
+
+// The composer (TipTap, Mantine RTE) is only needed once the user replies.
+const MailComposer = dynamic(
+	() => import("@/components/mailbox/default/composer/mail-composer"),
+	{
+		ssr: false,
+		loading: () => <InspectorLoading />,
+	},
+);
+
+function InspectorLoading() {
+	const i18n = useOptionalI18n();
+	return (
+		<div className="my-5 rounded-xl border bg-card p-6 text-sm text-muted-foreground">
+			{i18n?.dict?.mailbox?.loadingEllipsis ?? "Loading…"}
+		</div>
+	);
+}
 
 export type MessageAttachmentWithUrl = MessageAttachmentEntity & {
 	signedUrl: string;
 };
 
 type ComposerMode = "reply" | "forward";
+
+type LooseHeaders = Record<string, { text?: string } | string | undefined>;
+
+function headerText(message: MessageEntity, key: string): string {
+	const value = (message.headersJson as LooseHeaders | null)?.[key];
+	if (!value) return "";
+	return typeof value === "string" ? value : (value.text ?? "");
+}
+
+/** "Name <a@x>, b@y" for every address of a To/Cc field. */
+function formatAddressList(value: unknown): string {
+	if (!value) return "";
+	if (typeof value === "string") return value;
+	const list = (value as AddressObjectJSON).value;
+	if (!Array.isArray(list)) return (value as AddressObjectJSON).text ?? "";
+	return list
+		.map((entry) => {
+			const address = entry?.address ?? "";
+			const name = entry?.name?.trim();
+			if (name && address) return `${name} <${address}>`;
+			return address || name || "";
+		})
+		.filter(Boolean)
+		.join(", ");
+}
+
+/** Formats in the viewer's timezone, on the client only (no SSR mismatch). */
+function LocalDateTime({
+	value,
+	className,
+}: {
+	value: Date | string | null | undefined;
+	className?: string;
+}) {
+	const isClient = useIsClient();
+	const i18n = useOptionalI18n();
+	const date = value ? new Date(value) : null;
+	const valid = date !== null && !Number.isNaN(date.getTime());
+
+	return (
+		<time
+			dateTime={valid ? date.toISOString() : undefined}
+			className={className}
+			suppressHydrationWarning
+		>
+			{isClient && valid ? formatDateTime(date, i18n?.dict?.locale) : ""}
+		</time>
+	);
+}
 
 function getScrollParent(el: HTMLElement): HTMLElement {
 	let parent: HTMLElement | null = el.parentElement;
@@ -147,11 +228,13 @@ function EmailRenderer({
 	threadId,
 	markSmtp,
 	activeMailboxId,
+	activeMailboxKind,
 	mailSubscription,
 	identityMailboxes,
 	allLabels,
 	labelsByThreadId,
-	children,
+	backHref,
+	cidUrls,
 }: {
 	threadIndex: number;
 	numberOfMessages: number;
@@ -161,36 +244,26 @@ function EmailRenderer({
 	threadId: string;
 	markSmtp: boolean;
 	activeMailboxId: string;
-	mailSubscription: FetchThreadMailSubsResult["byMessageId"] | null;
+	activeMailboxKind: string;
+	mailSubscription: MailSubscriptionEntity | null;
 	identityMailboxes: FetchIdentityMailboxListResult;
 	allLabels: FetchLabelsResult;
 	labelsByThreadId: FetchMailboxThreadLabelsResult;
-	children?: React.ReactNode;
+	backHref: string;
+	cidUrls?: Record<string, string>;
 }) {
 	const i18n = useOptionalI18n();
 	const dict = i18n?.dict;
 	const format = i18n?.format;
 	const params = useParams();
+	const router = useRouter();
 	const composerRef = useRef<HTMLDivElement>(null);
-	const formatted = Temporal.Instant.from(message.createdAt.toISOString())
-		.toZonedDateTimeISO(Temporal.Now.timeZoneId())
-		.toLocaleString(dict?.locale ?? "en", {
-			day: "2-digit",
-			month: "short",
-			year: "numeric",
-			hour: "2-digit",
-			minute: "2-digit",
-		});
+	// The received date when known, not when Kurrier stored the message.
+	const messageDate = message.date ?? message.createdAt;
 
 	const [showEditor, setShowEditor] = useState(false);
 
 	const [showEditorMode, setShowEditorMode] = useState<ComposerMode>("reply");
-
-	useEffect(() => {
-		if (activeMailboxId) {
-			markAsRead(threadId, activeMailboxId, markSmtp, true);
-		}
-	}, [activeMailboxId, threadId, markSmtp]);
 
 	useEffect(() => {
 		if (!showEditor) return;
@@ -227,21 +300,10 @@ function EmailRenderer({
 
 			fetch(url)
 				.then((res) => res.text())
-				.then((raw) => setEmailString(raw.slice(0, 10000)));
+				.then((raw) => setEmailString(raw.slice(0, 10000)))
+				.catch(() => setEmailString(null));
 		});
 	}, [opened, message.id]);
-
-	const formattedTime = useMemo(() => {
-		return Temporal.Instant.from(message.createdAt.toISOString())
-			.toZonedDateTimeISO(Temporal.Now.timeZoneId())
-			.toLocaleString(dict?.locale ?? "en", {
-				day: "numeric",
-				month: "long",
-				year: "numeric",
-				hour: "2-digit",
-				minute: "2-digit",
-			});
-	}, [dict?.locale, message.createdAt]);
 
 	const activeIdentityPublicId = useMemo(() => {
 		const routeIdentityPublicId = String(params.identityPublicId ?? "");
@@ -261,6 +323,67 @@ function EmailRenderer({
 		setShowEditorMode(mode);
 		setShowEditor(true);
 	};
+
+	const closeComposer = () => setShowEditor(false);
+
+	const [isActionPending, startAction] = useTransition();
+
+	// Thread-level actions from a message: run, then go back to the list
+	// (the thread left this view, or should stay unread).
+	const runThreadAction = (
+		action: () => Promise<unknown>,
+		successMessage: string,
+	) => {
+		startAction(async () => {
+			try {
+				await action();
+				toast.success(successMessage, { position: "bottom-left" });
+				window.dispatchEvent(new CustomEvent(CLOSE_THREAD_EVENT));
+				router.replace(backHref);
+				router.refresh();
+			} catch (error) {
+				toast.error(dict?.mailbox?.actionFailed ?? "Action failed", {
+					description: error instanceof Error ? error.message : undefined,
+					position: "bottom-left",
+				});
+			}
+		});
+	};
+
+	const markThreadUnread = () =>
+		runThreadAction(
+			() => markAsUnread(threadId, activeMailboxId, markSmtp, true),
+			dict?.mailbox?.markedAsUnread ?? "Marked as unread",
+		);
+
+	const moveThreadToSpam = () =>
+		runThreadAction(
+			() => moveToSpam(threadId, activeMailboxId, markSmtp, true),
+			dict?.mailbox?.movedToSpam ?? "Moved to Spam",
+		);
+
+	const deleteThread = () => {
+		if (activeMailboxKind === "trash") {
+			runThreadAction(
+				() => deleteForever(threadId, activeMailboxId, markSmtp, true),
+				dict?.mailbox?.threadDeletedForever ?? "Thread deleted forever",
+			);
+			return;
+		}
+		runThreadAction(
+			() => moveToTrash(threadId, activeMailboxId, markSmtp, true),
+			dict?.mailbox?.movedToTrash ?? "Messages moved to Trash",
+		);
+	};
+
+	const fromAddress = getMessageAddress(message, "from");
+	const fromName = getMessageName(message, "from");
+	const toList = formatAddressList(message.to);
+	const ccList = formatAddressList(message.cc);
+	const deleteLabel =
+		activeMailboxKind === "trash"
+			? (dict?.mailbox?.deleteForever ?? "Delete forever")
+			: (dict?.mailbox?.delete ?? "Delete");
 
 	return (
 		<>
@@ -286,7 +409,9 @@ function EmailRenderer({
 							{dict?.mailbox?.createdOn ?? "Created on"}
 						</div>
 
-						<div className="px-3 py-2">{formattedTime}</div>
+						<div className="px-3 py-2">
+							<LocalDateTime value={messageDate} />
+						</div>
 					</div>
 
 					<div className="grid grid-cols-1 border-b sm:grid-cols-[160px_minmax(0,1fr)]">
@@ -295,7 +420,7 @@ function EmailRenderer({
 						</div>
 
 						<div className="min-w-0 break-words px-3 py-2">
-							{String(message?.headersJson?.from?.text)}
+							{headerText(message, "from")}
 						</div>
 					</div>
 
@@ -305,7 +430,7 @@ function EmailRenderer({
 						</div>
 
 						<div className="min-w-0 break-words px-3 py-2">
-							{String(message?.headersJson?.to?.text)}
+							{headerText(message, "to")}
 						</div>
 					</div>
 
@@ -315,7 +440,7 @@ function EmailRenderer({
 						</div>
 
 						<div className="min-w-0 break-words px-3 py-2">
-							{message?.headersJson?.subject}
+							{headerText(message, "subject")}
 						</div>
 					</div>
 				</div>
@@ -355,36 +480,35 @@ function EmailRenderer({
 					<div className="min-w-0">
 						<div className="flex min-w-0 flex-col gap-0.5 sm:flex-row sm:items-baseline sm:gap-2">
 							<div className="min-w-0 break-words text-sm font-semibold capitalize">
-								{getMessageName(message, "from") ??
-									slugify(String(getMessageAddress(message, "from")), {
+								{fromName ??
+									slugify(String(fromAddress), {
 										separator: " ",
 									})}
 							</div>
 
 							<div className="min-w-0 break-all text-xs text-muted-foreground sm:truncate">
-								{`<${
-									getMessageAddress(message, "from") ??
-									getMessageName(message, "from")
-								}>`}
+								{`<${fromAddress ?? fromName}>`}
 							</div>
 						</div>
 
-						<div className="mt-1 min-w-0 break-all text-xs text-muted-foreground">
-							{dict?.mailbox?.toLower ?? "to"}{" "}
-							{`<${
-								getMessageAddress(message, "to") ??
-								getMessageName(message, "to")
-							}>`}
-						</div>
+						{toList && (
+							<div className="mt-1 min-w-0 break-words text-xs text-muted-foreground">
+								{dict?.mailbox?.toLower ?? "to"} {toList}
+							</div>
+						)}
+
+						{ccList && (
+							<div className="mt-0.5 min-w-0 break-words text-xs text-muted-foreground">
+								{dict?.mailbox?.ccLower ?? "cc"} {ccList}
+							</div>
+						)}
 					</div>
 
 					<div className="flex min-w-0 items-center justify-between gap-3 border-t pt-2 md:shrink-0 md:border-0 md:pt-0">
-						<time
-							dateTime={message.createdAt.toISOString()}
+						<LocalDateTime
+							value={messageDate}
 							className="min-w-0 text-xs text-muted-foreground sm:whitespace-nowrap"
-						>
-							{formatted}
-						</time>
+						/>
 
 						<div className="flex shrink-0 items-center justify-end gap-1">
 							<ThreadLabelHoverButtons
@@ -400,12 +524,24 @@ function EmailRenderer({
 								variant="transparent"
 								size={44}
 								aria-label={dict?.mailbox?.reply ?? "Reply"}
+								title={dict?.mailbox?.reply ?? "Reply"}
 								onClick={() => openComposer("reply")}
 							>
 								<Reply size={18} />
 							</ActionIcon>
 
-							<Menu shadow="md" width={175} position="bottom-end">
+							<ActionIcon
+								variant="transparent"
+								size={44}
+								aria-label={deleteLabel}
+								title={deleteLabel}
+								disabled={isActionPending}
+								onClick={deleteThread}
+							>
+								<Trash2 size={18} />
+							</ActionIcon>
+
+							<Menu shadow="md" width={200} position="bottom-end">
 								<Menu.Target>
 									<ActionIcon
 										variant="transparent"
@@ -434,6 +570,35 @@ function EmailRenderer({
 									<Menu.Divider />
 
 									<Menu.Item
+										leftSection={<Mail size={14} />}
+										disabled={isActionPending}
+										onClick={markThreadUnread}
+									>
+										{dict?.mailbox?.markAsUnread ?? "Mark as unread"}
+									</Menu.Item>
+
+									{activeMailboxKind !== "spam" && (
+										<Menu.Item
+											leftSection={<Ban size={14} />}
+											disabled={isActionPending}
+											onClick={moveThreadToSpam}
+										>
+											{dict?.mailbox?.markAsSpam ?? "Mark as spam"}
+										</Menu.Item>
+									)}
+
+									<Menu.Item
+										leftSection={<Trash2 size={14} />}
+										color="red"
+										disabled={isActionPending}
+										onClick={deleteThread}
+									>
+										{deleteLabel}
+									</Menu.Item>
+
+									<Menu.Divider />
+
+									<Menu.Item
 										leftSection={<Download size={14} />}
 										onClick={downloadEml}
 									>
@@ -451,7 +616,7 @@ function EmailRenderer({
 			</div>
 
 			<InspectorBar message={message} onDownloadEml={downloadEml}>
-				{children}
+				<EmailViewer message={message} cidUrls={cidUrls} />
 			</InspectorBar>
 
 			{attachments?.length > 0 && (
@@ -511,7 +676,7 @@ function EmailRenderer({
 						activeIdentityPublicId={activeIdentityPublicId}
 						message={message}
 						initialMode={showEditorMode}
-						onClose={() => setShowEditor(false)}
+						onClose={closeComposer}
 					/>
 				</div>
 			)}

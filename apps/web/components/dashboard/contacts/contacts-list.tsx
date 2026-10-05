@@ -7,7 +7,18 @@ import ContactListAvatar from "@/components/dashboard/contacts/contact-list-avat
 import ContactsEmptyState from "@/components/dashboard/contacts/contacts-empty-state";
 import type { ProfileImage } from "@/components/dashboard/contacts/contacts-shell";
 
-export type ContactWithFavorite = ContactEntity & {
+/** Slim contact shape used by the list (only what it renders). */
+export type ContactWithFavorite = Pick<
+	ContactEntity,
+	| "id"
+	| "publicId"
+	| "firstName"
+	| "lastName"
+	| "company"
+	| "emails"
+	| "profilePictureXs"
+	| "addressBookId"
+> & {
 	isFavorite: boolean;
 	labels?: string[];
 };
@@ -28,6 +39,12 @@ function ContactsList({
 		contactsPublicId?: string;
 		labelSlug?: string;
 	};
+
+	// path -> signed URL, built once instead of a linear search per row
+	const signedUrlByPath = new Map<string, string>();
+	for (const img of profileImages ?? []) {
+		if (img?.path && img.signedUrl) signedUrlByPath.set(img.path, img.signedUrl);
+	}
 
 	const filteredUserContacts =
 		params.labelSlug && userContacts
@@ -56,12 +73,9 @@ function ContactsList({
 	return (
 		<div className="min-h-0 flex-1 overflow-y-auto">
 			{finalFilteredUserContacts.map((c) => {
-				const imagePath =
-					c.profilePictureXs && profileImages
-						? (profileImages.find((img) =>
-								img?.path?.includes(c.profilePictureXs as string),
-							)?.signedUrl ?? null)
-						: null;
+				const imagePath = c.profilePictureXs
+					? (signedUrlByPath.get(c.profilePictureXs) ?? null)
+					: null;
 
 				return (
 					<Link

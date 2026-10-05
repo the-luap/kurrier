@@ -3,7 +3,18 @@ import type { MailboxEntity, MailboxSyncEntity } from "@db";
 import { IconStar, IconStarFilled } from "@tabler/icons-react";
 import { Mail, MailOpen, Paperclip, Trash2 } from "lucide-react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { useRouter } from "next/navigation";
+import { memo, useState } from "react";
+import { toast } from "sonner";
+import LabelRowTag from "@/components/dashboard/labels/label-row-tag";
+import ThreadLabelHoverButtons from "@/components/dashboard/labels/thread-label-hover-buttons";
+import SnoozeMail from "@/components/mailbox/default/snooze-mail";
+import {
+	getParticipantNames,
+	getThreadTimeLabel,
+	useIsClient,
+} from "@/components/mailbox/default/thread-list-utils";
+import { useOptionalDictionary } from "@/components/providers/dictionary-provider";
 import type {
 	FetchLabelsResult,
 	FetchMailboxThreadLabelsResult,
@@ -16,187 +27,116 @@ import {
 	toggleStar,
 } from "@/lib/actions/mailbox";
 
+type ThreadRow = FetchMailboxThreadsResult[number];
+
 type Props = {
-	mailboxThreadItem: FetchMailboxThreadsResult[number];
+	mailboxThreadItem: ThreadRow;
 	activeMailbox: MailboxEntity;
-	identityPublicId: string;
 	mailboxSync: MailboxSyncEntity | undefined;
 	globalLabels: FetchLabelsResult;
 	labelsByThreadId: FetchMailboxThreadLabelsResult;
-	workspacePublicId: string;
+	/** e.g. "/w/<ws>/dashboard/mail/<identity>/<mailbox>/threads/" */
+	threadBaseHref: string;
+	isOnSnoozedPage: boolean;
+	selected: boolean;
+	onToggleSelect: (threadId: string, checked: boolean) => void;
 };
 
-import { Temporal } from "@js-temporal/polyfill";
-import { toast } from "sonner";
-import LabelRowTag from "@/components/dashboard/labels/label-row-tag";
-import ThreadLabelHoverButtons from "@/components/dashboard/labels/thread-label-hover-buttons";
-import SnoozeMail from "@/components/mailbox/default/snooze-mail";
-import { useOptionalDictionary } from "@/components/providers/dictionary-provider";
-import { useDynamicContext } from "@/hooks/use-dynamic-context";
+function ThreadTime({ item }: { item: ThreadRow }) {
+	const dict = useOptionalDictionary();
+	// Timezone dependent: rendered on the client only (empty during SSR and
+	// hydration) so server and browser timezones never disagree.
+	const isClient = useIsClient();
+	const timeLabel = isClient
+		? getThreadTimeLabel(item, dict?.mailbox, dict?.locale)
+		: { text: "", className: "text-sm text-foreground", title: "" };
+	return (
+		<time
+			className={["whitespace-nowrap", timeLabel.className].join(" ")}
+			title={timeLabel.title || undefined}
+			suppressHydrationWarning
+		>
+			{timeLabel.text}
+		</time>
+	);
+}
 
-export default function WebmailListItem({
+// Memoized: selecting a row only re-renders the rows whose props changed
+// instead of every row in the list.
+const WebmailListItem = memo(function WebmailListItem({
 	mailboxThreadItem,
 	activeMailbox,
-	identityPublicId,
 	mailboxSync,
 	globalLabels,
 	labelsByThreadId,
-	workspacePublicId,
+	threadBaseHref,
+	isOnSnoozedPage,
+	selected,
+	onToggleSelect,
 }: Props) {
 	const dict = useOptionalDictionary();
+	const router = useRouter();
+	const [isDeleting, setIsDeleting] = useState(false);
+	const [busy, setBusy] = useState(false);
 
-	function formatDateLabel(input?: string | number | Date) {
-		const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-		if (!input) return "";
+	const threadUrl = `${threadBaseHref}${mailboxThreadItem.threadId}`;
+	const allNames = getParticipantNames(mailboxThreadItem.participants);
 
-		let zdt: Temporal.ZonedDateTime;
+	const unreadCount = Number(mailboxThreadItem.unreadCount ?? 0);
+	const isUnread = unreadCount > 0;
+	const isRead = !isUnread;
+	const canMarkAsRead = isUnread;
+	const canMarkAsUnread = mailboxThreadItem.messageCount > 0 && isRead;
+
+	const runAction = async (action: () => Promise<unknown>) => {
+		if (busy) return;
+		setBusy(true);
 		try {
-			const instant = Temporal.Instant.from(new Date(input).toISOString());
-			zdt = instant.toZonedDateTimeISO(tz);
-		} catch {
-			return "";
+			await action();
+		} catch (error) {
+			toast.error(dict?.mailbox?.actionFailed ?? "Action failed", {
+				description: error instanceof Error ? error.message : undefined,
+				position: "bottom-left",
+			});
+		} finally {
+			setBusy(false);
 		}
+	};
 
-		const today = Temporal.Now.zonedDateTimeISO(tz).toPlainDate();
-		const date = zdt.toPlainDate();
-
-		const diffDays = today.since(date, { largestUnit: "day" }).days;
-
-		if (diffDays === 0) {
-			return zdt.toLocaleString(undefined, {
-				hour: "numeric",
-				minute: "2-digit",
+	// Hide the row right away and roll back if the server action fails.
+	const deleteThread = async (e: React.MouseEvent) => {
+		e.preventDefault();
+		e.stopPropagation();
+		setIsDeleting(true);
+		try {
+			await moveToTrash(
+				mailboxThreadItem.threadId,
+				activeMailbox.id,
+				!!mailboxSync,
+				true,
+			);
+			toast.success(dict?.mailbox?.movedToTrash ?? "Messages moved to Trash", {
+				position: "bottom-left",
+			});
+			router.refresh();
+		} catch (error) {
+			setIsDeleting(false);
+			toast.error(dict?.mailbox?.deleteFailed ?? "Delete failed", {
+				description: error instanceof Error ? error.message : undefined,
+				position: "bottom-left",
 			});
 		}
+	};
 
-		if (date.year === today.year) {
-			return zdt.toLocaleString(undefined, {
-				month: "short",
-				day: "numeric",
-			});
-		}
-
-		return zdt.toLocaleString(undefined, {
-			month: "short",
-			day: "numeric",
-			year: "numeric",
-		});
-	}
-
-	function formatRelative(input?: string | number | Date) {
-		const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-		if (!input) return "";
-
-		let zdt: Temporal.ZonedDateTime;
-		try {
-			const instant = Temporal.Instant.from(new Date(input).toISOString());
-			zdt = instant.toZonedDateTimeISO(tz);
-		} catch {
-			return "";
-		}
-
-		const now = Temporal.Now.zonedDateTimeISO(tz);
-		const dur = now.since(zdt, { largestUnit: "day" });
-
-		const days = Math.abs(dur.days);
-		const hours = Math.abs(dur.hours);
-		const minutes = Math.abs(dur.minutes);
-
-		if (days >= 1)
-			return `${dict?.mailbox?.agoPrefix ?? ""}${days}${dict?.mailbox?.daysAbbr ?? "d ago"}`;
-		if (hours >= 1)
-			return `${dict?.mailbox?.agoPrefix ?? ""}${hours}${dict?.mailbox?.hoursAbbr ?? "h ago"}`;
-		if (minutes >= 1)
-			return `${dict?.mailbox?.agoPrefix ?? ""}${minutes}${dict?.mailbox?.minutesAbbr ?? "m ago"}`;
-		return dict?.mailbox?.justNow ?? "just now";
-	}
-
-	function getThreadTimeLabel(item: typeof mailboxThreadItem) {
-		const now = Date.now();
-
-		if (item.snoozedUntil && new Date(item.snoozedUntil).getTime() > now) {
-			return {
-				text: dict?.mailbox?.snoozed ?? "Snoozed",
-				className: "text-sm text-orange-400",
-				title: `${dict?.mailbox?.snoozedUntilPrefix ?? "Snoozed until "}${new Date(item.snoozedUntil).toLocaleString()}`,
-			};
-		}
-
-		if (item.unsnoozedAt) {
-			const ageMs = now - new Date(item.unsnoozedAt).getTime();
-			const showWindowMs = 60 * 60 * 1000;
-
-			if (ageMs >= 0 && ageMs <= showWindowMs) {
-				return {
-					text: `${dict?.mailbox?.snoozedBackPrefix ?? "Snoozed back "}${formatRelative(item.unsnoozedAt)}`,
-					className: "text-sm text-orange-400",
-					title: `${dict?.mailbox?.returnedFromSnoozePrefix ?? "Returned from snooze "}${new Date(item.unsnoozedAt).toLocaleString()}`,
-				};
-			}
-		}
-
-		const date = new Date(item.lastActivityAt || now);
-		return {
-			text: formatDateLabel(date),
-			className: "text-sm text-foreground",
-			title: "",
-		};
-	}
-
-	const timeLabel = getThreadTimeLabel(mailboxThreadItem);
-
-	const pathname = usePathname();
-	const isOnSnoozedPage = pathname.split("/").includes("snoozed");
-	const threadUrl = pathname.match("/dashboard/mail")
-		? `/w/${workspacePublicId}/dashboard/mail/${identityPublicId}/${activeMailbox.slug}/threads/${mailboxThreadItem.threadId}`
-		: `/mail/${identityPublicId}/${activeMailbox.slug}/threads/${mailboxThreadItem.threadId}`;
-
-	function getAllNames(p: typeof mailboxThreadItem.participants) {
-		const lists = [p?.from ?? [], p?.to ?? [], p?.cc ?? [], p?.bcc ?? []];
-
-		const seen = new Set<string>();
-		const merged: { n?: string | null; e: string }[] = [];
-
-		for (const list of lists) {
-			for (const x of list) {
-				const e = x?.e?.trim();
-				if (!e) continue;
-				const key = e.toLowerCase();
-				if (seen.has(key)) continue;
-				seen.add(key);
-				merged.push({ n: x.n, e });
-				if (merged.length >= 6) break;
-			}
-			if (merged.length >= 6) break;
-		}
-
-		const displayName = (x: { n?: string | null; e: string }) =>
-			x.n?.trim() || x.e;
-
-		const names = merged.map(displayName);
-		const shown = names.slice(0, 3);
-		const suffix = names.length > 3 ? "…" : "";
-
-		return shown.join(", ") + suffix;
-	}
-
-	const allNames = getAllNames(mailboxThreadItem.participants);
-
-	const canMarkAsRead = mailboxThreadItem.unreadCount > 0;
-	const canMarkAsUnread =
-		mailboxThreadItem.messageCount > 0 && mailboxThreadItem.unreadCount === 0;
-
-	const isRead = mailboxThreadItem.unreadCount === 0;
-
-	const { state, setState } = useDynamicContext<{
-		selectedThreadIds: Set<string>;
-	}>();
+	if (isDeleting) return null;
 
 	return (
 		<li
 			className={[
-				"group relative grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-2 gap-y-1 px-3 py-3 transition-colors hover:bg-muted/50 xl:grid-cols-[auto_minmax(10rem,20rem)_minmax(10rem,1fr)_auto] xl:items-center xl:gap-3 xl:py-2 xl:pr-28",
-				isRead ? "bg-muted/50" : "font-semibold",
+				"group relative grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-2 gap-y-1 px-3 py-3 transition-colors hover:bg-muted/50 has-[:focus-visible]:bg-muted/50 xl:grid-cols-[auto_minmax(10rem,20rem)_minmax(10rem,1fr)_auto] xl:items-center xl:gap-3 xl:py-2 xl:pr-28",
+				isRead
+					? "bg-muted/50 text-muted-foreground"
+					: "bg-background font-semibold text-foreground",
 			].join(" ")}
 		>
 			{/* Keep the existing full reload for Snoozed until its parallel route is hoisted. */}
@@ -214,16 +154,10 @@ export default function WebmailListItem({
 				{!isOnSnoozedPage && (
 					<input
 						type="checkbox"
-						onChange={(e) => {
-							const newSet = new Set(state?.selectedThreadIds);
-							if (e.target.checked) {
-								newSet.add(mailboxThreadItem.threadId);
-							} else {
-								newSet.delete(mailboxThreadItem.threadId);
-							}
-							setState({ selectedThreadIds: newSet });
-						}}
-						checked={state?.selectedThreadIds?.has(mailboxThreadItem.threadId)}
+						onChange={(e) =>
+							onToggleSelect(mailboxThreadItem.threadId, e.target.checked)
+						}
+						checked={selected}
 						aria-label={`${dict?.mailbox?.selectThreadPrefix ?? "Select thread "}${mailboxThreadItem.subject}`}
 						className="size-4 rounded border-muted-foreground/40"
 					/>
@@ -231,14 +165,22 @@ export default function WebmailListItem({
 
 				<button
 					type="button"
-					aria-label={dict?.mailbox?.star ?? "Star"}
+					aria-label={
+						mailboxThreadItem.starred
+							? (dict?.mailbox?.unstar ?? "Unstar")
+							: (dict?.mailbox?.star ?? "Star")
+					}
+					aria-pressed={mailboxThreadItem.starred}
+					disabled={busy}
 					className="text-muted-foreground hover:text-foreground"
 					onClick={() =>
-						toggleStar(
-							mailboxThreadItem.threadId,
-							activeMailbox.id,
-							mailboxThreadItem.starred,
-							!!mailboxSync,
+						runAction(() =>
+							toggleStar(
+								mailboxThreadItem.threadId,
+								activeMailbox.id,
+								mailboxThreadItem.starred,
+								!!mailboxSync,
+							),
 						)
 					}
 				>
@@ -250,10 +192,20 @@ export default function WebmailListItem({
 				</button>
 			</div>
 
-			<div className="pointer-events-none min-w-0 truncate pr-2">
-				<span className="truncate">{allNames}</span>{" "}
+			<div className="pointer-events-none flex min-w-0 items-center gap-2 pr-2">
+				<span
+					className={[
+						"size-2 shrink-0 rounded-full",
+						isUnread ? "bg-primary" : "bg-transparent",
+					].join(" ")}
+					aria-hidden="true"
+				/>
+				{isUnread && (
+					<span className="sr-only">{dict?.mailbox?.unread ?? "Unread"}</span>
+				)}
+				<span className="truncate">{allNames}</span>
 				{mailboxThreadItem.messageCount > 1 && (
-					<span className="text-xs text-muted-foreground font-normal">
+					<span className="shrink-0 text-xs text-muted-foreground font-normal">
 						{mailboxThreadItem.messageCount}
 					</span>
 				)}
@@ -265,7 +217,12 @@ export default function WebmailListItem({
 					labelsByThreadId={labelsByThreadId}
 					isRead={isRead}
 				/>
-				<span className="truncate text-foreground">
+				<span
+					className={[
+						"truncate text-foreground",
+						isUnread ? "font-semibold" : "",
+					].join(" ")}
+				>
 					{mailboxThreadItem.subject}
 				</span>
 				<span className="mx-1 hidden text-muted-foreground sm:inline">–</span>
@@ -273,23 +230,18 @@ export default function WebmailListItem({
 					{mailboxThreadItem.previewText}
 				</span>
 				{mailboxThreadItem.hasAttachments && (
-					<Paperclip className="ml-1 hidden size-4 text-muted-foreground sm:inline" />
+					<Paperclip className="ml-1 hidden size-4 shrink-0 text-muted-foreground sm:inline" />
 				)}
 			</div>
 
 			<div className="pointer-events-none col-start-3 row-span-2 row-start-1 ml-auto flex flex-col items-end gap-1 pl-2 xl:col-start-auto xl:row-span-1 xl:flex-row xl:items-center xl:gap-2">
 				<div className="flex items-center gap-2">
-					{mailboxThreadItem.unreadCount > 0 ? (
+					{isUnread ? (
 						<Mail className="size-4 text-primary xl:hidden" />
 					) : (
 						<MailOpen className="size-4 text-muted-foreground xl:hidden" />
 					)}
-					<time
-						className={["whitespace-nowrap", timeLabel.className].join(" ")}
-						title={timeLabel.title}
-					>
-						{timeLabel.text}
-					</time>
+					<ThreadTime item={mailboxThreadItem} />
 				</div>
 				<div className="pointer-events-auto relative z-10 xl:hidden">
 					<ThreadLabelHoverButtons
@@ -300,7 +252,7 @@ export default function WebmailListItem({
 				</div>
 			</div>
 
-			<div className="pointer-events-none absolute inset-y-0 right-3 z-20 hidden w-28 items-center justify-end gap-1 rounded-l-4xl bg-muted px-3 opacity-0 transition-opacity duration-100 group-hover:pointer-events-auto group-hover:opacity-100 xl:flex">
+			<div className="pointer-events-none absolute inset-y-0 right-3 z-20 hidden w-28 items-center justify-end gap-1 rounded-l-4xl bg-muted px-3 opacity-0 transition-opacity duration-100 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 xl:flex">
 				<ThreadLabelHoverButtons
 					mailboxThreadItem={mailboxThreadItem}
 					labelsByThreadId={labelsByThreadId}
@@ -310,16 +262,20 @@ export default function WebmailListItem({
 				{canMarkAsUnread && (
 					<button
 						type="button"
-						onClick={async () => {
-							return await markAsUnread(
-								mailboxThreadItem.threadId,
-								activeMailbox.id,
-								!!mailboxSync,
-								true,
-							);
-						}}
+						disabled={busy}
+						onClick={() =>
+							runAction(() =>
+								markAsUnread(
+									mailboxThreadItem.threadId,
+									activeMailbox.id,
+									!!mailboxSync,
+									true,
+								),
+							)
+						}
 						className="rounded p-1 hover:bg-muted"
 						title={dict?.mailbox?.markAsUnread ?? "Mark as unread"}
+						aria-label={dict?.mailbox?.markAsUnread ?? "Mark as unread"}
 					>
 						<Mail className="size-4" />
 					</button>
@@ -327,15 +283,19 @@ export default function WebmailListItem({
 				{canMarkAsRead && (
 					<button
 						type="button"
+						disabled={busy}
 						onClick={() =>
-							markAsRead(
-								mailboxThreadItem.threadId,
-								activeMailbox.id,
-								!!mailboxSync,
+							runAction(() =>
+								markAsRead(
+									mailboxThreadItem.threadId,
+									activeMailbox.id,
+									!!mailboxSync,
+								),
 							)
 						}
 						className="rounded p-1 hover:bg-muted"
 						title={dict?.mailbox?.markAsRead ?? "Mark as read"}
+						aria-label={dict?.mailbox?.markAsRead ?? "Mark as read"}
 					>
 						<MailOpen className="size-4" />
 					</button>
@@ -348,26 +308,16 @@ export default function WebmailListItem({
 
 				<button
 					type="button"
-					onClick={async () => {
-						await moveToTrash(
-							mailboxThreadItem.threadId,
-							activeMailbox.id,
-							!!mailboxSync,
-							true,
-						);
-						toast.success(
-							dict?.mailbox?.movedToTrash ?? "Messages moved to Trash",
-							{
-								position: "bottom-left",
-							},
-						);
-					}}
+					onClick={deleteThread}
 					className="rounded p-1 hover:bg-muted"
 					title={dict?.mailbox?.delete ?? "Delete"}
+					aria-label={dict?.mailbox?.delete ?? "Delete"}
 				>
 					<Trash2 className="size-4" />
 				</button>
 			</div>
 		</li>
 	);
-}
+});
+
+export default WebmailListItem;

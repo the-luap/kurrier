@@ -8,8 +8,16 @@ const nextConfig: NextConfig = {
 		serverActions: {
 			bodySizeLimit: "20mb",
 		},
+		// lucide-react and @tabler/icons-react are optimized by Next by default;
+		// Mantine recommends adding its barrel packages explicitly.
+		optimizePackageImports: [
+			"@mantine/core",
+			"@mantine/hooks",
+			"@mantine/dates",
+		],
 	},
 	output: "standalone",
+	poweredByHeader: false,
 	cacheComponents: true,
 	partialPrefetching: true,
 	serverExternalPackages: ["pino", "pino-pretty", "thread-stream"],

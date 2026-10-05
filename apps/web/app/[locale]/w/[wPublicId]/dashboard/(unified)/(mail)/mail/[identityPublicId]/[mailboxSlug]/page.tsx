@@ -1,5 +1,6 @@
 import { getPublicEnv } from "@schema";
 import MailPagination from "@/components/mailbox/default/mail-pagination";
+import MailboxPreparingNotice from "@/components/mailbox/default/mailbox-preparing-notice";
 import WebmailList from "@/components/mailbox/default/webmail-list";
 import { getWorkspacePublicId } from "@/lib/actions/clients";
 import {
@@ -38,7 +39,22 @@ async function Page({
 	});
 
 	const fetchMailboxPromise = fetchMailbox(identityPublicId, mailboxSlug);
-	const workspacePublicId = await getWorkspacePublicId();
+	// A just-added identity has no mailboxes until its first sync created
+	// them: show a hint instead of the error page.
+	const [workspacePublicId, mailboxReady] = await Promise.all([
+		getWorkspacePublicId(),
+		fetchMailboxPromise.then(
+			() => true,
+			() => false,
+		),
+	]);
+
+	if (!mailboxReady) {
+		// The other loaders fail the same way; nothing awaits them now.
+		mailboxThreadPromise.catch(() => {});
+		return <MailboxPreparingNotice />;
+	}
+
 	return (
 		<div className="mb-12 flex min-w-0 flex-1 flex-col gap-4 p-3 sm:p-4">
 			<WebmailList

@@ -1,9 +1,9 @@
 "use server";
 
 import { rlsClient } from "@/lib/actions/clients";
-import {mailRules, mailRuleActions, labels} from "@db";
+import {mailRules, mailRuleActions, labels, identities} from "@db";
 import { handleAction, mailRulesActionsList, mailRulesFieldsList, mailRulesOpsList } from "@schema";
-import {asc, eq, ne} from "drizzle-orm";
+import {asc, eq, ne, not} from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { decode } from "decode-formdata";
 
@@ -94,7 +94,7 @@ function validateRulePayload(p: {
     return errors;
 }
 
-export async function buildRulePayloadFromFormData(formData: FormData) {
+async function buildRulePayloadFromFormData(formData: FormData) {
     const from = asString(formData.get("from"));
     const to = asString(formData.get("to"));
     const subject = asString(formData.get("subject"));
@@ -171,7 +171,7 @@ export async function buildRulePayloadFromFormData(formData: FormData) {
     return { ...payload, _errors: Object.keys(errors).length ? errors : null };
 }
 
-export async function createMailRule(payload: {
+async function createMailRule(payload: {
     identityId: string;
     name: string;
     priority: number;
@@ -183,6 +183,27 @@ export async function createMailRule(payload: {
     const rls = await rlsClient();
 
     return rls(async (tx) => {
+        // The worker applies rules per identity with the service role; RLS
+        // on mail_rules only checks the workspace, so the identity (and any
+        // label the rule applies) must be checked here.
+        const [identity] = await tx
+            .select({ id: identities.id })
+            .from(identities)
+            .where(eq(identities.id, String(payload.identityId)))
+            .limit(1);
+        if (!identity) throw new Error("Identity not found");
+
+        for (const action of payload.actions) {
+            const labelId = action.params?.labelId;
+            if (action.actionType !== "add_label" || !labelId) continue;
+            const [label] = await tx
+                .select({ id: labels.id })
+                .from(labels)
+                .where(eq(labels.id, String(labelId)))
+                .limit(1);
+            if (!label) throw new Error("Label not found");
+        }
+
         try {
             const [rule] = await tx
                 .insert(mailRules)
@@ -276,16 +297,20 @@ export async function toggleRule(_prev: any, formData: FormData) {
     return handleAction(async () => {
         const decodedForm = decode(formData);
         const rls = await rlsClient();
-        await rls(async (tx) => {
-            const [rule] = await tx
-                .select().from(mailRules).where(eq(mailRules.id, String(decodedForm.ruleId)));
-            if (!rule) throw new Error("Rule not found");
-
-            await tx.update(mailRules).set({
-                enabled: !rule.enabled,
-            }).where(eq(mailRules.id, String(decodedForm.ruleId)));
-        });
-        revalidatePath(String(decodedForm.pathname));
+        // One statement: flip the flag of the caller's (RLS) rule.
+        const updated = await rls((tx) =>
+            tx
+                .update(mailRules)
+                .set({ enabled: not(mailRules.enabled) })
+                .where(eq(mailRules.id, String(decodedForm.ruleId)))
+                .returning({ id: mailRules.id }),
+        );
+        if (!updated.length) throw new Error("Rule not found");
+        revalidatePath(
+            typeof decodedForm.pathname === "string" && decodedForm.pathname.startsWith("/")
+                ? decodedForm.pathname
+                : "/dashboard/mail",
+        );
 
         return { success: true };
     });

@@ -1,7 +1,6 @@
 import { identities } from "@db";
 import { Divider } from "@mantine/core";
 import { eq } from "drizzle-orm";
-import React from "react";
 import CreateMailRuleForm from "@/components/mailbox/settings/rules/create-rule-form";
 import MailRulesList from "@/components/mailbox/settings/rules/mail-rules-list";
 import SectionCard from "@/components/mailbox/settings/settings-section-card";
@@ -19,15 +18,18 @@ async function Page({
 	params: { identityPublicId: string; locale: Locale };
 }) {
 	const resolvedParams = await params;
-	const dict = await getDictionary(resolvedParams.locale);
-	const rls = await rlsClient();
-
-	const [identity] = await rls((tx) =>
-		tx
-			.select()
-			.from(identities)
-			.where(eq(identities.publicId, resolvedParams.identityPublicId)),
-	);
+	const [dict, [identity], appLabels] = await Promise.all([
+		getDictionary(resolvedParams.locale),
+		rlsClient().then((rls) =>
+			rls((tx) =>
+				tx
+					.select()
+					.from(identities)
+					.where(eq(identities.publicId, resolvedParams.identityPublicId)),
+			),
+		),
+		getAppLabels(),
+	]);
 
 	if (!identity) {
 		return (
@@ -42,7 +44,6 @@ async function Page({
 		);
 	}
 
-	const appLabels = await getAppLabels();
 	const rules = await fetchMailRules(identity.id);
 
 	return (

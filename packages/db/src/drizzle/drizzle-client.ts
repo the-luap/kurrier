@@ -31,15 +31,12 @@ export function createDrizzle<Database extends PgDatabase<any, any, any>>(
 					workspace_id: ctx.workspaceId ?? token.workspace_id,
 				};
 
-				if (claims.sub) {
+				// One round trip for both claims. An unset claim is written as
+				// '' (policies read it through nullif(..., '')), which also
+				// clears any value left on a pooled connection.
+				if (claims.sub || claims.workspace_id) {
 					await tx.execute(
-						sql`select set_config('request.jwt.claim.sub', ${claims.sub}, true)`
-					);
-				}
-
-				if (claims.workspace_id) {
-					await tx.execute(
-						sql`select set_config('request.jwt.claim.workspace_id', ${claims.workspace_id}, true)`
+						sql`select set_config('request.jwt.claim.sub', ${claims.sub ?? ""}, true), set_config('request.jwt.claim.workspace_id', ${claims.workspace_id ?? ""}, true)`,
 					);
 				}
 
