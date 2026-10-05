@@ -10,15 +10,21 @@ const redisOptions = {
 	password: serverConfig.REDIS_PASSWORD,
 };
 
-// One shared command connection for every Queue (and the workers, which
-// duplicate it for their blocking connection). Previously each Queue opened
-// its own socket.
+// Workers require maxRetriesPerRequest: null (they duplicate this
+// connection for their blocking client).
 const redis = new IORedis({
 	...redisOptions,
 	maxRetriesPerRequest: null,
 });
 
-const queueOptions = { connection: redis };
+// One shared command connection for every Queue. It keeps the default
+// retry limit so queue.add() fails instead of hanging while Redis is down.
+const queueRedis = new IORedis(redisOptions);
+queueRedis.on("error", (error) => {
+	console.error("[redis] queue connection error:", error.message);
+});
+
+const queueOptions = { connection: queueRedis };
 // QueueEvents need a dedicated blocking connection, so they get plain options.
 const eventsOptions = { connection: redisOptions };
 

@@ -49,7 +49,15 @@ export const deltaFetch = (
 			} while (rerunRequested.has(identityId));
 		} finally {
 			running.delete(identityId);
-			rerunRequested.delete(identityId);
+			// If a run failed while new mail was announced, don't drop that
+			// request: start one more run (it fails or succeeds on its own).
+			if (rerunRequested.delete(identityId)) {
+				queueMicrotask(() => {
+					deltaFetch(identityId, imapInstances).catch((error) =>
+						console.error("[delta-fetch] follow-up run failed", error),
+					);
+				});
+			}
 		}
 	})();
 	running.set(identityId, run);
@@ -276,15 +284,28 @@ const deltaFetchOnce = async (
 					return;
 				}
 
-				if (!raw) {
-					// Skipped as known but gone by now; nothing to store.
+				let source = raw;
+				if (!source && uid) {
+					// Skipped as known in the envelope pass, but the row is gone by
+					// now (e.g. deleted meanwhile): download it after all, otherwise
+					// lastSeenUid moves past it and it is never imported. Skipped
+					// messages are handled outside the fetch iterator, so another
+					// command is safe here.
+					const full = await client.fetchOne(
+						String(uid),
+						{ source: true },
+						{ uid: true },
+					);
+					source = full ? full.source?.toString() || "" : "";
+				}
+				if (!source) {
 					console.warn(
 						`[deltaFetch] No source for ${messageId} — path=${path} uid=${uid}`,
 					);
 					return;
 				}
 
-				await parseAndStoreEmail(raw, {
+				await parseAndStoreEmail(source, {
 					ownerId,
 					mailboxId: row.id,
 					rawStorageKey: `eml/${ownerId}/${row.id}/${uid}.eml`,

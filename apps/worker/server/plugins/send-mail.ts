@@ -417,13 +417,19 @@ export default defineNitroPlugin(async (nitroApp) => {
 
 		// Enqueue indexing only after the transaction committed: from inside it
 		// the search worker could run before the message row was visible.
+		// The mail is already sent at this point: a failed enqueue must not turn
+		// the result into an error (the user would send it again).
 		if (indexMessageId) {
-			const { searchIngestQueue } = await getRedis();
-			await searchIngestQueue.add(
-				"add",
-				{ messageId: indexMessageId },
-				{ removeOnComplete: true },
-			);
+			try {
+				const { searchIngestQueue } = await getRedis();
+				await searchIngestQueue.add(
+					"add",
+					{ messageId: indexMessageId },
+					{ removeOnComplete: true },
+				);
+			} catch (error) {
+				console.error("[send-mail] failed to queue search indexing", error);
+			}
 		}
 		return result;
 	};

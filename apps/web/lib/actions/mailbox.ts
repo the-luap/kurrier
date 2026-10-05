@@ -1091,12 +1091,13 @@ async function setThreadsSeen(
 	const rls = await rlsClient();
 
 	return rls(async (tx) => {
-		await tx
+		const updatedMessages = await tx
 			.update(messages)
 			.set({ seen, updatedAt: now })
 			.where(
 				and(inArray(messages.threadId, ids), eq(messages.mailboxId, mailboxId)),
-			);
+			)
+			.returning({ threadId: messages.threadId });
 
 		const updated = await tx
 			.update(mailboxThreads)
@@ -1120,7 +1121,13 @@ async function setThreadsSeen(
 				),
 			)
 			.returning({ threadId: mailboxThreads.threadId });
-		return updated.map((row) => row.threadId);
+		// Every thread RLS let us touch, also those without a mailbox_threads
+		// row: the IMAP flags and the search index must follow the messages.
+		return Array.from(
+			new Set(
+				[...updatedMessages, ...updated].map((row) => String(row.threadId)),
+			),
+		);
 	});
 }
 
