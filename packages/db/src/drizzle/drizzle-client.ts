@@ -7,7 +7,7 @@ import { db, db_rls } from "./init-db";
 export function decode(accessToken: string) {
 	try {
 		return jwtDecode<JwtPayload & { role: string }>(accessToken);
-	} catch (error) {
+	} catch {
 		return { role: "anon" } as JwtPayload & { role: string };
 	}
 }

@@ -3,17 +3,15 @@ import type { MessageEntity } from "@db";
 import {
 	ActionIcon,
 	FocusTrap,
-	FocusTrapInitialFocus,
 	Group,
 	Input,
 	Select,
 	type SelectProps,
-	TagsInput,
 	Text,
 } from "@mantine/core";
 import { useMediaQuery } from "@mantine/hooks";
 import { Forward, Reply } from "lucide-react";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { InitialDraft } from "@/components/mailbox/default/editor/email-editor";
 import EmailHeaderContacts from "@/components/mailbox/default/editor/email-header-contacts";
 import { useDynamicContext } from "@/hooks/use-dynamic-context";

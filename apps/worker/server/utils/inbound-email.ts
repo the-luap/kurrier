@@ -1,15 +1,56 @@
 import { timingSafeEqual } from "node:crypto";
 import { db, identities, mailboxes } from "@db";
-import { eq } from "drizzle-orm";
-import { createError, getHeader, type H3Event } from "h3";
+import { eq, inArray, sql } from "drizzle-orm";
+import { createError, getHeader, getQuery, type H3Event } from "h3";
 import { type ParsedMail, simpleParser } from "mailparser";
 import { v4 as uuidv4 } from "uuid";
-import { parseAndStoreEmail } from "./message-payload-parser";
+import { parseAndStoreEmail } from "../../lib/message-payload-parser";
 
 function safeEqual(a: string, b: string) {
 	const left = Buffer.from(a);
 	const right = Buffer.from(b);
 	return left.length === right.length && timingSafeEqual(left, right);
+}
+
+/**
+ * Collects every credential the caller may have presented. Mailgun, Postmark
+ * and SendGrid cannot send custom headers, so besides the header options we
+ * also accept HTTP Basic auth (username or password = secret, e.g.
+ * https://user:SECRET@host/...) and a `token` query parameter.
+ */
+function getPresentedSecrets(event: H3Event): string[] {
+	const candidates: string[] = [];
+	const auth = (getHeader(event, "authorization") ?? "").trim();
+	const lowerAuth = auth.toLowerCase();
+
+	if (lowerAuth.startsWith("bearer ")) {
+		candidates.push(auth.slice(7).trim());
+	} else if (lowerAuth.startsWith("basic ")) {
+		try {
+			const decoded = Buffer.from(auth.slice(6).trim(), "base64").toString(
+				"utf8",
+			);
+			const sep = decoded.indexOf(":");
+			if (sep >= 0) {
+				candidates.push(decoded.slice(0, sep), decoded.slice(sep + 1));
+			} else {
+				candidates.push(decoded);
+			}
+		} catch {
+			// ignore malformed basic auth
+		}
+	}
+
+	const headerSecret =
+		getHeader(event, "x-kurrier-webhook-secret") ||
+		getHeader(event, "x-webhook-secret");
+	if (headerSecret) candidates.push(headerSecret);
+
+	const token = getQuery(event)?.token;
+	const tokenValue = Array.isArray(token) ? token[0] : token;
+	if (typeof tokenValue === "string") candidates.push(tokenValue);
+
+	return candidates.filter((c) => c.length > 0);
 }
 
 export function assertInboundWebhookAuthorized(event: H3Event) {
@@ -30,16 +71,13 @@ export function assertInboundWebhookAuthorized(event: H3Event) {
 		return;
 	}
 
-	const auth = getHeader(event, "authorization") ?? "";
-	const bearer = auth.toLowerCase().startsWith("bearer ")
-		? auth.slice(7).trim()
-		: "";
-	const headerSecret =
-		getHeader(event, "x-kurrier-webhook-secret") ||
-		getHeader(event, "x-webhook-secret") ||
-		bearer;
+	// Evaluate every candidate (no short-circuit) to keep timing uniform.
+	let authorized = false;
+	for (const candidate of getPresentedSecrets(event)) {
+		if (safeEqual(candidate, secret)) authorized = true;
+	}
 
-	if (!headerSecret || !safeEqual(headerSecret, secret)) {
+	if (!authorized) {
 		throw createError({
 			statusCode: 401,
 			statusMessage: "Invalid inbound webhook secret",
@@ -47,13 +85,28 @@ export function assertInboundWebhookAuthorized(event: H3Event) {
 	}
 }
 
-export function getToEmails(parsed: ParsedMail): string[] {
-	if (!parsed.to) return [];
-	const tos = Array.isArray(parsed.to) ? parsed.to : [parsed.to];
-	return tos.flatMap(
+function addressesOf(field: ParsedMail["to"]): string[] {
+	if (!field) return [];
+	const list = Array.isArray(field) ? field : [field];
+	return list.flatMap(
 		(addrObj) =>
 			addrObj.value.map((email) => email.address).filter(Boolean) as string[],
 	);
+}
+
+export function getToEmails(parsed: ParsedMail): string[] {
+	return addressesOf(parsed.to);
+}
+
+/**
+ * Extracts plain email addresses from loosely formatted recipient values
+ * (e.g. `"Name" <a@b.c>, d@e.f` or arrays of those).
+ */
+export function extractEmailAddresses(value: unknown): string[] {
+	if (value == null) return [];
+	if (Array.isArray(value)) return value.flatMap(extractEmailAddresses);
+	const matches = String(value).match(/[^\s<>,;"'()]+@[^\s<>,;"'()]+/g);
+	return matches ?? [];
 }
 
 function isAuthenticationFailure(headers: Map<string, unknown>) {
@@ -74,7 +127,28 @@ function isAuthenticationFailure(headers: Map<string, unknown>) {
 	);
 }
 
-export async function storeInboundRawEmail(rawMime: string) {
+export type InboundStoreResult =
+	| {
+			ok: true;
+			identityId: string;
+			mailboxId: string;
+			messageId: string | null;
+	  }
+	| { ok: false; reason: string };
+
+/**
+ * Stores a raw inbound MIME message for the first recipient that matches an
+ * identity. Permanent rejects (no recipient / identity / inbox) resolve with
+ * `{ ok: false, reason }` so the HTTP layer answers 2xx and providers do not
+ * keep retrying a message that can never be delivered.
+ *
+ * @param envelopeRecipients SMTP envelope recipients reported by the provider;
+ *   preferred over the To/Cc headers when present.
+ */
+export async function storeInboundRawEmail(
+	rawMime: string,
+	envelopeRecipients: string[] = [],
+): Promise<InboundStoreResult> {
 	if (!rawMime || typeof rawMime !== "string") {
 		throw createError({
 			statusCode: 400,
@@ -83,25 +157,37 @@ export async function storeInboundRawEmail(rawMime: string) {
 	}
 
 	const parsed = await simpleParser(rawMime);
-	const toAddress = getToEmails(parsed)[0]?.toLowerCase() ?? null;
-	if (!toAddress) {
-		throw createError({
-			statusCode: 400,
-			statusMessage: "Inbound email has no recipient",
-		});
+	const candidates = [
+		...new Set(
+			[
+				...envelopeRecipients,
+				...addressesOf(parsed.to),
+				...addressesOf(parsed.cc),
+			]
+				.map((a) => a.trim().toLowerCase())
+				.filter(Boolean),
+		),
+	];
+
+	if (!candidates.length) {
+		console.warn("[InboundWebhook] Rejecting email without recipients");
+		return { ok: false, reason: "Inbound email has no recipient" };
 	}
 
-	const [identity] = await db
+	const matches = await db
 		.select()
 		.from(identities)
-		.where(eq(identities.value, toAddress))
-		.limit(1);
+		.where(inArray(sql`lower(${identities.value})`, candidates));
+
+	const identity = candidates
+		.map((addr) => matches.find((m) => m.value.toLowerCase() === addr))
+		.find(Boolean);
 
 	if (!identity) {
-		throw createError({
-			statusCode: 404,
-			statusMessage: "No identity found for recipient",
+		console.warn("[InboundWebhook] No identity found for recipients", {
+			candidates,
 		});
+		return { ok: false, reason: "No identity found for recipient" };
 	}
 
 	const userMailboxes = await db
@@ -118,10 +204,10 @@ export async function storeInboundRawEmail(rawMime: string) {
 		: inbox;
 
 	if (!targetMailbox) {
-		throw createError({
-			statusCode: 409,
-			statusMessage: "Recipient identity has no inbox mailbox",
+		console.warn("[InboundWebhook] Recipient identity has no inbox mailbox", {
+			identityId: identity.id,
 		});
+		return { ok: false, reason: "Recipient identity has no inbox mailbox" };
 	}
 
 	const emlKey = uuidv4();

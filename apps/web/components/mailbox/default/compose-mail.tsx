@@ -57,7 +57,7 @@ export default function ComposeMail({
 	const [senderOptions, setSenderOptions] = useState<
 		{ value: string; label: string; email: string; signatureHtml: string }[]
 	>([]);
-	const [showEditorMode, setShowEditorMode] = useState<string>("compose");
+	const [showEditorMode] = useState<string>("compose");
 	const [initialDraft, setInitialDraft] = useState<InitialDraft>(null);
 	const [editorKey, setEditorKey] = useState(0);
 	const preferredMailboxRef = useRef<string | null>(null);

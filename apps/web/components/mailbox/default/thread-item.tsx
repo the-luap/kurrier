@@ -2,8 +2,11 @@ import { getMessageAddress, getMessageName } from "@common/mail-client";
 import type { MessageEntity } from "@db";
 import { Avatar } from "@mantine/core";
 import { getPublicEnv } from "@schema";
-import React from "react";
 import { Container } from "@/components/common/containers";
+import {
+	getAuthStatus,
+	hasKnownAuthStatus,
+} from "@/components/mailbox/default/auth-status";
 import EmailRenderer from "@/components/mailbox/default/email-renderer";
 import EmailViewer from "@/components/mailbox/default/email-viewer";
 import RenderInvite from "@/components/mailbox/default/render-invite";
@@ -42,6 +45,10 @@ export default async function ThreadItem({
 	// on the server. This keeps the RSC payload of long threads small.
 	const { html, text, textAsHtml: _textAsHtml, headersJson, ...meta } = message;
 	const headers = (headersJson ?? {}) as Record<string, any>;
+	// SPF/DKIM/DMARC need the full (server-only) headers: compute them here and
+	// pass just the result. Drafts / own sent copies carry no meaningful result.
+	const fullAuthStatus = message.draft ? null : getAuthStatus(headers);
+	const authStatus = hasKnownAuthStatus(fullAuthStatus) ? fullAuthStatus : null;
 	const headerMessage = {
 		...meta,
 		html: null,
@@ -120,6 +127,7 @@ export default async function ThreadItem({
 							markSmtp={markSmtp}
 							activeMailboxId={activeMailboxId}
 							mailSubscription={mailSubscription}
+							authStatus={authStatus}
 						>
 							<EmailViewer message={bodyMessage} cidUrls={cidUrls} />
 						</EmailRenderer>

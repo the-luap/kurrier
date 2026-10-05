@@ -1,4 +1,4 @@
-FROM node:20-alpine AS build
+FROM node:22-alpine AS build
 WORKDIR /repo
 RUN corepack enable && corepack prepare pnpm@10.0.0 --activate
 
@@ -13,7 +13,7 @@ WORKDIR /repo/apps/worker
 ENV NITRO_PRESET=node-server
 RUN pnpm run build
 
-FROM node:20-alpine
+FROM node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production
 ENV HOST=0.0.0.0

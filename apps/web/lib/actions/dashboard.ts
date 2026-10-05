@@ -33,6 +33,7 @@ import {
 	defaultImapQuota,
 	type FormState,
 	getPublicEnv,
+	getServerEnv,
 	handleAction,
 	MailboxKindDisplay,
 	ProviderAccountFormSchema,
@@ -56,16 +57,31 @@ import { getRedis } from "@/lib/actions/get-redis";
 import { backfillMailboxes, clearImapClients } from "@/lib/actions/mailbox";
 import { withServerCache } from "@/lib/server-cache";
 import { parseSecret } from "@/lib/utils";
+import {
+	aiAuthHeaders,
+	fetchAiEndpoint,
+	normalizeAiBaseUrl,
+	resolveAiApiKey,
+} from "@/lib/ai-endpoint";
 
 const DASHBOARD_PATH = "/dashboard/platform/providers";
 const CURRENT_API_VERSION = 1;
 type AiProvider = "ollama" | "lmstudio";
 
 const DEFAULT_AI_PROVIDER: AiProvider = "ollama";
-const DEFAULT_OLLAMA_BASE_URL = "http://10.0.252.12:11434";
 const DEFAULT_OLLAMA_MODEL = "gemma3:12b";
 const DEFAULT_LMSTUDIO_BASE_URL = "http://localhost:1234/v1";
 const DEFAULT_LMSTUDIO_MODEL = "";
+
+// Mailgun, Postmark and SendGrid can't send custom headers, so the worker
+// also accepts the inbound webhook secret as a ?token= query parameter.
+const withInboundWebhookToken = (url: string) => {
+	const secret = getServerEnv().INBOUND_WEBHOOK_SECRET;
+	if (!secret) return url;
+	const withToken = new URL(url);
+	withToken.searchParams.set("token", secret);
+	return withToken.toString();
+};
 
 const requireSession = (session: AuthSession | null): AuthSession => {
 	if (!session) {
@@ -80,13 +96,13 @@ const isAiProvider = (value: string): value is AiProvider =>
 const getAiDefaults = (provider: AiProvider) =>
 	provider === "lmstudio"
 		? { baseUrl: DEFAULT_LMSTUDIO_BASE_URL, model: DEFAULT_LMSTUDIO_MODEL }
-		: { baseUrl: DEFAULT_OLLAMA_BASE_URL, model: DEFAULT_OLLAMA_MODEL };
+		: {
+				baseUrl: getServerEnv().OLLAMA_BASE_URL || "http://localhost:11434",
+				model: getServerEnv().OLLAMA_MODEL || DEFAULT_OLLAMA_MODEL,
+			};
 
-const normalizeAiBaseUrl = (provider: AiProvider, value: string) =>
-	(value || getAiDefaults(provider).baseUrl).trim().replace(/\/+$/, "");
-
-const getAuthHeaders = (apiKey?: string | null): Record<string, string> =>
-	apiKey?.trim() ? { Authorization: `Bearer ${apiKey.trim()}` } : {};
+const toAiBaseUrl = (provider: AiProvider, value: string) =>
+	normalizeAiBaseUrl(value?.trim() || getAiDefaults(provider).baseUrl);
 
 const fetchAiModelsForProvider = async ({
 	provider,
@@ -97,19 +113,13 @@ const fetchAiModelsForProvider = async ({
 	baseUrl: string;
 	apiKey?: string | null;
 }) => {
-	const normalizedBaseUrl = normalizeAiBaseUrl(provider, baseUrl);
 	if (provider === "lmstudio") {
-		const response = await fetch(`${normalizedBaseUrl}/models`, {
+		const data = (await fetchAiEndpoint(`${baseUrl}/models`, {
+			label: "LM Studio",
 			method: "GET",
-			headers: getAuthHeaders(apiKey),
+			headers: aiAuthHeaders(apiKey),
 			signal: AbortSignal.timeout(10_000),
-		});
-
-		if (!response.ok) {
-			throw new Error(`LM Studio returned HTTP ${response.status}`);
-		}
-
-		const data = (await response.json()) as {
+		})) as {
 			data?: Array<{ id?: string; object?: string; owned_by?: string }>;
 		};
 
@@ -123,16 +133,12 @@ const fetchAiModelsForProvider = async ({
 			.filter((model) => model.name);
 	}
 
-	const response = await fetch(`${normalizedBaseUrl}/api/tags`, {
+	const data = (await fetchAiEndpoint(`${baseUrl}/api/tags`, {
+		label: "Ollama",
 		method: "GET",
+		headers: aiAuthHeaders(apiKey),
 		signal: AbortSignal.timeout(10_000),
-	});
-
-	if (!response.ok) {
-		throw new Error(`Ollama returned HTTP ${response.status}`);
-	}
-
-	const data = (await response.json()) as {
+	})) as {
 		models?: Array<{
 			name?: string;
 			model?: string;
@@ -143,12 +149,24 @@ const fetchAiModelsForProvider = async ({
 
 	return (data.models || [])
 		.map((model) => ({
-			name: model.name || model.model || "",
-			size: model.size || 0,
-			parameterSize: model.details?.parameter_size || "",
-			quantization: model.details?.quantization_level || "",
+			name: String(model.name || model.model || ""),
+			size: Number(model.size || 0),
+			parameterSize: String(model.details?.parameter_size || ""),
+			quantization: String(model.details?.quantization_level || ""),
 		}))
 		.filter((model) => model.name);
+};
+
+const fetchSavedAiSettings = async (provider: AiProvider) => {
+	const rls = await rlsClient();
+	const [saved] = await rls((tx) =>
+		tx
+			.select()
+			.from(userAiSettings)
+			.where(eq(userAiSettings.provider, provider))
+			.limit(1),
+	);
+	return saved;
 };
 
 export const fetchAiSettings = async () => {
@@ -174,7 +192,8 @@ export const fetchAiSettings = async () => {
 		systemPrompt: settings?.systemPrompt ?? "",
 		temperature: settings?.temperature ?? "0.4",
 		maxTokens: settings?.maxTokens ?? 700,
-		enabled: settings?.enabled ?? true,
+		// AI stays off until the user has saved a configuration.
+		enabled: settings?.enabled ?? false,
 		hasApiKey: Boolean(settings?.apiKey),
 	};
 };
@@ -185,22 +204,17 @@ export const listAiModels = async (input: {
 	apiKey?: string;
 }): Promise<FormState> => {
 	return handleAction(async () => {
-		await isSignedIn();
+		const user = await isSignedIn();
+		if (!user?.id) throw new Error("Please sign in first.");
 		const provider = isAiProvider(input.provider || "")
 			? (input.provider as AiProvider)
 			: DEFAULT_AI_PROVIDER;
-		const rls = await rlsClient();
-		const [saved] = await rls((tx) =>
-			tx
-				.select()
-				.from(userAiSettings)
-				.where(eq(userAiSettings.provider, provider))
-				.limit(1),
-		);
+		const baseUrl = await toAiBaseUrl(provider, input.baseUrl);
+		const saved = await fetchSavedAiSettings(provider);
 		const models = await fetchAiModelsForProvider({
 			provider,
-			baseUrl: input.baseUrl,
-			apiKey: input.apiKey || saved?.apiKey,
+			baseUrl,
+			apiKey: resolveAiApiKey(input.apiKey, saved, baseUrl),
 		});
 		return { success: true, data: { models } };
 	});
@@ -221,7 +235,7 @@ export async function saveAiSettings(
 			? (String(formData.get("provider")) as AiProvider)
 			: DEFAULT_AI_PROVIDER;
 		const defaults = getAiDefaults(provider);
-		const baseUrl = normalizeAiBaseUrl(
+		const baseUrl = await toAiBaseUrl(
 			provider,
 			String(formData.get("baseUrl") ?? defaults.baseUrl),
 		);
@@ -251,9 +265,10 @@ export async function saveAiSettings(
 				.where(eq(userAiSettings.provider, provider))
 				.limit(1),
 		);
+		// Keep the stored key only while the base URL stays the same.
 		const apiKey = clearApiKey
 			? null
-			: submittedApiKey || existingSettings?.apiKey || null;
+			: resolveAiApiKey(submittedApiKey, existingSettings, baseUrl);
 
 		await rls((tx) =>
 			tx
@@ -298,73 +313,55 @@ export const testAiSettings = async (input: {
 	maxTokens?: number;
 }): Promise<FormState> => {
 	return handleAction(async () => {
-		await isSignedIn();
+		const user = await isSignedIn();
+		if (!user?.id) throw new Error("Please sign in first.");
 		const provider = isAiProvider(input.provider || "")
 			? (input.provider as AiProvider)
 			: DEFAULT_AI_PROVIDER;
-		const rls = await rlsClient();
-		const [saved] = await rls((tx) =>
-			tx
-				.select()
-				.from(userAiSettings)
-				.where(eq(userAiSettings.provider, provider))
-				.limit(1),
-		);
-		const apiKey = input.apiKey || saved?.apiKey || null;
-		const normalizedBaseUrl = normalizeAiBaseUrl(provider, input.baseUrl);
+		const baseUrl = await toAiBaseUrl(provider, input.baseUrl);
+		const saved = await fetchSavedAiSettings(provider);
+		const apiKey = resolveAiApiKey(input.apiKey, saved, baseUrl);
+		const testPrompt =
+			"Reply with one short sentence confirming that Kurrier AI is ready.";
 
 		if (provider === "lmstudio") {
-			const response = await fetch(`${normalizedBaseUrl}/chat/completions`, {
+			const data = (await fetchAiEndpoint(`${baseUrl}/chat/completions`, {
+				label: "LM Studio",
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
-					...getAuthHeaders(apiKey),
+					...aiAuthHeaders(apiKey),
 				},
 				body: JSON.stringify({
 					model: input.model,
-					messages: [
-						{
-							role: "user",
-							content:
-								"Reply with one short German sentence confirming that Kurrier AI is ready.",
-						},
-					],
+					messages: [{ role: "user", content: testPrompt }],
 					temperature: input.temperature ?? 0.2,
 					max_tokens: input.maxTokens ?? 80,
 					stream: false,
 				}),
 				signal: AbortSignal.timeout(60_000),
-			});
-
-			if (!response.ok)
-				throw new Error(`LM Studio returned HTTP ${response.status}`);
-
-			const data = (await response.json()) as {
+			})) as {
 				choices?: Array<{ message?: { content?: string } }>;
 				error?: { message?: string } | string;
 			};
-			if (data.error) {
-				throw new Error(
-					typeof data.error === "string"
-						? data.error
-						: data.error.message || "LM Studio returned an error",
-				);
-			}
+			if (data.error) throw new Error("LM Studio returned an error.");
 
 			return {
 				success: true,
 				message: "LM Studio test successful",
-				data: { response: (data.choices?.[0]?.message?.content || "").trim() },
+				data: {
+					response: String(data.choices?.[0]?.message?.content || "").trim(),
+				},
 			};
 		}
 
-		const response = await fetch(`${normalizedBaseUrl}/api/generate`, {
+		const data = (await fetchAiEndpoint(`${baseUrl}/api/generate`, {
+			label: "Ollama",
 			method: "POST",
-			headers: { "Content-Type": "application/json" },
+			headers: { "Content-Type": "application/json", ...aiAuthHeaders(apiKey) },
 			body: JSON.stringify({
 				model: input.model,
-				prompt:
-					"Reply with one short German sentence confirming that Kurrier AI is ready.",
+				prompt: testPrompt,
 				stream: false,
 				options: {
 					temperature: input.temperature ?? 0.2,
@@ -372,21 +369,16 @@ export const testAiSettings = async (input: {
 				},
 			}),
 			signal: AbortSignal.timeout(60_000),
-		});
-
-		if (!response.ok)
-			throw new Error(`Ollama returned HTTP ${response.status}`);
-
-		const data = (await response.json()) as {
+		})) as {
 			response?: string;
 			error?: string;
 		};
-		if (data.error) throw new Error(data.error);
+		if (data.error) throw new Error("Ollama returned an error.");
 
 		return {
 			success: true,
 			message: "Ollama test successful",
-			data: { response: (data.response || "").trim() },
+			data: { response: String(data.response || "").trim() },
 		};
 	});
 };
@@ -672,7 +664,9 @@ export async function initializeDomainIdentity(
 			const { WEB_URL } = getPublicEnv();
 			const localTunnelUrl = await kvGet("local-tunnel-url");
 			const url = localTunnelUrl ? localTunnelUrl : WEB_URL;
-			opts.webHookUrl = `${url}/api/v1/hooks/sendgrid/inbound`;
+			opts.webHookUrl = withInboundWebhookToken(
+				`${url}/api/v1/hooks/sendgrid/inbound`,
+			);
 		}
 		const identity = await mailer.addDomain(String(data?.value), opts);
 
@@ -736,9 +730,13 @@ export async function verifyDomainIdentity(
 			const localTunnelUrl = await kvGet("local-tunnel-url");
 			const url = localTunnelUrl ? localTunnelUrl : WEB_URL;
 			if (providerAccount?.provider?.type === "mailgun") {
-				opts.webHookUrl = `${url}/api/v1/hooks/${providerAccount?.provider?.type}/mime`;
+				opts.webHookUrl = withInboundWebhookToken(
+					`${url}/api/v1/hooks/${providerAccount?.provider?.type}/mime`,
+				);
 			} else {
-				opts.webHookUrl = `${url}/api/v1/hooks/${providerAccount?.provider?.type}/inbound`;
+				opts.webHookUrl = withInboundWebhookToken(
+					`${url}/api/v1/hooks/${providerAccount?.provider?.type}/inbound`,
+				);
 			}
 		}
 
@@ -1204,6 +1202,7 @@ export const getDashboardStats = async () => {
 		const rls = await rlsClient();
 
 		const data = await withServerCache(
+			session.user.id,
 			`dashboard-stats:${session.user.id}`,
 			30,
 			() =>

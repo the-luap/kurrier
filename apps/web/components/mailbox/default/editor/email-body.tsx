@@ -19,7 +19,9 @@ export function EmailBody({ html }: Props) {
 		);
 	}, [html]);
 
-	// Optional: ensure links open in new tab and no scripts sneak in
+	// Optional: ensure links open in new tab and no scripts sneak in.
+	// Re-run only when the rendered HTML changes.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: safeHtml is the DOM content this effect patches
 	useEffect(() => {
 		const el = hostRef.current;
 		if (!el) return;
@@ -27,7 +29,7 @@ export function EmailBody({ html }: Props) {
 			a.rel = "nofollow noopener noreferrer";
 			a.target = "_blank";
 		}
-	});
+	}, [safeHtml]);
 
 	return (
 		<div className="space-y-2">

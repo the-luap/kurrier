@@ -28,6 +28,7 @@ import type {
 	EmailEditorHandle,
 	InitialDraft,
 } from "@/components/mailbox/default/editor/email-editor";
+import type { AuthStatus } from "@/components/mailbox/default/auth-status";
 import MailUnsubscriber from "@/components/mailbox/default/mail-unsubscriber";
 import {
 	type FetchIdentityMailboxListResult,
@@ -68,43 +69,10 @@ function formatAddressList(message: MessageEntity, field: "to" | "cc"): string {
 		.join(", ");
 }
 
-function getHeaderValue(headers: unknown, name: string) {
-	if (!headers || typeof headers !== "object") return "";
-	const record = headers as Record<string, unknown>;
-	const direct =
-		record[name] ?? record[name.toLowerCase()] ?? record[name.toUpperCase()];
-	if (typeof direct === "string") return direct;
-	if (direct && typeof direct === "object" && "value" in direct) {
-		return String((direct as { value?: unknown }).value ?? "");
-	}
-	return "";
-}
-
-function getAuthStatus(headers: unknown) {
-	const authResults = getHeaderValue(headers, "authentication-results");
-	const receivedSpf = getHeaderValue(headers, "received-spf");
-	const dkim = /dkim=\s*pass/i.test(authResults)
-		? "pass"
-		: /dkim=\s*fail/i.test(authResults)
-			? "fail"
-			: "unknown";
-	const dmarc = /dmarc=\s*pass/i.test(authResults)
-		? "pass"
-		: /dmarc=\s*fail/i.test(authResults)
-			? "fail"
-			: "unknown";
-	const spf =
-		/spf=\s*pass/i.test(authResults) || /pass/i.test(receivedSpf)
-			? "pass"
-			: /spf=\s*fail/i.test(authResults) || /fail/i.test(receivedSpf)
-				? "fail"
-				: "unknown";
-	return { authResults, dkim, dmarc, spf };
-}
-
 function authClass(value: string) {
 	if (value === "pass") return "text-green-700 dark:text-green-400";
 	if (value === "fail") return "text-red-700 dark:text-red-400";
+	if (value === "warn") return "text-amber-700 dark:text-amber-400";
 	return "text-muted-foreground";
 }
 
@@ -170,6 +138,7 @@ function EmailRenderer({
 	markSmtp,
 	activeMailboxId,
 	mailSubscription,
+	authStatus,
 	children,
 }: {
 	threadIndex: number;
@@ -181,6 +150,7 @@ function EmailRenderer({
 	markSmtp: boolean;
 	activeMailboxId: string;
 	mailSubscription: FetchThreadMailSubsResult["byMessageId"] | null;
+	authStatus?: AuthStatus | null;
 	children?: React.ReactNode;
 }) {
 	const receivedAt = message.date ?? message.createdAt;
@@ -194,7 +164,6 @@ function EmailRenderer({
 	const router = useRouter();
 	const [isRead, setIsRead] = useState(Boolean(message.seen));
 	const [isMutating, setIsMutating] = useState(false);
-	const authStatus = getAuthStatus(message.headersJson);
 
 	const [sentMailboxId, setSentMailboxId] = useState<string | undefined>(
 		undefined,
@@ -472,19 +441,20 @@ function EmailRenderer({
 						</div>
 					</div>
 
-					{(["spf", "dkim", "dmarc"] as const).map((kind) => (
-						<div key={kind} className="grid grid-cols-[160px_1fr] border-b">
-							<div className="bg-muted px-3 py-2 font-medium uppercase text-muted-foreground">
-								{kind}
+					{authStatus &&
+						(["spf", "dkim", "dmarc"] as const).map((kind) => (
+							<div key={kind} className="grid grid-cols-[160px_1fr] border-b">
+								<div className="bg-muted px-3 py-2 font-medium uppercase text-muted-foreground">
+									{kind}
+								</div>
+								<div
+									className={`px-3 py-2 font-semibold uppercase ${authClass(authStatus[kind])}`}
+								>
+									{authStatus[kind]}
+								</div>
 							</div>
-							<div
-								className={`px-3 py-2 font-semibold uppercase ${authClass(authStatus[kind])}`}
-							>
-								{authStatus[kind]}
-							</div>
-						</div>
-					))}
-					{authStatus.authResults && (
+						))}
+					{authStatus?.authResults && (
 						<div className="grid grid-cols-[160px_1fr]">
 							<div className="bg-muted px-3 py-2 font-medium text-muted-foreground">
 								Authentication-Results
@@ -594,16 +564,18 @@ function EmailRenderer({
 							</div>
 						</div>
 					)}
-					<div className="mt-1 flex gap-1 text-[11px] uppercase">
-						{(["spf", "dkim", "dmarc"] as const).map((kind) => (
-							<span
-								key={kind}
-								className={`rounded border px-1.5 py-0.5 ${authClass(authStatus[kind])}`}
-							>
-								{kind} {authStatus[kind]}
-							</span>
-						))}
-					</div>
+					{authStatus && (
+						<div className="mt-1 flex gap-1 text-[11px] uppercase">
+							{(["spf", "dkim", "dmarc"] as const).map((kind) => (
+								<span
+									key={kind}
+									className={`rounded border px-1.5 py-0.5 ${authClass(authStatus[kind])}`}
+								>
+									{kind} {authStatus[kind]}
+								</span>
+							))}
+						</div>
+					)}
 				</div>
 
 				{/*<div className={"col-span-6 my-1"}>*/}

@@ -6,7 +6,7 @@ import { useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 
 import DOMPurify from "dompurify";
-import React, {
+import {
 	forwardRef,
 	useEffect,
 	useImperativeHandle,
@@ -31,23 +31,9 @@ type TextEditorProps = {
 };
 
 import type { MessageEntity } from "@db";
-import { Temporal } from "@js-temporal/polyfill";
 import EditorFooter from "@/components/mailbox/default/editor/editor-footer";
 import EditorHeader from "@/components/mailbox/default/editor/editor-header";
 import { useDynamicContext } from "@/hooks/use-dynamic-context";
-
-function formatWhen(d: Date) {
-	return Temporal.Instant.from(d.toISOString())
-		.toZonedDateTimeISO(Temporal.Now.timeZoneId())
-		.toLocaleString("en-GB", {
-			day: "2-digit",
-			month: "short",
-			year: "numeric",
-			hour: "2-digit",
-			minute: "2-digit",
-			hour12: false,
-		});
-}
 
 // Empty paragraphs from the editor ("<p></p>") collapse to zero height in
 // most mail clients, so blank lines typed by the user would disappear.

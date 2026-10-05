@@ -60,7 +60,7 @@ export class SendgridMailer implements Mailer {
 		opts?: { subject?: string; body?: string; from?: string },
 	): Promise<boolean> {
 		try {
-			const res = await this.mailClient.send({
+			await this.mailClient.send({
 				to,
 				from: opts?.from ?? "no-reply@kurrier.org",
 				subject: opts?.subject ?? "Test email",

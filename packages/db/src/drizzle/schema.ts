@@ -34,7 +34,7 @@ import {
     labelScopesList,
     mailboxKindsList,
     mailboxSyncPhase, MailRuleMatchV1,
-    mailRulesActionsList, mailRulesFieldsList, mailRulesLogicList, mailRulesOpsList, mailSubscriptionStatusList,
+    mailRulesActionsList, mailSubscriptionStatusList,
     messagePriorityList,
     messageStatesList,
     providersList,
@@ -138,11 +138,11 @@ export const userAiSettings = pgTable(
 	{
 		id: uuid("id").defaultRandom().primaryKey(),
 		ownerId: uuid("owner_id")
-			.references(() => users.id)
+			.references(() => users.id, { onDelete: "cascade" })
 			.notNull()
 			.default(sql`auth.uid()`),
 		provider: text("provider").notNull().default("ollama"),
-		baseUrl: text("base_url").notNull().default("http://10.0.252.12:11434"),
+		baseUrl: text("base_url").notNull().default("http://localhost:11434"),
 		model: text("model").notNull().default("gemma3:12b"),
 		apiKey: text("api_key"),
 		systemPrompt: text("system_prompt"),
@@ -150,7 +150,7 @@ export const userAiSettings = pgTable(
 			.notNull()
 			.default("0.4"),
 		maxTokens: integer("max_tokens").notNull().default(700),
-		enabled: boolean("enabled").notNull().default(true),
+		enabled: boolean("enabled").notNull().default(false),
 		createdAt: timestamp("created_at", { withTimezone: true })
 			.defaultNow()
 			.notNull(),
@@ -175,6 +175,11 @@ export const userAiSettings = pgTable(
 			to: authenticatedRole,
 			using: sql`${t.ownerId} = ${authUid}`,
 			withCheck: sql`${t.ownerId} = ${authUid}`,
+		}),
+		pgPolicy("user_ai_settings_delete_own", {
+			for: "delete",
+			to: authenticatedRole,
+			using: sql`${t.ownerId} = ${authUid}`,
 		}),
 	],
 ).enableRLS();

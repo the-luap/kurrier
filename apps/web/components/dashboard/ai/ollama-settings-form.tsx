@@ -12,7 +12,7 @@ import {
 	TextInput,
 } from "@mantine/core";
 import type { FormState } from "@schema";
-import { useActionState, useEffect, useMemo, useState } from "react";
+import { useActionState, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
 	listAiModels,
@@ -27,8 +27,17 @@ type AiModel = {
 	quantization?: string;
 };
 
+const PROVIDER_DEFAULTS: Record<string, { baseUrl: string; model: string }> = {
+	ollama: { baseUrl: "http://localhost:11434", model: "gemma3:12b" },
+	lmstudio: { baseUrl: "http://localhost:1234/v1", model: "" },
+};
+
+const errorMessage = (error: unknown) =>
+	error instanceof Error ? error.message : "Unexpected error.";
+
 type Props = {
 	settings: {
+		id?: string;
 		provider?: string;
 		baseUrl: string;
 		model: string;
@@ -47,9 +56,15 @@ const formatSize = (bytes?: number) => {
 };
 
 export default function OllamaSettingsForm({ settings, initialModels }: Props) {
-	const [provider, setProvider] = useState(settings.provider || "ollama");
-	const [baseUrl, setBaseUrl] = useState(settings.baseUrl);
-	const [model, setModel] = useState(settings.model);
+	const savedProvider = settings.provider || "ollama";
+	// Without saved settings, start from local defaults rather than whatever
+	// the server falls back to.
+	const savedValues = settings.id
+		? { baseUrl: settings.baseUrl, model: settings.model }
+		: (PROVIDER_DEFAULTS[savedProvider] ?? PROVIDER_DEFAULTS.ollama);
+	const [provider, setProvider] = useState(savedProvider);
+	const [baseUrl, setBaseUrl] = useState(savedValues.baseUrl);
+	const [model, setModel] = useState(savedValues.model);
 	const [apiKey, setApiKey] = useState("");
 	const [clearApiKey, setClearApiKey] = useState(false);
 	const [systemPrompt, setSystemPrompt] = useState(settings.systemPrompt ?? "");
@@ -92,12 +107,14 @@ export default function OllamaSettingsForm({ settings, initialModels }: Props) {
 		return rows;
 	}, [models, model]);
 
-	const handleLoadModels = async () => {
+	const handleLoadModels = async ({ silent = false } = {}) => {
 		setIsLoadingModels(true);
 		try {
 			const result = await listAiModels({ provider, baseUrl, apiKey });
 			if (!result.success) {
-				toast.error("Could not load models", { description: result.error });
+				if (!silent) {
+					toast.error("Could not load models", { description: result.error });
+				}
 				return;
 			}
 			const loaded = ((result.data as { models?: AiModel[] })?.models ||
@@ -106,13 +123,33 @@ export default function OllamaSettingsForm({ settings, initialModels }: Props) {
 			if (loaded.length > 0 && !loaded.some((m) => m.name === model)) {
 				setModel(loaded[0].name);
 			}
-			toast.success(
-				`${provider === "lmstudio" ? "LM Studio" : "Ollama"}: loaded ${loaded.length} model${loaded.length === 1 ? "" : "s"}`,
-			);
+			if (!silent) {
+				toast.success(
+					`${provider === "lmstudio" ? "LM Studio" : "Ollama"}: loaded ${loaded.length} model${loaded.length === 1 ? "" : "s"}`,
+				);
+			}
+		} catch (error) {
+			if (!silent) {
+				toast.error("Could not load models", {
+					description: errorMessage(error),
+				});
+			}
 		} finally {
 			setIsLoadingModels(false);
 		}
 	};
+
+	// The page renders without waiting for the provider (it may be offline);
+	// fetch the model list once after mount when settings were saved before.
+	const autoLoadedRef = useRef(false);
+	// biome-ignore lint/correctness/useExhaustiveDependencies: mount-only; uses the initial saved settings
+	useEffect(() => {
+		if (autoLoadedRef.current) return;
+		autoLoadedRef.current = true;
+		if (settings.id && settings.baseUrl && initialModels.length === 0) {
+			void handleLoadModels({ silent: true });
+		}
+	}, []);
 
 	const handleTest = async () => {
 		setIsTesting(true);
@@ -135,6 +172,8 @@ export default function OllamaSettingsForm({ settings, initialModels }: Props) {
 			);
 			setTestResponse(response);
 			toast.success(result.message || "AI test successful");
+		} catch (error) {
+			toast.error("AI test failed", { description: errorMessage(error) });
 		} finally {
 			setIsTesting(false);
 		}
@@ -173,13 +212,16 @@ export default function OllamaSettingsForm({ settings, initialModels }: Props) {
 						value={provider}
 						onChange={(value) => {
 							const nextProvider = value || "ollama";
+							if (nextProvider === provider) return;
 							setProvider(nextProvider);
-							setBaseUrl(
-								nextProvider === "lmstudio"
-									? "http://localhost:1234/v1"
-									: "http://10.0.252.12:11434",
-							);
-							setModel(nextProvider === "lmstudio" ? "" : "gemma3:12b");
+							// Switching back to the saved provider restores its values.
+							const next =
+								nextProvider === savedProvider
+									? savedValues
+									: (PROVIDER_DEFAULTS[nextProvider] ??
+										PROVIDER_DEFAULTS.ollama);
+							setBaseUrl(next.baseUrl);
+							setModel(next.model);
 							setModels([]);
 						}}
 					/>
@@ -190,8 +232,8 @@ export default function OllamaSettingsForm({ settings, initialModels }: Props) {
 						onChange={(event) => setBaseUrl(event.currentTarget.value)}
 						placeholder={
 							provider === "lmstudio"
-								? "http://10.0.252.x:1234/v1"
-								: "http://10.0.252.12:11434"
+								? PROVIDER_DEFAULTS.lmstudio.baseUrl
+								: PROVIDER_DEFAULTS.ollama.baseUrl
 						}
 						required
 					/>
@@ -210,7 +252,7 @@ export default function OllamaSettingsForm({ settings, initialModels }: Props) {
 							type="button"
 							variant="light"
 							loading={isLoadingModels}
-							onClick={handleLoadModels}
+							onClick={() => handleLoadModels()}
 						>
 							Load models
 						</Button>
@@ -272,7 +314,7 @@ export default function OllamaSettingsForm({ settings, initialModels }: Props) {
 					label="Default instruction"
 					value={systemPrompt}
 					onChange={(event) => setSystemPrompt(event.currentTarget.value)}
-					placeholder="Example: Antworte standardmäßig prägnant, freundlich und auf Deutsch. Keine Fakten erfinden."
+					placeholder="Example: Reply concisely and politely, in the language of the original email. Do not invent facts."
 					autosize
 					minRows={3}
 					maxRows={8}

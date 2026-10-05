@@ -6,8 +6,8 @@ import { DateTimePicker } from "@mantine/dates";
 import { useDisclosure } from "@mantine/hooks";
 import { getTimeZones } from "@vvo/tzdb";
 import type { Dayjs } from "dayjs";
-import { CalendarClock, Clock4, X } from "lucide-react";
-import React, { useMemo, useState } from "react";
+import { CalendarClock, Clock4 } from "lucide-react";
+import { useMemo, useState } from "react";
 import { snoozeThread } from "@/lib/actions/mailbox";
 
 function formatWhen(d: Date) {

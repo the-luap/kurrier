@@ -5,7 +5,7 @@ import {
 	TagsInput,
 	type TagsInputProps,
 } from "@mantine/core";
-import React, { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import ContactSuggestionItem from "@/components/mailbox/default/editor/contact-suggestion-item";
 import { searchContactsForCompose } from "@/lib/actions/calendar";
 

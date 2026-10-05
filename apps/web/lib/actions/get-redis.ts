@@ -27,76 +27,103 @@ function getRedisConnection(): RedisConnection {
 	};
 }
 
-function silenceRedisErrors<
-	T extends { on: (event: "error", cb: () => void) => T },
->(client: T): T {
-	return client.on("error", () => {
+type QueueName =
+	| "smtp-worker"
+	| "send-mail"
+	| "search-ingest"
+	| "migration-worker"
+	| "dav-worker"
+	| "common-worker";
+
+type QueuePair = { queue: Queue; events?: QueueEvents };
+
+// Queues and their event streams are shared per process. Creating them per
+// call leaked ~10 Redis connections for every mail action. The connections
+// don't reconnect (retryStrategy: null), so a client that errors is dropped
+// and recreated on the next call.
+const globalQueues = globalThis as unknown as {
+	__kurrierQueues?: Map<QueueName, QueuePair>;
+};
+const queues = (globalQueues.__kurrierQueues ??= new Map());
+
+function dropQueue(name: QueueName, pair: QueuePair) {
+	if (queues.get(name) !== pair) return;
+	queues.delete(name);
+	pair.queue.close().catch(() => {});
+	pair.events?.close().catch(() => {});
+}
+
+function getPair(name: QueueName): QueuePair {
+	let pair = queues.get(name);
+	if (!pair) {
+		const created: QueuePair = {
+			queue: new Queue(name, getRedisConnection()),
+		};
 		// Redis-backed queues are best-effort at render time; callers surface failures.
-	});
+		created.queue.on("error", () => dropQueue(name, created));
+		queues.set(name, created);
+		pair = created;
+	}
+	return pair;
+}
+
+export function getQueue(name: QueueName): Queue {
+	return getPair(name).queue;
+}
+
+export async function getQueueEvents(name: QueueName): Promise<QueueEvents> {
+	const pair = getPair(name);
+	if (!pair.events) {
+		const events = new QueueEvents(name, getRedisConnection());
+		events.on("error", () => dropQueue(name, pair));
+		pair.events = events;
+	}
+	try {
+		await pair.events.waitUntilReady();
+	} catch (error) {
+		dropQueue(name, pair);
+		throw error;
+	}
+	return pair.events;
 }
 
 export const getRedis = async () => {
-	const redisConnection = getRedisConnection();
-	const smtpQueue = silenceRedisErrors(
-		new Queue("smtp-worker", redisConnection),
-	);
-	const smtpEvents = silenceRedisErrors(
-		new QueueEvents("smtp-worker", redisConnection),
-	);
-
-	const sendMailQueue = silenceRedisErrors(
-		new Queue("send-mail", redisConnection),
-	);
-	const sendMailEvents = silenceRedisErrors(
-		new QueueEvents("send-mail", redisConnection),
-	);
-
-	const searchIngestQueue = silenceRedisErrors(
-		new Queue("search-ingest", redisConnection),
-	);
-	const searchIngestEvents = silenceRedisErrors(
-		new QueueEvents("search-ingest", redisConnection),
-	);
-
-	const migrationWorkerQueue = silenceRedisErrors(
-		new Queue("migration-worker", redisConnection),
-	);
-	const migrationWorkerEvents = silenceRedisErrors(
-		new QueueEvents("migration-worker", redisConnection),
-	);
-
-	const davQueue = silenceRedisErrors(new Queue("dav-worker", redisConnection));
-	const davEvents = silenceRedisErrors(
-		new QueueEvents("dav-worker", redisConnection),
-	);
-
-	await smtpEvents.waitUntilReady();
-	await sendMailEvents.waitUntilReady();
-	await searchIngestEvents.waitUntilReady();
-	await davEvents.waitUntilReady();
-	await migrationWorkerEvents.waitUntilReady();
+	const [
+		smtpEvents,
+		sendMailEvents,
+		searchIngestEvents,
+		davEvents,
+		migrationWorkerEvents,
+	] = await Promise.all([
+		getQueueEvents("smtp-worker"),
+		getQueueEvents("send-mail"),
+		getQueueEvents("search-ingest"),
+		getQueueEvents("dav-worker"),
+		getQueueEvents("migration-worker"),
+	]);
 
 	return {
-		smtpQueue,
+		smtpQueue: getQueue("smtp-worker"),
 		smtpEvents,
-		sendMailQueue,
+		sendMailQueue: getQueue("send-mail"),
 		sendMailEvents,
-		searchIngestQueue,
+		searchIngestQueue: getQueue("search-ingest"),
 		searchIngestEvents,
-		davQueue,
+		davQueue: getQueue("dav-worker"),
 		davEvents,
-		migrationWorkerQueue,
+		migrationWorkerQueue: getQueue("migration-worker"),
 		migrationWorkerEvents,
 	};
 };
 
 export const getSmtpQueue = async () => {
-	const redisConnection = getRedisConnection();
-	const smtpQueue = silenceRedisErrors(
-		new Queue("smtp-worker", redisConnection),
-	);
+	const pair = getPair("smtp-worker");
+	try {
+		await pair.queue.waitUntilReady();
+	} catch (error) {
+		dropQueue("smtp-worker", pair);
+		throw error;
+	}
 
-	await smtpQueue.waitUntilReady();
-
-	return { smtpQueue };
+	return { smtpQueue: pair.queue };
 };

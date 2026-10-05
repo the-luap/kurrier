@@ -39,8 +39,11 @@ export const fetchLabels = cache(async (scope?: LabelScope) => {
 	const user = await isSignedIn();
 	if (!user?.id) return fetchLabelsUncached(selectedScope);
 
-	return withServerCache(`labels:${user.id}:${selectedScope}`, 30, () =>
-		fetchLabelsUncached(selectedScope),
+	return withServerCache(
+		user.id,
+		`labels:${user.id}:${selectedScope}`,
+		30,
+		() => fetchLabelsUncached(selectedScope),
 	);
 });
 
@@ -80,8 +83,11 @@ export const fetchLabelsWithCounts = cache(async () => {
 	const user = await isSignedIn();
 	if (!user?.id) return fetchLabelsWithCountsUncached();
 
-	return withServerCache(`labels-with-counts:${user.id}:thread`, 30, () =>
-		fetchLabelsWithCountsUncached(),
+	return withServerCache(
+		user.id,
+		`labels-with-counts:${user.id}:thread`,
+		30,
+		() => fetchLabelsWithCountsUncached(),
 	);
 });
 
@@ -126,8 +132,11 @@ export const fetchContactLabelsWithCounts = cache(async () => {
 	const user = await isSignedIn();
 	if (!user?.id) return fetchContactLabelsWithCountsUncached();
 
-	return withServerCache(`labels-with-counts:${user.id}:contact`, 30, () =>
-		fetchContactLabelsWithCountsUncached(),
+	return withServerCache(
+		user.id,
+		`labels-with-counts:${user.id}:contact`,
+		30,
+		() => fetchContactLabelsWithCountsUncached(),
 	);
 });
 

@@ -1,7 +1,7 @@
 import type { MailboxThreadEntity } from "@db";
-import dayjs from "dayjs";
 import { Inbox, Mail, Paperclip } from "lucide-react";
 import Link from "next/link";
+import LocalTime from "@/components/mailbox/local-time";
 import SyncAllMailboxesButton from "@/components/mailbox/sync-all-mailboxes-button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -69,7 +69,7 @@ export default function MailboxOverview({ overview }: MailboxOverviewProps) {
 							Inbox overview
 						</h1>
 						<p className="text-sm text-muted-foreground">
-							Kurzer Überblick pro Account — nur Inbox und neue Mails.
+							A quick look at each account — Inbox and new mail only.
 						</p>
 					</div>
 					<div className="flex flex-wrap items-center gap-2 text-sm">
@@ -184,9 +184,7 @@ export default function MailboxOverview({ overview }: MailboxOverviewProps) {
 														</div>
 														<p className="truncate text-xs text-muted-foreground">
 															{participantLabel(thread.participants)} ·{" "}
-															{dayjs(thread.lastActivityAt).format(
-																"DD.MM. HH:mm",
-															)}
+															<LocalTime value={thread.lastActivityAt} />
 														</p>
 													</div>
 												</Link>
