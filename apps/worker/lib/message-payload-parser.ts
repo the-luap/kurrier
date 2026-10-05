@@ -263,9 +263,12 @@ export async function createOrInitializeThread(
 				.orderBy(desc(messages.date ?? sql`now()`));
 
 			if (parentMsgs.length) {
-				const chosen = inReplyTo
-					? parentMsgs.find((m) => m.messageId === inReplyTo)
-					: parentMsgs[0];
+				// In-Reply-To may name a message we do not have (sent from
+				// another account, deleted): fall back to a References match.
+				const chosen =
+					(inReplyTo
+						? parentMsgs.find((m) => m.messageId === inReplyTo)
+						: undefined) ?? parentMsgs[0];
 
 				if (chosen?.threadId) {
 					const [t] = await tx
@@ -438,7 +441,12 @@ async function storeAttachments(opts: {
 
 
 export async function parseAndStoreEmail(
-	rawEmail: string,
+	/**
+	 * Raw RFC822 bytes. Pass the Buffer as received: converting 8-bit
+	 * non-UTF-8 mail (e.g. ISO-8859-1 bodies) to a string first replaces
+	 * every non-ASCII byte with U+FFFD before mailparser sees the charset.
+	 */
+	rawEmail: string | Buffer,
 	opts: {
 		ownerId: string;
 		workspaceId: string;
@@ -461,8 +469,11 @@ export async function parseAndStoreEmail(
 	// Keep "cid:" references instead of inlining images as base64 data URIs:
 	// inline images are stored as attachments and resolved by the web app,
 	// which keeps the stored HTML (search index, thread payloads) small.
+	const emailBuffer: Uint8Array =
+		typeof rawEmail === "string" ? new TextEncoder().encode(rawEmail) : rawEmail;
 	const parsed =
-		opts.parsed ?? (await simpleParser(rawEmail, { keepCidLinks: true }));
+		opts.parsed ??
+		(await simpleParser(Buffer.from(emailBuffer), { keepCidLinks: true }));
 	const headers = parsed.headers as Map<string, any>;
 
 	const messageId =
@@ -530,11 +541,19 @@ export async function parseAndStoreEmail(
 			})
 			.where(eq(messages.id, existingMessage.id));
 
+		// Flags changed on the server (replay): keep the thread summary's
+		// unread count in sync.
+		if (
+			(typeof opts.seen === "boolean" && opts.seen !== existingMessage.seen) ||
+			(typeof opts.flagged === "boolean" &&
+				opts.flagged !== existingMessage.flagged)
+		) {
+			await upsertMailboxThreadItem(existingMessage.id);
+		}
+
 		return existingMessage;
 	}
 
-	const encoder = new TextEncoder();
-	const emailBuffer = encoder.encode(rawEmail);
 	const sizeBytes = emailBuffer.byteLength;
 
 	// A failed raw EML upload must not abort the (IMAP) sync: store the
@@ -666,7 +685,9 @@ export async function parseAndStoreEmail(
 	await upsertMailboxThreadItem(message.id);
 
 	// Single conditional UPDATE instead of SELECT + UPDATE.
-	const msgDate = message.createdAt ?? new Date();
+	// The mail's own date: backfilled history must not move every thread
+	// to "now".
+	const msgDate = message.date ?? message.createdAt ?? new Date();
 	await db
 		.update(threads)
 		.set({ lastMessageDate: msgDate })

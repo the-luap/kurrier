@@ -78,7 +78,7 @@ export async function ensureDefaultAddressBookForUser(opts: {
 	const slug = "default";
 	const name = "Contacts";
 
-	const [newBook] = await db
+	let [newBook] = await db
 		.insert(addressBooks)
 		.values({
 			ownerId,
@@ -89,6 +89,20 @@ export async function ensureDefaultAddressBookForUser(opts: {
 		})
 		.onConflictDoNothing()
 		.returning()
+
+	// Retried job (the DAV call below failed last time): the row exists.
+	if (!newBook) {
+		[newBook] = await db
+			.select()
+			.from(addressBooks)
+			.where(
+				and(
+					eq(addressBooks.workspaceId, workspaceId),
+					eq(addressBooks.ownerId, ownerId),
+				),
+			)
+			.limit(1);
+	}
 
 	if (!newBook) throw new Error("Address book missing after insert");
 

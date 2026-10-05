@@ -212,7 +212,31 @@ export default defineNitroPlugin(async (nitroApp) => {
 			)
 			.returning({ id: draftMessages.id });
 
-		if (claimed.length === 0) return;
+		if (claimed.length === 0) {
+			// A worker that died mid-send leaves the draft in "sending" and the
+			// stalled job comes back here. Whether the mail went out is unknown:
+			// do not send it again, but do not leave it hanging either.
+			if (draft.status === "sending") {
+				await db
+					.update(draftMessages)
+					.set({
+						status: "failed",
+						payload: {
+							...draft.payload,
+							__error:
+								"Sending was interrupted. Check the Sent folder before retrying.",
+						},
+						updatedAt: new Date(),
+					})
+					.where(
+						and(
+							eq(draftMessages.id, draft.id),
+							eq(draftMessages.status, "sending"),
+						),
+					);
+			}
+			return;
+		}
 
 		try {
 			const result = await send(draft.payload);
@@ -454,12 +478,22 @@ export default defineNitroPlugin(async (nitroApp) => {
 			});
 
 			if (mailerResponse.success) {
+				// String(undefined) is "undefined": every send through a provider
+				// that returns no id collided on (mailbox_id, message_id).
+				const sentMessageId = mailerResponse.MessageId
+					? String(mailerResponse.MessageId)
+					: `<${randomUUID()}@kurrier.local>`;
+				// The mail is out. Store the sent copy in a savepoint: a DB error
+				// here must not roll back / fail the job (the user or a retry
+				// would send the mail a second time).
+				try {
+				await tx.transaction(async (sp) => {
 				const parsedMessage = MessageInsertSchema.parse({
 					...newMessageBody,
-					messageId: String(mailerResponse.MessageId) || `msg-${Date.now()}`,
+					messageId: sentMessageId,
 				});
 
-				const [newMessage] = await tx
+				const [newMessage] = await sp
 					.insert(messages)
 					.values(parsedMessage as MessageCreate)
 					.returning();
@@ -469,7 +503,7 @@ export default defineNitroPlugin(async (nitroApp) => {
 				// back the stored message (the user would send it again).
 				try {
 					const emlBuffer = await buildEmlBuffer({
-						messageId: String(mailerResponse.MessageId) || `msg-${Date.now()}`,
+						messageId: sentMessageId,
 						from: mailbox.identity.value,
 						to: data.to || [],
 						cc: data.cc || [],
@@ -490,7 +524,7 @@ export default defineNitroPlugin(async (nitroApp) => {
 							ContentType: "message/rfc822",
 						}),
 					);
-					await tx
+					await sp
 						.update(messages)
 						.set({
 							rawStorageKey,
@@ -521,7 +555,7 @@ export default defineNitroPlugin(async (nitroApp) => {
 						)
 					).filter((item) => item !== null);
 					if (items.length) {
-						await tx.insert(messageAttachments).values(
+						await sp.insert(messageAttachments).values(
 							items.map((item) => ({
 								...item,
 								ownerId: newMessage.ownerId,
@@ -532,9 +566,16 @@ export default defineNitroPlugin(async (nitroApp) => {
 					}
 				}
 
-				await upsertMailboxThreadItem(newMessage.id, tx);
+				await upsertMailboxThreadItem(newMessage.id, sp);
 
 				indexMessageId = newMessage.id;
+				});
+				} catch (error) {
+					console.error(
+						"[send-mail] mail was sent but storing the sent copy failed",
+						error,
+					);
+				}
 			} else {
 				// Some providers only return { success: false } without details.
 				return {

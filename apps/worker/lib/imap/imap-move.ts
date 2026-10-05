@@ -82,6 +82,9 @@ export const moveMail = async (
 		.where(sourceScope);
 	if (threadMsgs.length === 0) return;
 
+	// New UID per moved message row (null: server did not report one).
+	const newUids = new Map<string, number | null>();
+
 	if (moveImap) {
 		type Group = { path: string; uids: number[]; messageIds: string[] };
 		const byPath = new Map<string, Group>();
@@ -108,20 +111,30 @@ export const moveMail = async (
 		} else {
 			const client = await initSmtpClient(srcMailbox.identityId, imapInstances);
 			if (client?.authenticated && client.usable) {
-				try {
-					for (const { path: srcPath, uids } of byPath.values()) {
-						if (!uids.length) continue;
-						const lock = await client.getMailboxLock(srcPath);
-						try {
-							await client.messageMove(uids, destPath, { uid: true });
-						} finally {
-							lock.release();
-						}
+				for (const { path: srcPath, uids, messageIds } of byPath.values()) {
+					if (!uids.length) continue;
+					const lock = await client.getMailboxLock(srcPath);
+					try {
+						// UIDs change with the folder: keep the destination UID
+						// (UIDPLUS) instead of the stale source UID, which would
+						// address another message in the destination folder.
+						const res = await client.messageMove(uids, destPath, {
+							uid: true,
+						});
+						uids.forEach((uid, i) => {
+							newUids.set(
+								messageIds[i],
+								(res && res.uidMap?.get(uid)) || null,
+							);
+						});
+					} finally {
+						lock.release();
 					}
-				} catch (err) {
-					console.error("[mail:move] IMAP move failed:", err);
-					// Let DB update happen; delta sync can reconcile.
 				}
+				// An IMAP failure throws: the job is retried and the DB is
+				// not moved away from where the message still is.
+			} else {
+				throw new Error("[mail:move] IMAP client not usable");
 			}
 		}
 	}
@@ -145,12 +158,48 @@ export const moveMail = async (
 
 		await tx.update(messages).set(set).where(sourceScope);
 
+		for (const [id, uid] of newUids) {
+			await tx
+				.update(messages)
+				.set({
+					metaData: sql`jsonb_set(coalesce(${messages.metaData}, '{}'::jsonb), '{imap,uid}', ${uid === null ? sql`'null'::jsonb` : sql`to_jsonb(${uid}::bigint)`}, true)`,
+				})
+				.where(eq(messages.id, id));
+		}
+
 		if (messageId) {
 			await moveSingleMessageSummary(tx, {
 				threadId,
 				fromMailboxId,
 				messageId,
 			});
+			return;
+		}
+
+		// The thread may already have a row in the destination (part of it
+		// was moved / archived before): (thread_id, mailbox_id) is the
+		// primary key, so merge into that row instead of renaming onto it.
+		const [destRow] = await tx
+			.select({ threadId: mailboxThreads.threadId })
+			.from(mailboxThreads)
+			.where(
+				and(
+					eq(mailboxThreads.threadId, threadId),
+					eq(mailboxThreads.mailboxId, destMailboxRow.id),
+				),
+			)
+			.limit(1);
+
+		if (destRow) {
+			await tx
+				.delete(mailboxThreads)
+				.where(
+					and(
+						eq(mailboxThreads.threadId, threadId),
+						eq(mailboxThreads.mailboxId, fromMailboxId),
+					),
+				);
+			await upsertMailboxThreadItem(threadMsgs[0].id, tx);
 			return;
 		}
 

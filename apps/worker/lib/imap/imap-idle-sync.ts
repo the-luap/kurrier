@@ -482,6 +482,7 @@ async function startRealtimeSyncForIdentity(
 		}
 
 		client.removeAllListeners();
+		client.on("error", () => {});
 
 		if (client.usable) {
 			try {
@@ -577,6 +578,7 @@ export async function startRealtimeForIdentity(
 		if (client) {
 			try {
 				client.removeAllListeners();
+				client.on("error", () => {});
 				client.close();
 			} catch {}
 		}
@@ -652,6 +654,7 @@ export async function stopRealtimeForIdentity(
 	if (idleClient) {
 		try {
 			idleClient.removeAllListeners();
+			idleClient.on("error", () => {});
 			await idleClient.logout();
 		} catch {
 			try {
@@ -663,6 +666,7 @@ export async function stopRealtimeForIdentity(
 	if (cmdClient && cmdClient !== idleClient) {
 		try {
 			cmdClient.removeAllListeners();
+			cmdClient.on("error", () => {});
 			await cmdClient.logout();
 		} catch {
 			try {

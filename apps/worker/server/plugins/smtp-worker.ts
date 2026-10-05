@@ -87,7 +87,9 @@ export default defineNitroPlugin(async (nitroApp) => {
 					{
 						jobId: `refresh-${job.data.threadId}`, // collapses duplicates
 						removeOnComplete: true,
-						removeOnFail: false,
+						// A kept failed job would swallow every later add() with
+						// this id: the thread would never be re-indexed again.
+						removeOnFail: true,
 						attempts: 3,
 						backoff: { type: "exponential", delay: 1500 },
 					},
@@ -307,6 +309,7 @@ export default defineNitroPlugin(async (nitroApp) => {
 				for (const [identityId, client] of map) {
 					try {
 						client.removeAllListeners();
+						client.on("error", () => {});
 						await client.logout();
 
 						console.info(
@@ -320,6 +323,7 @@ export default defineNitroPlugin(async (nitroApp) => {
 
 						try {
 							client.removeAllListeners();
+							client.on("error", () => {});
 							client.close();
 						} catch {}
 					}

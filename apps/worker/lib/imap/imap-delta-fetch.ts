@@ -6,7 +6,7 @@ import {
 	messages,
 	mailboxThreads,
 } from "@db";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { parseAndStoreEmail } from "../message-payload-parser";
 import { initSmtpClient } from "./imap-client";
 import type { ImapFlow } from "imapflow";
@@ -66,8 +66,21 @@ async function runDeltaFetch(
 		.select()
 		.from(mailboxes)
 		.where(eq(mailboxes.identityId, identityId));
+	const identityMailboxIds = mailboxRows.map((m) => m.id);
+	const mailboxById = new Map(mailboxRows.map((m) => [m.id, m]));
+
+	// Folders that hold additional copies of messages stored elsewhere
+	// (Gmail "All Mail", Sent copies of mail sent to oneself, ...): a
+	// Message-ID seen there is not a move.
+	const isCopyFolder = (m: (typeof mailboxRows)[number] | undefined) => {
+		const su = String((m?.metaData as any)?.imap?.specialUse ?? "").toLowerCase();
+		return su === "\\all" || su === "\\sent" || su === "\\flagged" || su === "\\important";
+	};
 
 	for (const row of mailboxRows) {
+		// Folders deleted / renamed on the server (discover marks them).
+		if ((row.metaData as any)?.imap?.selectable === false) continue;
+
 		const [syncRow] = await db
 			.select()
 			.from(mailboxSync)
@@ -91,6 +104,7 @@ async function runDeltaFetch(
 			continue;
 		}
 
+		try {
 		await syncMailbox({
 			client,
 			identityId,
@@ -111,8 +125,8 @@ async function runDeltaFetch(
 				// Pass 1 fetches envelopes only; the source is downloaded in a
 				// second pass for messages that have to be stored.
 				const hasSource = Boolean(msg.source);
-				const raw =
-					(await msg.source?.toString()) || "";
+				// Raw bytes: parseAndStoreEmail decodes the charsets itself.
+				const raw = msg.source ?? Buffer.alloc(0);
 
 				const flags =
 					msg.flags ?? new Set<string>();
@@ -140,7 +154,7 @@ async function runDeltaFetch(
 							mailboxId: row.id,
 
 							rawStorageKey:
-								`eml/${ownerId}/${row.id}/${uid}.eml`,
+								`eml/${ownerId}/${row.id}/${msg.id}.eml`,
 
 							emlKey:
 								String(msg.id),
@@ -162,6 +176,44 @@ async function runDeltaFetch(
 					return;
 				}
 
+				// Already stored in this folder: refresh UID / path / flags
+				// (UIDVALIDITY replay, message moved here by Kurrier).
+				const [here] = await db
+					.select({
+						id: messages.id,
+						seen: messages.seen,
+						flagged: messages.flagged,
+					})
+					.from(messages)
+					.where(
+						and(
+							eq(messages.mailboxId, row.id),
+							eq(messages.messageId, messageId),
+						),
+					)
+					.limit(1);
+
+				if (here) {
+					await db
+						.update(messages)
+						.set({
+							metaData: sql`jsonb_set(coalesce(${messages.metaData}, '{}'::jsonb), '{imap}', coalesce(${messages.metaData} -> 'imap', '{}'::jsonb) || ${JSON.stringify({ uid, mailboxPath: path, flags: [...flags] })}::jsonb, true)`,
+							seen: isSeen,
+							flagged: isFlagged,
+							answered: isAnswered,
+							updatedAt: new Date(),
+						})
+						.where(eq(messages.id, here.id));
+					if (here.seen !== isSeen || here.flagged !== isFlagged) {
+						await upsertMailboxThreadItem(here.id).catch((e) =>
+							console.error("[deltaFetch] upsertMailboxThreadItem failed", e),
+						);
+					}
+					return;
+				}
+
+				// Only this identity's folders: the same mail delivered to two
+				// identities of one user is not a move between them.
 				const [existing] = await db
 					.select({
 						id: messages.id,
@@ -179,11 +231,16 @@ async function runDeltaFetch(
 								messages.messageId,
 								messageId,
 							),
+							inArray(messages.mailboxId, identityMailboxIds),
 						),
 					)
 					.limit(1);
 
-				if (existing) {
+				if (
+					existing &&
+					!isCopyFolder(row) &&
+					!isCopyFolder(mailboxById.get(existing.mailboxId))
+				) {
 					if (
 						existing.mailboxId !== row.id
 					) {
@@ -202,18 +259,9 @@ async function runDeltaFetch(
 								messages.messageId,
 							})
 							.from(messages)
-							.where(
-								and(
-									eq(
-										messages.threadId,
-										existing.threadId,
-									),
-									eq(
-										messages.mailboxId,
-										existing.mailboxId,
-									),
-								),
-							);
+							// Only the moved message, not every message of its thread
+							// in the old folder.
+							.where(eq(messages.id, existing.id));
 
 						for (const m of all) {
 							if (
@@ -271,6 +319,8 @@ async function runDeltaFetch(
 
 									mailboxPath:
 									path,
+									uid,
+									flags: [...flags],
 								},
 							};
 
@@ -297,49 +347,42 @@ async function runDeltaFetch(
 								);
 						}
 
+						// Recompute only the two folders involved: deleting every
+						// mailbox_threads row of the thread dropped it from Sent and
+						// other folders that still hold messages of it.
+						const touchedMailboxIds = [existing.mailboxId, row.id];
 						await db
 							.delete(mailboxThreads)
 							.where(
-								eq(
-									mailboxThreads.threadId,
-									existing.threadId,
+								and(
+									eq(mailboxThreads.threadId, existing.threadId),
+									inArray(mailboxThreads.mailboxId, touchedMailboxIds),
 								),
 							);
 
-						const [newest] =
-							await db
-								.select({
-									id:
-									messages.id,
-								})
+						for (const mailboxIdToSum of touchedMailboxIds) {
+							const [newest] = await db
+								.select({ id: messages.id })
 								.from(messages)
 								.where(
-									eq(
-										messages.threadId,
-										existing.threadId,
+									and(
+										eq(messages.threadId, existing.threadId),
+										eq(messages.mailboxId, mailboxIdToSum),
 									),
 								)
 								.orderBy(
-									desc(
-										sql`
-											coalesce(
-												${messages.date},
-												${messages.createdAt}
-											)
-										`,
-									),
+									desc(sql`coalesce(${messages.date}, ${messages.createdAt})`),
 								)
 								.limit(1);
 
-						if (newest?.id) {
-							await upsertMailboxThreadItem(
-								newest.id,
-							).catch((e) =>
-								console.error(
-									"[deltaFetch] upsertMailboxThreadItem failed",
-									e,
-								),
-							);
+							if (newest?.id) {
+								await upsertMailboxThreadItem(newest.id).catch((e) =>
+									console.error(
+										"[deltaFetch] upsertMailboxThreadItem failed",
+										e,
+									),
+								);
+							}
 						}
 
 						try {
@@ -369,7 +412,7 @@ async function runDeltaFetch(
 										true,
 
 									removeOnFail:
-										false,
+										true,
 								},
 							);
 						} catch (e) {
@@ -395,7 +438,7 @@ async function runDeltaFetch(
 						mailboxId: row.id,
 
 						rawStorageKey:
-							`eml/${ownerId}/${row.id}/${uid}.eml`,
+							`eml/${ownerId}/${row.id}/${msg.id}.eml`,
 
 						emlKey:
 							String(msg.id),
@@ -415,6 +458,15 @@ async function runDeltaFetch(
 				);
 			},
 		});
+		} catch (err: any) {
+			// One failing (deleted / renamed) folder must not stop the sync
+			// of every folder after it.
+			if (!client.usable) throw err;
+			console.error(
+				`[deltaFetch:${identityId}] mailbox ${path} failed`,
+				err?.message ?? err,
+			);
+		}
 	}
 }
 

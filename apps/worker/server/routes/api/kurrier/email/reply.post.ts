@@ -1,5 +1,5 @@
 import { db, identities, mailboxes, messages } from "@db";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { createError, defineEventHandler, getQuery } from "h3";
 import {
 	API_SCOPES,
@@ -31,6 +31,8 @@ function readRecipients(
 ): string[] | undefined {
 	if (value === undefined || value === null) return undefined;
 	const list = Array.isArray(value) ? value : [value];
+	// cc: [] / bcc: [] just mean "none".
+	if (!list.length && path !== "to") return [];
 	const out: string[] = [];
 	for (const entry of list) {
 		const address = typeof entry === "string" ? entry.trim() : "";
@@ -203,7 +205,8 @@ export default defineEventHandler(async (event) => {
 				accessibleIdentityCondition(actor),
 			),
 		)
-		.orderBy(desc(messages.date), desc(messages.createdAt))
+		// DESC sorts NULL first in Postgres: an undated message is not "latest".
+		.orderBy(sql`${messages.date} desc nulls last`, desc(messages.createdAt))
 		.limit(1);
 
 	if (!original) {

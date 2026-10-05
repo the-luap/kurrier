@@ -197,14 +197,15 @@ async function backfillMailboxFullLocked(opts: BackfillMailboxOpts) {
 	)) {
 
 		const m = msg as FetchMessageObject;
-		const raw = m.source ? m.source.toString() : "";
-		if (!raw) {
+		// Raw bytes: parseAndStoreEmail decodes the charsets itself.
+		const raw = m.source;
+		if (!raw?.length) {
 			throw new Error(
 				`IMAP backfill returned empty source identity=${identityId} mailbox=${path} uid=${m.uid}`,
 			);
 		}
 
-		const size = m.size ?? Buffer.byteLength(raw, "utf8");
+		const size = m.size ?? raw.length;
 
 
 		batchBytes += size;

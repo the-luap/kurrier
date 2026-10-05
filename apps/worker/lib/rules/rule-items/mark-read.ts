@@ -59,7 +59,7 @@ export const markAsRead = async (
                         {
                             jobId: `refresh-${threadId}`,
                             removeOnComplete: true,
-                            removeOnFail: false,
+                            removeOnFail: true,
                             attempts: 3,
                             backoff: { type: "exponential", delay: 1500 },
                         },

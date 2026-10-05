@@ -94,6 +94,8 @@ export async function mailSetFlags(
 		if (op === "unread") update.seen = false;
 		if (op === "flag") update.flagged = true;
 		if (op === "unflag") update.flagged = false;
+		if (op === "answered") update.answered = true;
+		if (op === "unanswered") update.answered = false;
 
 		await tx
 			.update(messages)
