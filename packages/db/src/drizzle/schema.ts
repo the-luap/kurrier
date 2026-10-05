@@ -714,6 +714,8 @@ export const messages = pgTable(
 		uniqueIndex("uniq_message_public_id").on(t.publicId),
 		index("idx_messages_priority").on(t.priority),
 		index("ix_messages_workspace").on(t.workspaceId),
+		// fork (db/init/migrations/fork_004_indexes.sql): dashboard counts per workspace
+		index("ix_messages_workspace_created").on(t.workspaceId, t.createdAt),
 
 
 		uniqueIndex("uniq_mailbox_message_id").on(t.mailboxId, t.messageId),
@@ -856,6 +858,10 @@ export const mailboxThreads = pgTable(
 		index("ix_mbth_mailbox_starred").on(t.mailboxId, t.starred),
 
 		index("ix_mbth_mailbox_snoozed_until").on(t.mailboxId, t.snoozedUntil),
+		// fork (fork_004_indexes.sql): account-wide snoozed view
+		index("ix_mbth_workspace_snoozed_until")
+			.on(t.workspaceId, t.snoozedUntil)
+			.where(sql`${t.snoozedUntil} IS NOT NULL`),
 		index("ix_mbth_mailbox_unsnoozed_at").on(t.mailboxId, t.unsnoozedAt),
 		pgPolicy("mailbox_threads_select", {
 			for: "select",
@@ -1422,6 +1428,10 @@ export const calendarEvents = pgTable(
 		index("ix_calendar_events_organizer_identity").on(t.organizerIdentityId),
 		uniqueIndex("ux_calendar_events_calendar_ical_uid")
 			.on(t.calendarId, t.icalUid)
+			.where(sql`${t.icalUid} IS NOT NULL`),
+		// fork (fork_004_indexes.sql): invitation lookup by iCal UID across calendars
+		index("ix_calendar_events_workspace_ical_uid")
+			.on(t.workspaceId, t.icalUid)
 			.where(sql`${t.icalUid} IS NOT NULL`),
 		...workspaceCrudPolicies(t, "calendar_events"),
 	],
@@ -2324,5 +2334,90 @@ export const driveShareLinks = pgTable(
 		index("ix_drive_share_links_entry").on(t.entryId),
 		index("ix_drive_share_links_expires").on(t.expiresAt),
 		...workspaceCrudPolicies(t, "drive_share_links"),
+	],
+).enableRLS();
+
+// ---------------------------------------------------------------------------
+// Fork: per-user AI provider settings (Ollama / LM Studio).
+// Migration: db/init/migrations/fork_001_user_ai_settings.sql (see db/FORK_MIGRATIONS.md).
+// Rows are private to (workspace, user): unlike workspaceCrudPolicies, every
+// policy also requires owner_id = current user.
+// The API key belongs in the vault (secrets_meta, via createSecret with
+// managedBy "system"); apiKeySecretId references it. apiKey is the legacy
+// plaintext column carried over from the v3 fork: move it into the vault on
+// the next save and set it to null.
+// ---------------------------------------------------------------------------
+const userAiSettingsOwnRow = (t: { workspaceId: any; ownerId: any }) =>
+	sql`${t.workspaceId} = ${authWorkspaceId} AND ${t.ownerId} = ${authUid}`;
+
+export const userAiSettings = pgTable(
+	"user_ai_settings",
+	{
+		id: uuid("id").defaultRandom().primaryKey(),
+
+		workspaceId: uuid("workspace_id")
+			.references(() => workspaces.id, { onDelete: "cascade" })
+			.notNull()
+			.default(authWorkspaceId),
+
+		ownerId: uuid("owner_id")
+			.references(() => users.id, { onDelete: "cascade" })
+			.notNull()
+			.default(authUid),
+
+		provider: text("provider").notNull().default("ollama"),
+		baseUrl: text("base_url").notNull().default("http://localhost:11434"),
+		model: text("model").notNull().default("gemma3:12b"),
+
+		/** @deprecated legacy plaintext key from the v3 fork; use apiKeySecretId */
+		apiKey: text("api_key"),
+		apiKeySecretId: uuid("api_key_secret_id").references(
+			() => secretsMeta.id,
+			{ onDelete: "set null" },
+		),
+
+		systemPrompt: text("system_prompt"),
+		temperature: numeric("temperature", { precision: 4, scale: 2 })
+			.notNull()
+			.default("0.4"),
+		maxTokens: integer("max_tokens").notNull().default(700),
+		enabled: boolean("enabled").notNull().default(false),
+
+		createdAt: timestamp("created_at", { withTimezone: true })
+			.defaultNow()
+			.notNull(),
+		updatedAt: timestamp("updated_at", { withTimezone: true })
+			.defaultNow()
+			.notNull(),
+	},
+	(t) => [
+		uniqueIndex("ux_user_ai_settings_workspace_owner_provider").on(
+			t.workspaceId,
+			t.ownerId,
+			t.provider,
+		),
+		index("ix_user_ai_settings_owner").on(t.ownerId),
+		index("ix_user_ai_settings_api_key_secret").on(t.apiKeySecretId),
+		pgPolicy("user_ai_settings_select_own", {
+			for: "select",
+			to: "kurrier",
+			using: userAiSettingsOwnRow(t),
+		}),
+		pgPolicy("user_ai_settings_insert_own", {
+			for: "insert",
+			to: "kurrier",
+			withCheck: userAiSettingsOwnRow(t),
+		}),
+		pgPolicy("user_ai_settings_update_own", {
+			for: "update",
+			to: "kurrier",
+			using: userAiSettingsOwnRow(t),
+			withCheck: userAiSettingsOwnRow(t),
+		}),
+		pgPolicy("user_ai_settings_delete_own", {
+			for: "delete",
+			to: "kurrier",
+			using: userAiSettingsOwnRow(t),
+		}),
 	],
 ).enableRLS();

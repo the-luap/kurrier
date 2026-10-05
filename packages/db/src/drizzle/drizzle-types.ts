@@ -19,6 +19,7 @@ import {
     driveVolumes,
     driveEntries,
     draftMessages, mailSubscriptions, users, workspaces, emailAssets,
+    userAiSettings,
 } from "./schema";
 import { z } from "zod";
 import {
@@ -122,3 +123,8 @@ export type WorkspaceEntity = typeof workspaces.$inferSelect;
 
 export type EmailAssetEntity = typeof emailAssets.$inferSelect;
 export type EmailAssetInsert = typeof emailAssets.$inferInsert;
+
+// Fork: per-user AI provider settings (fork_001_user_ai_settings.sql)
+export type UserAiSettingsEntity = typeof userAiSettings.$inferSelect;
+export type UserAiSettingsCreate = typeof userAiSettings.$inferInsert;
+export type UserAiSettingsUpdate = Partial<UserAiSettingsCreate>;
