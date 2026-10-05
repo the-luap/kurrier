@@ -1,6 +1,6 @@
 import {JobScheduler, Worker} from "bullmq";
 import { defineNitroPlugin } from "nitropack/runtime";
-import { redisConnection } from "../../lib/get-redis";
+import { redisConnection, workerOptions } from "../../lib/get-redis";
 import { createCalendarEvent } from "../../lib/dav/calendar/dav-create-calendar-event";
 import { deleteCalendarEvent } from "../../lib/dav/calendar/dav-delete-calendar-event";
 import { updateCalendarEvent } from "../../lib/dav/calendar/dav-update-calendar-event";
@@ -15,6 +15,8 @@ import {davSyncDb} from "../../lib/dav/sync/dav-sync-db";
 import {pushUpdateContact} from "../../lib/dav/dav-update-contact";
 import {deleteContact} from "../../lib/dav/dav-delete-contact";
 import {davSyncCalendarsDb} from "../../lib/dav/calendar/dav-sync-calendar-db";
+import { contacts, db } from "@db";
+import { and, inArray, isNotNull } from "drizzle-orm";
 
 export default defineNitroPlugin(async (nitroApp) => {
 	const connection = redisConnection.connection
@@ -84,13 +86,45 @@ export default defineNitroPlugin(async (nitroApp) => {
 					});
 
 				case "dav:create-contacts-batch": {
-					const { ownerId, contactIds } = job.data;
+					const { ownerId } = job.data;
+					// Older producers sent null / "null" for messages without a
+					// contact, and the same sender once per message.
+					const contactIds: string[] = [
+						...new Set<string>(
+							(job.data.contactIds ?? []).filter(
+								(id: unknown) =>
+									typeof id === "string" && id !== "" && id !== "null",
+							),
+						),
+					];
 
 					console.log(
 						`[DAV WORKER] Processing contacts batch (${contactIds.length})`,
 					);
+					// Every stored message enqueues its sender: skip contacts that
+					// already have a DAV card (the If-None-Match PUT would only fail
+					// after a secret lookup and an HTTP round trip).
+					const alreadySynced = new Set(
+						contactIds.length
+							? (
+									await db
+										.select({ id: contacts.id })
+										.from(contacts)
+										.where(
+											and(
+												inArray(contacts.id, contactIds),
+												isNotNull(contacts.davUri),
+											),
+										)
+								).map((r) => r.id)
+							: [],
+					);
 					const results = [];
 					for (const id of contactIds) {
+						if (alreadySynced.has(id)) {
+							results.push({ id, success: true, skipped: true });
+							continue;
+						}
 						try {
 							const r = await createContact(id, ownerId);
 							results.push({ id, success: true, result: r });
@@ -113,7 +147,7 @@ export default defineNitroPlugin(async (nitroApp) => {
 					return { success: true, skipped: true };
 			}
 		},
-		{ connection, concurrency: 1 },
+		workerOptions({ concurrency: 1 }),
 	);
 
 

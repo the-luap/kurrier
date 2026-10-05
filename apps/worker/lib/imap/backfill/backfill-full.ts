@@ -69,7 +69,25 @@ type BackfillMailboxOpts = {
 
 const DEFAULT_WINDOW = 300;
 
+/**
+ * Holds the mailbox lock for the whole batch: the client is shared with delta
+ * fetch and flag/move jobs, which could otherwise select another mailbox in
+ * the middle of the fetch.
+ */
 async function backfillMailboxFull(opts: BackfillMailboxOpts) {
+	if (opts.quota.limit <= 0) return;
+
+	const lock = await opts.client.getMailboxLock(opts.path, {
+		readOnly: true,
+	});
+	try {
+		await backfillMailboxFullLocked(opts);
+	} finally {
+		lock.release();
+	}
+}
+
+async function backfillMailboxFullLocked(opts: BackfillMailboxOpts) {
 	const {
 		client,
 		identityId,

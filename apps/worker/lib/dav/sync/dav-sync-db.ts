@@ -5,7 +5,7 @@ import {
 	contacts,
 	db,
 } from "@db";
-import {and, eq, isNull} from "drizzle-orm";
+import {and, eq, inArray, isNull} from "drizzle-orm";
 import {davAddressbooks, davCards, DavCardsEntity, davDb} from "../dav-schema";
 import { parseVCardToContact } from "./dav-vcard";
 import { nanoid } from "nanoid";
@@ -121,18 +121,22 @@ const syncBook = async (book: AddressBookEntity) => {
 
 	const remoteUris = new Set<string>();
 
+	// Load the local state once instead of one SELECT per card and one
+	// DELETE per row (this runs on every sync tick).
+	const localContacts = await db
+		.select()
+		.from(contacts)
+		.where(eq(contacts.addressBookId, book.id));
+	const localByUri = new Map(
+		localContacts
+			.filter((c) => c.davUri)
+			.map((c) => [c.davUri as string, c]),
+	);
+
 	for (const card of cards) {
 		remoteUris.add(card.uri);
 
-		const [localContact] = await db
-			.select()
-			.from(contacts)
-			.where(
-				and(
-					eq(contacts.addressBookId, book.id),
-					eq(contacts.davUri, card.uri),
-				),
-			);
+		const localContact = localByUri.get(card.uri);
 
 		if (localContact) {
 			if (normalizeEtag(card.etag) !== localContact.davEtag) {
@@ -143,15 +147,12 @@ const syncBook = async (book: AddressBookEntity) => {
 		}
 	}
 
-	const localContacts = await db
-		.select()
-		.from(contacts)
-		.where(eq(contacts.addressBookId, book.id));
+	const staleIds = localContacts
+		.filter((local) => local.davUri && !remoteUris.has(local.davUri))
+		.map((local) => local.id);
 
-	for (const local of localContacts) {
-		if (local.davUri && !remoteUris.has(local.davUri)) {
-			await db.delete(contacts).where(eq(contacts.id, local.id));
-		}
+	if (staleIds.length) {
+		await db.delete(contacts).where(inArray(contacts.id, staleIds));
 	}
 
 	await db.update(addressBooks)

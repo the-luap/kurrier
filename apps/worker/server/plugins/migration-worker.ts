@@ -1,10 +1,9 @@
 import { defineNitroPlugin } from "nitropack/runtime";
 import {runMigrationsForWorkspace} from "../../lib/migrations/run-migration";
-import { redisConnection } from "../../lib/get-redis";
+import { workerOptions } from "../../lib/get-redis";
 import { Worker } from "bullmq";
 
-async function runAllUserMigrations() {
-	const connection = redisConnection.connection
+function startMigrationWorker() {
 	const worker = new Worker(
 		"migration-worker",
 		async (job) => {
@@ -15,7 +14,7 @@ async function runAllUserMigrations() {
 					return { success: true, skipped: true };
 			}
 		},
-		{ connection },
+		workerOptions(),
 	);
 	worker.on("completed", (job) => {
 		console.info(`Migration job ${job.id} (${job.name}) completed`);
@@ -26,8 +25,14 @@ async function runAllUserMigrations() {
 			`Migration job ${job?.id} (${job?.name}) failed: ${err.message}`,
 		);
 	});
+	return worker;
 }
 
-export default defineNitroPlugin(async () => {
-	await runAllUserMigrations();
+export default defineNitroPlugin(async (nitroApp) => {
+	const worker = startMigrationWorker();
+	nitroApp.hooks.hookOnce("close", async () => {
+		await worker.close().catch((err: any) => {
+			console.error("Error closing migration worker:", err?.message ?? err);
+		});
+	});
 });

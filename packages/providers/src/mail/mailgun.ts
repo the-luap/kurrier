@@ -354,7 +354,10 @@ export class MailgunMailer implements Mailer {
 			return { success: true, MessageId: id };
 		} catch (err) {
 			console.error("mailgun sendEmail error", err);
-			return { success: false };
+			return {
+				success: false,
+				error: err instanceof Error ? err.message : String(err),
+			};
 		}
 	}
 }

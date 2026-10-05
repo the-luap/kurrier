@@ -1,7 +1,7 @@
 import { db, messages, mailboxThreads, mailboxes, identities, workspaces } from "@db";
 import { messagesSearchSchema } from "@schema";
 import { getMessageAddress, getMessageName } from "@common/mail-client";
-import { and, eq } from "drizzle-orm";
+import { and, asc, eq, gt } from "drizzle-orm";
 import client from "../../lib/get-typesense";
 import { toSearchDoc } from "./search-common";
 
@@ -17,7 +17,9 @@ export const rebuild = async () => {
 	await client.collections().create(messagesSearchSchema);
 	console.log("[typesense] created collection messages");
 
-	let offset = 0;
+	// Keyset pagination by id: limit/offset without ORDER BY could skip or
+	// duplicate rows, and large offsets get slower with every page.
+	let lastId: string | null = null;
 	let imported = 0;
 
 	while (true) {
@@ -49,8 +51,9 @@ export const rebuild = async () => {
 			.innerJoin(mailboxes, eq(messages.mailboxId, mailboxes.id))
 			.innerJoin(identities, eq(mailboxes.identityId, identities.id))
 			.innerJoin(workspaces, eq(identities.workspaceId, workspaces.id))
-			.limit(BATCH_SIZE)
-			.offset(offset);
+			.where(lastId ? gt(messages.id, lastId) : undefined)
+			.orderBy(asc(messages.id))
+			.limit(BATCH_SIZE);
 
 		if (batch.length === 0) break;
 
@@ -93,13 +96,18 @@ export const rebuild = async () => {
 			});
 		});
 
-		const result = await client.collections("messages").documents().import(docs, { action: "upsert" });
+		// throwOnFail: false, so a few bad documents are reported below
+		// instead of aborting the whole rebuild.
+		const result = await client
+			.collections("messages")
+			.documents()
+			.import(docs, { action: "upsert", throwOnFail: false });
 
 		const failed = result.filter((r: any) => r.success !== true);
 		if (failed.length) console.warn("[typesense] some docs failed", failed.slice(0, 5));
 
 		imported += docs.length;
-		offset += BATCH_SIZE;
+		lastId = batch[batch.length - 1].m.id;
 
 		console.log(`[typesense] upserted ${imported}`);
 	}

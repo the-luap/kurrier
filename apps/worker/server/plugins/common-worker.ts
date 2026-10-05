@@ -1,6 +1,6 @@
 import { defineNitroPlugin } from "nitropack/runtime";
 import { JobScheduler, Worker } from "bullmq";
-import { redisConnection } from "../../lib/get-redis";
+import { redisConnection, workerOptions } from "../../lib/get-redis";
 import {db, mailboxThreads, messages, providers} from "@db";
 import {INBOUND_SPEC, JMAP_SPEC, MAILTRAP_SPEC, PROVIDERS, STORAGE_PROVIDERS} from "@schema";
 import { kvDel, kvGet, kvSet } from "@common";
@@ -88,7 +88,7 @@ export default defineNitroPlugin(async (nitroApp) => {
 				case "webhook:message.received": {
 					const { messageId, rawStorageKey } = job.data as {
 						messageId: string;
-						rawStorageKey: string;
+						rawStorageKey: string | null;
 					};
 
 					const [message] = await db
@@ -101,20 +101,25 @@ export default defineNitroPlugin(async (nitroApp) => {
 						return { success: false, reason: "message-not-found" };
 					}
 
-					const response = await s3.send(
-						new GetObjectCommand({
-							Bucket: process.env.S3_BUCKET!,
-							Key: rawStorageKey,
-						}),
-					);
-
-					if (!response.Body) {
-						throw new Error(
-							`Raw email not found in storage: ${rawStorageKey}`,
+					// The raw source is missing when its upload failed during
+					// ingestion: deliver the webhook without it.
+					let rawEmail = "";
+					if (rawStorageKey) {
+						const response = await s3.send(
+							new GetObjectCommand({
+								Bucket: process.env.S3_BUCKET!,
+								Key: rawStorageKey,
+							}),
 						);
-					}
 
-					const rawEmail = await response.Body.transformToString();
+						if (!response.Body) {
+							throw new Error(
+								`Raw email not found in storage: ${rawStorageKey}`,
+							);
+						}
+
+						rawEmail = await response.Body.transformToString();
+					}
 
 					await processWebhook({ message, rawEmail });
 
@@ -149,7 +154,7 @@ export default defineNitroPlugin(async (nitroApp) => {
 					return { success: true };
 			}
 		},
-		{ connection },
+		workerOptions(),
 	);
 
 	const scheduler = new JobScheduler("common-worker", { connection });
@@ -186,21 +191,21 @@ export default defineNitroPlugin(async (nitroApp) => {
 			console.info(`ℹ️ Using existing tunnel URL from Redis: ${existing}`);
 		}
 
-		nitroApp.hooks.hookOnce("close", async () => {
-			console.info("Closing common-worker tunnel");
-		});
 	} else {
 		console.info("Local tunnel not enabled");
 		await kvDel("local-tunnel-url");
-		nitroApp.hooks.hookOnce("close", async () => {
-			try {
-				await Promise.allSettled([
-					worker?.close(),
-					scheduler?.close(),
-				]);
-			} catch (err: any) {
-				console.error("Error closing BullMQ resources:", err?.message ?? err);
-			}
-		});
 	}
+
+	// Always close the worker and scheduler (it used to happen only when the
+	// local tunnel was disabled).
+	nitroApp.hooks.hookOnce("close", async () => {
+		try {
+			await Promise.allSettled([
+				worker?.close(),
+				scheduler?.close(),
+			]);
+		} catch (err: any) {
+			console.error("Error closing BullMQ resources:", err?.message ?? err);
+		}
+	});
 });

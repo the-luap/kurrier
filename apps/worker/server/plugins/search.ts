@@ -1,7 +1,7 @@
 import { defineNitroPlugin } from "nitropack/runtime";
 import { Worker } from "bullmq";
 
-import { redisConnection } from "../../lib/get-redis";
+import { workerOptions } from "../../lib/get-redis";
 import { rebuild } from "../../lib/search/search-rebuild";
 import {
 	indexMessage,
@@ -16,7 +16,6 @@ const { SEARCH_REBUILD_ON_BOOT } = getServerEnv();
 export default defineNitroPlugin(async (nitroApp) => {
 	console.log("[typesense] boot");
 
-	const connection = redisConnection.connection
 
 	const worker = new Worker(
 		"search-ingest",
@@ -50,7 +49,7 @@ export default defineNitroPlugin(async (nitroApp) => {
 					return { success: true };
 			}
 		},
-		{ connection },
+		workerOptions(),
 	);
 
 	worker.on("completed", async (job) => {

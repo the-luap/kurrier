@@ -9,7 +9,7 @@ import { initSmtpClient } from "../../lib/imap/imap-client";
 import { mailSetFlags } from "../../lib/imap/imap-flags";
 import { moveMail } from "../../lib/imap/imap-move";
 
-import {getRedis, redisConnection} from "../../lib/get-redis";
+import {getRedis, redisConnection, workerOptions} from "../../lib/get-redis";
 import { deleteMail } from "../../lib/imap/imap-delete";
 import { addNewFolder } from "../../lib/imap/imap-new-folder";
 import { deleteFolder } from "../../lib/imap/imap-delete-folder";
@@ -231,10 +231,9 @@ export default defineNitroPlugin(async (nitroApp) => {
 			}
 			return { success: true };
 		},
-		{
-			connection,
+		workerOptions({
 			lockDuration: 5 * 60 * 1000,
-		},
+		}),
 	);
 
 	void imapIdleSync(idleImapInstances, imapInstances).catch((err) => {

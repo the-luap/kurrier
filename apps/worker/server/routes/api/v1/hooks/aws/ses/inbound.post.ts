@@ -2,6 +2,7 @@ import { defineEventHandler, readRawBody } from "h3";
 import {
 	db,
 	decryptAdminSecrets,
+	identities,
 	mailboxes,
 	providers,
 	providerSecrets,
@@ -9,7 +10,7 @@ import {
 import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 
 import { simpleParser } from "mailparser";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { parseAndStoreEmail } from "../../../../../../../lib/message-payload-parser";
 import {MessageValidator} from "aws-sns-validator";
 const snsValidator = new MessageValidator();
@@ -69,7 +70,73 @@ export default defineEventHandler(async (event) => {
 			const key: string = decodeURIComponent(rec.s3?.object?.key || "");
 			// const size: number = rec.s3?.object?.size ?? 0;
 
-			const [, ownerId, providerId, identityId, emlId] = key.split("/");
+			const parts = key.split("/");
+			const [prefix, ownerId, providerId, identityId, emlId] = parts;
+			if (
+				parts.length !== 5 ||
+				prefix !== "inbound" ||
+				!ownerId ||
+				!providerId ||
+				!identityId ||
+				!emlId
+			) {
+				console.warn("[Webhook] Unexpected S3 key layout, ignoring.", { key });
+				return { ok: true };
+			}
+
+			// A validly signed SNS message can come from any AWS account's
+			// topic: the key (owner/provider/identity) and bucket are attacker
+			// controlled until they are checked against the stored provider.
+			const [provider] = await db
+				.select()
+				.from(providers)
+				.where(eq(providers.id, providerId));
+
+			if (
+				!provider ||
+				provider.ownerId !== ownerId ||
+				provider.type !== "ses"
+			) {
+				console.warn("[Webhook] No matching SES provider for S3 key", { key });
+				return { ok: true };
+			}
+
+			// The notification must come from the bucket/topic bootstrapped for
+			// this provider; otherwise anyone could point us at arbitrary objects.
+			const resourceIds = (provider.metaData as any)?.verification
+				?.resourceIds as { bucket?: string; topicArn?: string } | undefined;
+			if (!resourceIds?.bucket || resourceIds.bucket !== bucket) {
+				console.warn("[Webhook] S3 bucket does not match provider", {
+					bucket,
+					providerId,
+				});
+				return { ok: true };
+			}
+			if (resourceIds.topicArn && resourceIds.topicArn !== sns.TopicArn) {
+				console.warn("[Webhook] SNS topic does not match provider", {
+					topicArn: sns.TopicArn,
+					providerId,
+				});
+				return { ok: true };
+			}
+
+			const [identity] = await db
+				.select()
+				.from(identities)
+				.where(
+					and(
+						eq(identities.id, identityId),
+						eq(identities.workspaceId, provider.workspaceId),
+					),
+				);
+			if (!identity) {
+				console.warn("[Webhook] SES identity does not belong to provider", {
+					identityId,
+					providerId,
+				});
+				return { ok: true };
+			}
+
 			const [secrets] = await decryptAdminSecrets({
 				linkTable: providerSecrets,
 				foreignCol: providerSecrets.providerId,
@@ -95,31 +162,31 @@ export default defineEventHandler(async (event) => {
 			);
 			const rawEmail = (await getObj?.Body?.transformToString("utf-8")) || "";
 
-			const parsed = await simpleParser(rawEmail);
+			// Parse once with the options parseAndStoreEmail needs and hand the
+			// result over instead of parsing the message twice. (No full mail
+			// dumps in the logs.)
+			const parsed = await simpleParser(rawEmail, { keepCidLinks: true });
 			const headers = parsed.headers as Map<string, any>;
-
-			console.dir(parsed, { depth: 10 });
 
 			const userMailboxes = await db
 				.select()
 				.from(mailboxes)
-				.where(eq(mailboxes.identityId, identityId));
+				.where(
+					and(
+						eq(mailboxes.identityId, identity.id),
+						eq(mailboxes.workspaceId, provider.workspaceId),
+					),
+				);
 
 			const inbox = userMailboxes.find((m) => m.kind === "inbox");
 			const spamMb = userMailboxes.find((m) => m.kind === "spam");
-			// const junkMb = userMailboxes.find(m => m.kind === "junk");
-			const [provider] = await db
-				.select()
-				.from(providers)
-				.where(eq(providers.id, providerId));
 
-			if (!inbox)
-				// throw new Error("No inbox mailbox found for identity " + identityId);
-				return
-			if (!spamMb)
-				// throw new Error("No spam mailbox found for identity " + identityId);
-				return
-			if (!provider) throw new Error("No provider found for id " + providerId);
+			if (!inbox) {
+				console.warn("[Webhook] No inbox mailbox for SES identity", {
+					identityId,
+				});
+				return { ok: true };
+			}
 
 			let providerSaysSpam = false;
 			if (provider?.type === "ses") {
@@ -135,15 +202,6 @@ export default defineEventHandler(async (event) => {
 					(virusVerdict !== "" && virusVerdict !== "PASS");
 			}
 
-			const authRes = String(headers.get("authentication-results") ?? "");
-			const spfFail = /spf=\s*fail/i.test(authRes);
-			const dkimFail = /dkim=\s*fail/i.test(authRes);
-			const dmarcFail = /dmarc=\s*fail/i.test(authRes);
-			const authSaysJunk = (spfFail && dkimFail && dmarcFail) || dmarcFail;
-
-			console.log("providerSaysSpam", providerSaysSpam);
-			console.log("authSaysJunk", authSaysJunk);
-
 			let targetMailboxId = inbox.id;
 			if (providerSaysSpam && spamMb) {
 				targetMailboxId = spamMb.id;
@@ -155,6 +213,7 @@ export default defineEventHandler(async (event) => {
 				mailboxId: targetMailboxId,
 				rawStorageKey: key, // S3 key
 				emlKey: emlId,
+				parsed,
 			});
 
 

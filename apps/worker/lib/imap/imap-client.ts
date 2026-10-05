@@ -2,10 +2,43 @@ import { db, decryptAdminSecrets, identities, smtpAccountSecrets } from "@db";
 import { eq } from "drizzle-orm";
 import { ImapFlow } from "imapflow";
 
+// In-flight connects per instance map + identity, so concurrent callers share
+// one connection instead of each opening one and leaking all but the last
+// (the second imapInstances.set() used to overwrite the first client).
+const pendingConnects = new WeakMap<
+	Map<string, ImapFlow>,
+	Map<string, Promise<ImapFlow | undefined>>
+>();
+
 export const initSmtpClient = async (
 	identityId: string,
 	imapInstances: Map<string, ImapFlow>,
-) => {
+): Promise<ImapFlow | undefined> => {
+	const existing = imapInstances.get(identityId);
+
+	if (existing?.authenticated && existing?.usable) {
+		return existing;
+	}
+
+	let pending = pendingConnects.get(imapInstances);
+	if (!pending) {
+		pending = new Map();
+		pendingConnects.set(imapInstances, pending);
+	}
+	const inFlight = pending.get(identityId);
+	if (inFlight) return inFlight;
+
+	const connecting = connectClient(identityId, imapInstances).finally(() => {
+		pending.delete(identityId);
+	});
+	pending.set(identityId, connecting);
+	return connecting;
+};
+
+async function connectClient(
+	identityId: string,
+	imapInstances: Map<string, ImapFlow>,
+): Promise<ImapFlow | undefined> {
 	const existing = imapInstances.get(identityId);
 
 	if (existing?.authenticated && existing?.usable) {
@@ -16,6 +49,9 @@ export const initSmtpClient = async (
 
 		try {
 			existing.removeAllListeners();
+			// Keep a no-op error listener: a late "error" from the closing
+			// socket must not become an uncaught exception.
+			existing.on("error", () => {});
 			existing.close();
 		} catch (err) {
 			console.warn(
@@ -104,7 +140,9 @@ export const initSmtpClient = async (
 			console.warn(`[IMAP:${identityId}] Disconnected (close)`);
 		});
 
-		client.once("error", (err) => {
+		// `on`, not `once`: a second "error" event without a listener would
+		// crash the process.
+		client.on("error", (err) => {
 			console.error(`[IMAP:${identityId}] Error:`, err);
 
 			if (imapInstances.get(identityId) === client) {
@@ -126,6 +164,7 @@ export const initSmtpClient = async (
 
 			try {
 				client.removeAllListeners();
+				client.on("error", () => {});
 				client.close();
 			} catch {}
 
@@ -139,4 +178,4 @@ export const initSmtpClient = async (
 		console.error(`[IMAP:${identityId}] init failed`, err);
 		throw err;
 	}
-};
+}

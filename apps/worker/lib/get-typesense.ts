@@ -17,6 +17,9 @@ const client = new Typesense.Client({
 		},
 	],
 	apiKey: TYPESENSE_API_KEY,
+	// The default 5 s timeout is too short for bulk imports, which then got
+	// re-sent while Typesense was still processing them.
+	connectionTimeoutSeconds: 60,
 });
 
 export default client;

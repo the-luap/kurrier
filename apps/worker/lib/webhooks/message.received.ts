@@ -1,6 +1,8 @@
 import { db, mailboxes, MessageEntity, webhooks } from "@db";
 import { and, eq, isNull, or, sql } from "drizzle-orm";
 
+const WEBHOOK_TIMEOUT_MS = 15_000;
+
 export const processWebhook = async ({
 	message,
 	rawEmail,
@@ -20,6 +22,9 @@ export const processWebhook = async ({
 		.from(webhooks)
 		.where(
 			and(
+				// Webhooks without an identity apply to all identities of their
+				// workspace, not to every workspace's mail.
+				eq(webhooks.workspaceId, mailbox.workspaceId),
 				or(
 					eq(webhooks.identityId, mailbox.identityId),
 					isNull(webhooks.identityId),
@@ -29,23 +34,32 @@ export const processWebhook = async ({
 			),
 		);
 
-	for (const hook of hooks) {
-		try {
-			await fetch(hook.url, {
-				method: "POST",
-				body: JSON.stringify({
-					event: "message.received",
-					data: {
-						message,
-						rawEmail,
-					},
-				}),
-			});
-		} catch (err) {
-			console.error(
-				`Error sending webhook to ${hook.url}: `,
-				(err as Error).message,
-			);
-		}
-	}
+	if (!hooks.length) return;
+
+	const body = JSON.stringify({
+		event: "message.received",
+		data: {
+			message,
+			rawEmail,
+		},
+	});
+
+	// Deliver in parallel with a timeout: one slow endpoint used to block the
+	// common worker (and every other hook) indefinitely.
+	await Promise.all(
+		hooks.map(async (hook) => {
+			try {
+				await fetch(hook.url, {
+					method: "POST",
+					body,
+					signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
+				});
+			} catch (err) {
+				console.error(
+					`Error sending webhook to ${hook.url}: `,
+					(err as Error).message,
+				);
+			}
+		}),
+	);
 };

@@ -10,7 +10,7 @@ import { and, desc, eq, sql } from "drizzle-orm";
 import { parseAndStoreEmail } from "../message-payload-parser";
 import { initSmtpClient } from "./imap-client";
 import type { ImapFlow } from "imapflow";
-import { syncMailbox } from "./imap-sync-mailbox";
+import { NEEDS_SOURCE, syncMailbox } from "./imap-sync-mailbox";
 import { upsertMailboxThreadItem } from "@common";
 import { getRedis } from "../../lib/get-redis";
 import { canSyncIdentity } from "../access";
@@ -25,6 +25,13 @@ import { canSyncIdentity } from "../access";
  * - duplicate BullMQ work inside the same process
  */
 const runningDeltaFetches = new Map<string, Promise<void>>();
+
+/**
+ * Calls arriving while a delta runs (e.g. an EXISTS for mail that arrived
+ * after its mailbox was already scanned) are coalesced into one follow-up
+ * run instead of only joining the running sync.
+ */
+const rerunRequested = new Set<string>();
 
 async function runDeltaFetch(
 	identityId: string,
@@ -92,12 +99,18 @@ async function runDeltaFetch(
 			path,
 			window: 500,
 
-			onMessage: async (msg, path: string) => {
+			onMessage: async (
+				msg,
+				path: string,
+			): Promise<void | typeof NEEDS_SOURCE> => {
 				const messageId =
 					msg.envelope?.messageId?.trim() || null;
 
 				const uid = msg.uid;
 
+				// Pass 1 fetches envelopes only; the source is downloaded in a
+				// second pass for messages that have to be stored.
+				const hasSource = Boolean(msg.source);
 				const raw =
 					(await msg.source?.toString()) || "";
 
@@ -114,6 +127,7 @@ async function runDeltaFetch(
 					flags.has("\\Answered");
 
 				if (!messageId) {
+					if (!hasSource) return NEEDS_SOURCE;
 					console.warn(
 						`[deltaFetch] Missing Message-ID — path=${path} uid=${uid}`,
 					);
@@ -371,6 +385,8 @@ async function runDeltaFetch(
 					return;
 				}
 
+				if (!hasSource) return NEEDS_SOURCE;
+
 				await parseAndStoreEmail(
 					raw,
 					{
@@ -424,21 +440,39 @@ export const deltaFetch = async (
 
 	if (existing) {
 		console.log(
-			`[deltaFetch:${identityId}] already running; joining existing sync`,
+			`[deltaFetch:${identityId}] already running; joining existing sync and scheduling a follow-up run`,
 		);
 
+		rerunRequested.add(identityId);
 		return existing;
 	}
 
-	const running = runDeltaFetch(
-		identityId,
-		imapInstances,
-	).finally(() => {
+	const runLoop = async () => {
+		do {
+			rerunRequested.delete(identityId);
+			await runDeltaFetch(identityId, imapInstances);
+		} while (rerunRequested.has(identityId));
+	};
+
+	const running = runLoop().finally(() => {
 		if (
 			runningDeltaFetches.get(identityId) ===
 			running
 		) {
 			runningDeltaFetches.delete(identityId);
+		}
+
+		// If a run failed while new mail was announced, don't drop that
+		// request: start a fresh run.
+		if (rerunRequested.delete(identityId)) {
+			queueMicrotask(() => {
+				deltaFetch(identityId, imapInstances).catch((error) =>
+					console.error(
+						`[deltaFetch:${identityId}] follow-up run failed`,
+						error,
+					),
+				);
+			});
 		}
 	});
 

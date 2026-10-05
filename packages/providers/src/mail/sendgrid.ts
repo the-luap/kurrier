@@ -443,7 +443,10 @@ export class SendgridMailer implements Mailer {
 			};
 		} catch (err) {
 			console.error("sendEmail error", err);
-			return { success: false };
+			return {
+				success: false,
+				error: err instanceof Error ? err.message : String(err),
+			};
 		}
 	}
 }

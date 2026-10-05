@@ -2,7 +2,6 @@ import crypto from "node:crypto";
 import {
 	db,
 	decryptAdminSecrets,
-	identities,
 	mailboxes,
 	providerSecrets,
 	providers,
@@ -12,7 +11,10 @@ import { defineEventHandler, getHeader, getRouterParam, readRawBody } from "h3";
 import { simpleParser } from "mailparser";
 import { v4 as uuidv4 } from "uuid";
 import { parseAndStoreEmail } from "../../../../../../lib/message-payload-parser";
-import { getToEmails } from "../sendgrid/inbound.post";
+import {
+	collectRecipientCandidates,
+	findIdentityForRecipients,
+} from "../../../../../../lib/inbound-email";
 
 function safeEqual(a: string, b: string) {
 	const ab = Buffer.from(a);
@@ -185,26 +187,23 @@ async function processMailtrapMessage(
 		responseType: "text",
 	});
 
-	const parsed = await simpleParser(rawMime);
+	// Parsed once (keepCidLinks, as parseAndStoreEmail expects) and reused.
+	const parsed = await simpleParser(rawMime, { keepCidLinks: true });
 
-	const toAddress = getToEmails(parsed)[0];
-	if (!toAddress) {
+	// To and Cc, case-insensitive (only the first To matched before).
+	const candidates = collectRecipientCandidates(parsed);
+	if (!candidates.length) {
 		throw new Error("No recipient address in parsed message");
 	}
 
-	const [identity] = await db
-		.select()
-		.from(identities)
-		.where(
-			and(
-				eq(identities.value, toAddress),
-				eq(identities.workspaceId, workspaceId),
-			),
-		);
+	const identity = await findIdentityForRecipients(candidates, workspaceId);
 
 	if (!identity) {
-		throw new Error(`No identity found for toAddress ${toAddress}`);
+		throw new Error(
+			`No identity found for recipients ${candidates.join(", ")}`,
+		);
 	}
+	const toAddress = identity.value;
 
 	const emlId = uuidv4();
 	const rawStorageKey = `eml/${identity.ownerId}/${emlId}`;
@@ -245,6 +244,7 @@ async function processMailtrapMessage(
 		mailboxId: targetMailbox.id,
 		rawStorageKey,
 		emlKey: emlId,
+		parsed,
 	});
 
 	console.log(

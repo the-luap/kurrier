@@ -5,6 +5,13 @@ import { and, eq } from "drizzle-orm";
 export const sleep = (ms: number) =>
 	new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Returned by `onMessage` for a message fetched without its source when the
+ * full source is needed (unknown Message-ID): it is downloaded in a second
+ * pass and handed to `onMessage` again, now with `msg.source`.
+ */
+export const NEEDS_SOURCE = "needs-source" as const;
+
 export async function syncMailbox(opts: {
 	client: ImapFlow;
 	identityId: string;
@@ -19,7 +26,7 @@ export async function syncMailbox(opts: {
 		identityId: string,
 		workspaceId: string,
 		mailboxId: string,
-	) => Promise<void>;
+	) => Promise<void | typeof NEEDS_SOURCE>;
 }) {
 	const {
 		client,
@@ -161,6 +168,12 @@ export async function syncMailbox(opts: {
 			let maxUid = lastSeen;
 			let fetched = 0;
 
+			/*
+			 * Pass 1: envelopes and flags only. Downloading the full source of
+			 * every message in the window is wasteful when most of them are
+			 * already stored (re-syncs, moves, UIDVALIDITY replays).
+			 */
+			const envelopes: FetchMessageObject[] = [];
 			for await (const msg of client.fetch(
 				{ uid: range },
 				{
@@ -169,21 +182,16 @@ export async function syncMailbox(opts: {
 					flags: true,
 					internalDate: true,
 					size: true,
-					source: true,
 				},
 			)) {
+				envelopes.push(msg);
+			}
+
+			const needSource: number[] = [];
+			for (const msg of envelopes) {
 				fetched++;
 
-				console.log("[syncMailbox] fetched message", {
-					identityId,
-					mailboxId,
-					path,
-					uid: msg.uid,
-					messageId:
-						msg.envelope?.messageId ?? null,
-				});
-
-				await onMessage(
+				const result = await onMessage(
 					msg,
 					path,
 					identityId,
@@ -191,8 +199,47 @@ export async function syncMailbox(opts: {
 					mailboxId,
 				);
 
+				if (result === NEEDS_SOURCE && msg.uid) {
+					needSource.push(msg.uid);
+				}
+
 				if (msg.uid && msg.uid > maxUid) {
 					maxUid = msg.uid;
+				}
+			}
+
+			/*
+			 * Pass 2: full sources, only for messages onMessage could not
+			 * handle from the envelope (unknown Message-ID). onMessage checks
+			 * again, so a row that vanished in between is still downloaded.
+			 */
+			if (needSource.length) {
+				console.log("[syncMailbox] downloading sources", {
+					identityId,
+					mailboxId,
+					path,
+					range,
+					count: needSource.length,
+				});
+
+				for await (const msg of client.fetch(
+					{ uid: needSource.join(",") },
+					{
+						uid: true,
+						envelope: true,
+						flags: true,
+						internalDate: true,
+						size: true,
+						source: true,
+					},
+				)) {
+					await onMessage(
+						msg,
+						path,
+						identityId,
+						workspaceId,
+						mailboxId,
+					);
 				}
 			}
 

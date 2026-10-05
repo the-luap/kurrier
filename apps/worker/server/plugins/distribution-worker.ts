@@ -2,6 +2,7 @@ import { defineNitroPlugin } from "nitropack/runtime";
 import { JobScheduler, Worker } from "bullmq";
 import { redisConnection } from "@common";
 import { kurrierServer } from "@distribution/kurrier-server";
+import { workerOptions } from "../../lib/get-redis";
 
 export default defineNitroPlugin(async (nitroApp) => {
     const extensions = kurrierServer.workers.get();
@@ -11,10 +12,9 @@ export default defineNitroPlugin(async (nitroApp) => {
         const worker = new Worker(
             extension.queue,
             extension.handler,
-            {
-                ...redisConnection,
+            workerOptions({
                 concurrency: extension.concurrency ?? 1,
-            },
+            }),
         );
 
         worker.on("completed", async (job) => {

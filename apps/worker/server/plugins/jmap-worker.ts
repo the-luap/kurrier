@@ -4,7 +4,7 @@ import {
     Worker,
 } from "bullmq";
 
-import {getRedis, redisConnection} from "../../lib/get-redis";
+import {getRedis, redisConnection, workerOptions} from "../../lib/get-redis";
 
 import {
     db,
@@ -594,9 +594,7 @@ export default defineNitroPlugin(
                     }
                 }
             },
-            {
-                connection,
-            },
+            workerOptions(),
         );
 
         const scheduler =

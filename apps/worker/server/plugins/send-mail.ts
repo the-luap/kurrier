@@ -27,21 +27,16 @@ import {
 	threads,
 	getSecretAdmin,
 	jmapAccounts,
+	workspaceMembers,
+	workspaces,
 } from "@db";
 import { createMailer } from "@providers";
-import { toArray } from "drizzle-orm/mysql-core";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNotNull } from "drizzle-orm";
 import addressparser from "addressparser";
-import { getRedis } from "../../lib/get-redis";
+import { getRedis, workerOptions } from "../../lib/get-redis";
 import {GetObjectCommand, PutObjectCommand} from "@aws-sdk/client-s3";
 import {s3} from "../../lib/create-s3-client";
 import MailComposer from "nodemailer/lib/mail-composer/index.js";
-const connection = {
-	maxRetriesPerRequest: null,
-	password: serverConfig.REDIS_PASSWORD,
-	host: serverConfig.REDIS_HOST || "redis",
-	port: Number(serverConfig.REDIS_PORT || 6379),
-}
 
 type DbTransaction = Parameters<
 	Parameters<typeof db.transaction>[0]
@@ -79,7 +74,7 @@ export default defineNitroPlugin(async (nitroApp) => {
 					return { success: true };
 			}
 		},
-		{ connection },
+		workerOptions(),
 	);
 
 	worker.on("completed", (job) => {
@@ -89,7 +84,12 @@ export default defineNitroPlugin(async (nitroApp) => {
 		console.error(`[send-mail] ${job?.id} failed: ${err?.message}`);
 	});
 
-	const getOriginalMessage = async (decodedForm: Record<any, any>) => {
+	// Only messages of the sending identity's workspace may be quoted or
+	// replied to (the id comes from the client).
+	const getOriginalMessage = async (
+		decodedForm: Record<any, any>,
+		workspaceId: string,
+	) => {
 		const [message] = await db
 			.select({
 				message: messages,
@@ -103,7 +103,12 @@ export default defineNitroPlugin(async (nitroApp) => {
 			.leftJoin(identities, eq(mailboxes.identityId, identities.id))
 			.leftJoin(providers, eq(identities.providerId, providers.id))
 			.leftJoin(smtpAccounts, eq(identities.smtpAccountId, smtpAccounts.id))
-			.where(eq(messages.id, String(decodedForm.originalMessageId)));
+			.where(
+				and(
+					eq(messages.id, String(decodedForm.originalMessageId)),
+					eq(messages.workspaceId, workspaceId),
+				),
+			);
 
 		return message;
 	};
@@ -120,6 +125,46 @@ export default defineNitroPlugin(async (nitroApp) => {
 			})
 			.returning({ id: threads.id });
 		return t.id;
+	}
+
+	// Form fields arrive as comma separated strings (Mantine TagsInput) or
+	// arrays. Parse them with addressparser so "Name, Jr. <a@b.c>" stays one
+	// recipient and missing cc/bcc become [] instead of [undefined]. Only bare
+	// addresses go to the providers (some reject unencoded names).
+	function toArray(input: unknown): string[] {
+		const list = Array.isArray(input) ? input : [input];
+		const out: string[] = [];
+		for (const entry of list) {
+			const str = String(entry ?? "").trim();
+			if (!str) continue;
+			for (const p of addressparser(str)) {
+				if (p.address) out.push(p.address);
+			}
+		}
+		return Array.from(new Set(out));
+	}
+
+	function escapeHtml(value: string) {
+		return value
+			.replace(/&/g, "&amp;")
+			.replace(/</g, "&lt;")
+			.replace(/>/g, "&gt;")
+			.replace(/"/g, "&quot;");
+	}
+
+	// Stored messages may be complete HTML documents. Only the <body> content
+	// can be nested inside a <blockquote>; the original <style> blocks are
+	// dropped because they would also restyle the new reply text.
+	function extractBodyHtml(html: string) {
+		const bodyMatch = html.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i);
+		let body = bodyMatch ? bodyMatch[1] : html;
+		if (!bodyMatch) {
+			body = body
+				.replace(/<!doctype[^>]*>/gi, "")
+				.replace(/<head\b[^>]*>[\s\S]*?<\/head>/gi, "")
+				.replace(/<\/?html\b[^>]*>/gi, "");
+		}
+		return body.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "");
 	}
 
 	function toAddressObj(
@@ -166,7 +211,10 @@ export default defineNitroPlugin(async (nitroApp) => {
 		if (claimed.length === 0) return;
 
 		try {
-			await send(draft.payload);
+			const result = await send(draft.payload);
+			if (!result.success) {
+				throw new Error(result.error ?? "Failed to send email");
+			}
 
 			await db
 				.update(draftMessages)
@@ -189,8 +237,11 @@ export default defineNitroPlugin(async (nitroApp) => {
 		}
 	};
 
-	const send = async (decodedForm: Record<any, unknown>) => {
-		return await db.transaction(async (tx) => {
+	const send = async (
+		decodedForm: Record<any, unknown>,
+	): Promise<{ success: boolean; error?: string }> => {
+		let indexMessageId: string | null = null;
+		const result = await db.transaction(async (tx) => {
 			const [mailbox] = await tx
 				.select({
 					mailbox: mailboxes,
@@ -286,6 +337,10 @@ export default defineNitroPlugin(async (nitroApp) => {
 
 			const attachmentBlobs = await fetchAttachmentBlobs(
 				decodedForm.attachments as string,
+				{
+					identityOwnerId: mailbox.identity.ownerId,
+					workspaceId: mailbox.identity.workspaceId,
+				},
 			);
 
 			const data: MailComposeInput = {
@@ -304,12 +359,17 @@ export default defineNitroPlugin(async (nitroApp) => {
 				(data.mode === "reply" || data.mode === "forward") &&
 				decodedForm.originalMessageId
 			) {
-				origRow = await getOriginalMessage(decodedForm);
+				origRow =
+					(await getOriginalMessage(
+						decodedForm,
+						mailbox.identity.workspaceId,
+					)) ?? null;
 			}
 
 			const { subject, text, html } = await generateMailAttrs({
 				data,
 				orig: origRow,
+				workspaceId: mailbox.identity.workspaceId,
 			});
 
 			const mailboxIdForMessage = String(decodedForm.sentMailboxId);
@@ -371,8 +431,8 @@ export default defineNitroPlugin(async (nitroApp) => {
 
 			const mailerResponse = await mailer.sendEmail(data.to, {
 				from: mailbox.identity.value,
-				cc: data.cc ?? [],
-				bcc: data.bcc ?? [],
+				cc: data.cc,
+				bcc: data.bcc,
 				subject: String(newMessageBody.subject),
 				text: newMessageBody.text ?? "",
 				html: newMessageBody.html ?? "",
@@ -397,72 +457,99 @@ export default defineNitroPlugin(async (nitroApp) => {
 					.returning();
 
 
-				const emlBuffer = await buildEmlBuffer({
-					messageId: String(mailerResponse.MessageId) || `msg-${Date.now()}`,
-					from: mailbox.identity.value,
-					to: data.to || [],
-					cc: data.cc || [],
-					bcc: data.bcc || [],
-					subject: String(newMessage.subject || "(no subject)"),
-					text: newMessage.text,
-					html: newMessage.html,
-					inReplyTo,
-					references,
-					attachments: attachmentBlobs,
-				});
-				const rawStorageKey = `eml/${newMessage.ownerId}/${newMessage.mailboxId}/${newMessage.id}.eml`;
-				await s3.send(
-					new PutObjectCommand({
-						Bucket: serverConfig.S3_BUCKET,
-						Key: rawStorageKey,
-						Body: emlBuffer,
-						ContentType: "message/rfc822",
-					}),
-				);
-				await tx
-					.update(messages)
-					.set({
-						rawStorageKey,
-						sizeBytes: emlBuffer.length,
-					})
-					.where(eq(messages.id, newMessage.id));
-
-
-
-
-				for (const attachmentBlob of attachmentBlobs) {
-					await tx.insert(messageAttachments).values({
-						...attachmentBlob.item,
-						ownerId: newMessage.ownerId,
-						workspaceId: mailbox.mailbox.workspaceId,
-						messageId: newMessage.id,
+				// The mail is already sent: a failed EML build/upload must not roll
+				// back the stored message (the user would send it again).
+				try {
+					const emlBuffer = await buildEmlBuffer({
+						messageId: String(mailerResponse.MessageId) || `msg-${Date.now()}`,
+						from: mailbox.identity.value,
+						to: data.to || [],
+						cc: data.cc || [],
+						bcc: data.bcc || [],
+						subject: String(newMessage.subject || "(no subject)"),
+						text: newMessage.text,
+						html: newMessage.html,
+						inReplyTo,
+						references,
+						attachments: attachmentBlobs,
 					});
+					const rawStorageKey = `eml/${newMessage.ownerId}/${newMessage.mailboxId}/${newMessage.id}.eml`;
+					await s3.send(
+						new PutObjectCommand({
+							Bucket: serverConfig.S3_BUCKET,
+							Key: rawStorageKey,
+							Body: emlBuffer,
+							ContentType: "message/rfc822",
+						}),
+					);
+					await tx
+						.update(messages)
+						.set({
+							rawStorageKey,
+							sizeBytes: emlBuffer.length,
+						})
+						.where(eq(messages.id, newMessage.id));
+				} catch (error) {
+					console.error("[send-mail] failed to store sent EML", error);
+				}
+
+
+
+
+				if (attachmentBlobs.length) {
+					await tx.insert(messageAttachments).values(
+						attachmentBlobs.map((attachmentBlob) => ({
+							...attachmentBlob.item,
+							ownerId: newMessage.ownerId,
+							workspaceId: mailbox.mailbox.workspaceId,
+							messageId: newMessage.id,
+						})),
+					);
 				}
 
 				await upsertMailboxThreadItem(newMessage.id, tx);
 
-				const { searchIngestQueue } = await getRedis();
-				await searchIngestQueue.add(
-					"add",
-					{ messageId: newMessage.id },
-					{ removeOnComplete: true },
-				);
-			} else if (mailerResponse.error) {
+				indexMessageId = newMessage.id;
+			} else {
+				// Some providers only return { success: false } without details.
 				return {
 					success: false,
-					error: `Failed to send email: ${mailerResponse.error}`,
+					error: mailerResponse.error
+						? `Failed to send email: ${mailerResponse.error}`
+						: "Failed to send email. Check the provider settings of this identity.",
 				};
 			}
 			return { success: true };
 		});
+
+		// Enqueue indexing only after the transaction committed: from inside it
+		// a Redis error rolled back the row of a mail that was already sent, and
+		// the search worker could run before the row was visible. The mail is
+		// sent at this point, so a failed enqueue must not turn the result into
+		// an error (the user would send it again).
+		if (indexMessageId) {
+			try {
+				const { searchIngestQueue } = await getRedis();
+				await searchIngestQueue.add(
+					"add",
+					{ messageId: indexMessageId },
+					{ removeOnComplete: true },
+				);
+			} catch (error) {
+				console.error("[send-mail] failed to queue search indexing", error);
+			}
+		}
+		return result;
 	};
 
 	const generateMailAttrs = async ({
 										 data,
 										 orig,
+										 workspaceId,
 									 }: {
 		data: MailComposeInput;
 		orig: GetOriginalMessageType | null;
+		workspaceId: string;
 	}) => {
 		if (!orig) {
 			return {
@@ -499,33 +586,48 @@ export default defineNitroPlugin(async (nitroApp) => {
 			})
 			: "";
 
-		const origHtml = hasOrig ? origMsg!.html || origMsg!.textAsHtml || "" : "";
+		const origHtml = hasOrig
+			? await inlineCidImages(
+				origMsg!.html || origMsg!.textAsHtml || "",
+				origMsg!.id,
+				workspaceId,
+			)
+			: "";
 		const origText = hasOrig ? origMsg!.text || "" : "";
 
 		// Subject
+		// The composer pre-fills "Re:"/"Fwd:" subjects; honour user edits and
+		// only derive one from the original when the subject is empty.
 		const baseSubj = (data.subject ?? "").trim();
 		let subject = baseSubj;
-		if (isReply && hasOrig) {
+		if (!baseSubj && isReply && hasOrig) {
 			const s = (origMsg!.subject ?? "").trim();
-			subject = s.startsWith("Re:") ? s : `Re: ${s || "(no subject)"}`;
-		} else if (isForward && hasOrig) {
+			subject = /^(re|aw)\s*:/i.test(s) ? s : `Re: ${s || "(no subject)"}`;
+		} else if (!baseSubj && isForward && hasOrig) {
 			const s = (origMsg!.subject ?? "").trim();
-			subject = s.startsWith("Fwd:") ? s : `Fwd: ${s || "(no subject)"}`;
+			subject = /^(fwd?|wg)\s*:/i.test(s) ? s : `Fwd: ${s || "(no subject)"}`;
 		} else if (!baseSubj) {
 			subject = "(no subject)";
 		}
 
 		// Quoted blocks (only with original)
+		const attribution = `On ${origDateLabel}, ${fromNameStr ? `${fromNameStr} ` : ""}<${fromAddrStr}> wrote:`;
 		const quotedText = hasOrig
-			? `On ${origDateLabel}, ${fromNameStr} <${fromAddrStr}> wrote:\n${origText}`
+			? `${attribution}\n${origText
+				.split(/\r?\n/)
+				.map((line: string) => (line ? `> ${line}` : ">"))
+				.join("\n")}`
 			: "";
 
+		// The attribution and plain text come from the original sender: escape
+		// them. Only the <body> content of the original HTML is nested.
 		const quotedHtml = hasOrig
-			? `<hr>
-<p>On ${origDateLabel}, ${fromNameStr} &lt;${fromAddrStr}&gt; wrote:</p>
-<blockquote style="border-left:2px solid #ccc;margin:0;padding-left:8px;">
-  ${origHtml || `<pre style="white-space:pre-wrap;margin:0;">${origText}</pre>`}
-</blockquote>`
+			? `<br><div class="kurrier_quote">
+<p>${escapeHtml(attribution)}</p>
+<blockquote type="cite" style="border-left:2px solid #ccc;margin:0 0 0 0.8ex;padding-left:1ex;">
+${origHtml ? extractBodyHtml(origHtml) : `<pre style="white-space:pre-wrap;margin:0;font-family:inherit;">${escapeHtml(origText)}</pre>`}
+</blockquote>
+</div>`
 			: "";
 
 		// Bodies
@@ -554,14 +656,88 @@ export default defineNitroPlugin(async (nitroApp) => {
 		});
 	}
 
+	// Inline images of stored messages reference their attachment via "cid:"
+	// (messages are parsed with keepCidLinks). Quoted in a reply/forward those
+	// references would break, so embed them as data URIs (bounded, so huge
+	// mails do not explode).
+	async function inlineCidImages(
+		html: string,
+		messageId: string,
+		workspaceId: string,
+	): Promise<string> {
+		if (!html || !/cid:/i.test(html)) return html;
+		const rows = await db
+			.select()
+			.from(messageAttachments)
+			.where(
+				and(
+					eq(messageAttachments.messageId, messageId),
+					eq(messageAttachments.workspaceId, workspaceId),
+					isNotNull(messageAttachments.cid),
+				),
+			);
+		let budget = 8 * 1024 * 1024;
+		let out = html;
+		for (const row of rows) {
+			const cid = String(row.cid).replace(/^<|>$/g, "");
+			const size = Number(row.sizeBytes ?? 0);
+			if (!cid || !size || size > budget) continue;
+			try {
+				const response = await s3.send(
+					new GetObjectCommand({
+						Bucket: serverConfig.S3_BUCKET,
+						Key: String(row.path),
+					}),
+				);
+				if (!response.Body) continue;
+				const buffer = await streamToBuffer(response.Body);
+				budget -= buffer.length;
+				const uri = `data:${row.contentType || "application/octet-stream"};base64,${buffer.toString("base64")}`;
+				const escaped = cid.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+				out = out.replace(new RegExp(`cid:${escaped}`, "gi"), uri);
+			} catch (err) {
+				console.warn("[send-mail] could not inline quoted cid image", {
+					messageId,
+					path: row.path,
+					error: (err as Error)?.message,
+				});
+			}
+		}
+		return out;
+	}
+
+	/**
+	 * Users whose upload folder (`private/<userId>/`) the sender may attach
+	 * from: the identity owner and the members of the identity's workspace.
+	 */
+	async function allowedUploadOwners(opts: {
+		identityOwnerId: string;
+		workspaceId: string;
+	}) {
+		const allowed = new Set<string>([opts.identityOwnerId]);
+		const [workspace] = await db
+			.select({ ownerId: workspaces.ownerId })
+			.from(workspaces)
+			.where(eq(workspaces.id, opts.workspaceId))
+			.limit(1);
+		if (workspace?.ownerId) allowed.add(workspace.ownerId);
+		const members = await db
+			.select({ userId: workspaceMembers.userId })
+			.from(workspaceMembers)
+			.where(eq(workspaceMembers.workspaceId, opts.workspaceId));
+		for (const m of members) allowed.add(m.userId);
+		return allowed;
+	}
+
 	async function fetchAttachmentBlobs(
 		attachmentsString: string,
+		owner: { identityOwnerId: string; workspaceId: string },
 	): Promise<AttachmentDownload[]> {
 		let attachments: unknown = [];
 		try {
 			attachments = attachmentsString ? JSON.parse(attachmentsString) : [];
 		} catch {
-			return [];
+			throw new Error("Invalid attachments payload");
 		}
 
 		const list = Array.isArray(attachments) ? attachments : [];
@@ -569,41 +745,56 @@ export default defineNitroPlugin(async (nitroApp) => {
 
 		if (candidates.length === 0) return [];
 
-		try {
-			const downloads = await Promise.all(
-				candidates.map(async (attachment: any): Promise<AttachmentDownload> => {
-					const command = new GetObjectCommand({
-						Bucket: serverConfig.S3_BUCKET,
-						Key: String(attachment.path),
-					});
-
-					const response = await s3.send(command);
-
-					if (!response.Body) {
-						throw new Error(`Failed to download "${attachment.path}"`);
-					}
-
-					const buffer = await streamToBuffer(response.Body);
-
-					const item = MessageAttachmentInsertSchema.parse(attachment);
-					const uint8 = new Uint8Array(buffer);
-
-					return {
-						item,
-						blob: new Blob([uint8], {
-							type: String(attachment.contentType || "application/octet-stream"),
-						}),
-						name: String(attachment.filenameOriginal || "attachment"),
-						sizeBytes: buffer.length,
-					};
-				}),
-			);
-
-			return downloads;
-		} catch (e) {
-			console.error("fetchAttachmentBlobs error:", e);
-			return [];
+		// The list comes from the browser (or API caller) and is downloaded with
+		// the worker's bucket credentials: only allow files from the upload
+		// folder of a user of the sending identity's workspace
+		// (`private/<userId>/...`), never other users' EMLs or attachments.
+		const allowed = await allowedUploadOwners(owner);
+		for (const a of candidates as any[]) {
+			const path = String(a.path);
+			const [prefix, userId, ...rest] = path.split("/");
+			if (
+				prefix !== "private" ||
+				!userId ||
+				!allowed.has(userId) ||
+				rest.length === 0 ||
+				path.includes("..") ||
+				path.includes("//")
+			) {
+				throw new Error("Invalid attachment");
+			}
 		}
+
+		// A failed download aborts sending instead of silently sending the
+		// mail without its attachments.
+		return await Promise.all(
+			candidates.map(async (attachment: any): Promise<AttachmentDownload> => {
+				const command = new GetObjectCommand({
+					Bucket: serverConfig.S3_BUCKET,
+					Key: String(attachment.path),
+				});
+
+				const response = await s3.send(command);
+
+				if (!response.Body) {
+					throw new Error(`Failed to download "${attachment.path}"`);
+				}
+
+				const buffer = await streamToBuffer(response.Body);
+
+				const item = MessageAttachmentInsertSchema.parse(attachment);
+				const uint8 = new Uint8Array(buffer);
+
+				return {
+					item,
+					blob: new Blob([uint8], {
+						type: String(attachment.contentType || "application/octet-stream"),
+					}),
+					name: String(attachment.filenameOriginal || "attachment"),
+					sizeBytes: buffer.length,
+				};
+			}),
+		);
 	}
 
 

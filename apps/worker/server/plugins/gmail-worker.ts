@@ -5,7 +5,7 @@ import { sql } from "drizzle-orm";
 import {
     db, identities
 } from "@db";
-import {getRedis, redisConnection} from "../../lib/get-redis";
+import {getRedis, redisConnection, workerOptions} from "../../lib/get-redis";
 import { discoverGmailMailboxes } from "../../lib/gmail/gmail-discover";
 import { backfillGmailAccount } from "../../lib/gmail/gmail-backfill";
 import { deltaSyncGmailAccount } from "../../lib/gmail/gmail-delta";
@@ -176,7 +176,7 @@ export default defineNitroPlugin(async (nitroApp) => {
 
             return { success: true };
         },
-        { connection },
+        workerOptions(),
     );
 
     const scheduler = new JobScheduler("gmail-worker", { connection });

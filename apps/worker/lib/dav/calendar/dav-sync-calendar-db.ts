@@ -8,7 +8,7 @@ import {
 	CalendarEntity,
 	CalendarEventUpdateSchema,
 } from "@db";
-import { and, eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import {
 	davCalendarObjects,
 	DavCalendarObjectEntity,
@@ -248,18 +248,22 @@ const syncCalendar = async (
 
 	const remoteUris = new Set<string>();
 
+	// Load the local state once instead of one SELECT per object and one
+	// DELETE per row (this runs on every sync tick).
+	const localEvents = await db
+		.select()
+		.from(calendarEvents)
+		.where(eq(calendarEvents.calendarId, calendar.id));
+	const localByUri = new Map(
+		localEvents
+			.filter((e) => e.davUri)
+			.map((e) => [e.davUri as string, e]),
+	);
+
 	for (const obj of objs) {
 		remoteUris.add(obj.uri);
 
-		const [localEvent] = await db
-			.select()
-			.from(calendarEvents)
-			.where(
-				and(
-					eq(calendarEvents.calendarId, calendar.id),
-					eq(calendarEvents.davUri, obj.uri),
-				),
-			);
+		const localEvent = localByUri.get(obj.uri);
 
 		if (localEvent) {
 			if (normalizeEtag(obj.etag) !== localEvent.davEtag) {
@@ -270,15 +274,14 @@ const syncCalendar = async (
 		}
 	}
 
-	const localEvents = await db
-		.select()
-		.from(calendarEvents)
-		.where(eq(calendarEvents.calendarId, calendar.id));
+	const staleIds = localEvents
+		.filter((local) => local.davUri && !remoteUris.has(local.davUri))
+		.map((local) => local.id);
 
-	for (const local of localEvents) {
-		if (local.davUri && !remoteUris.has(local.davUri)) {
-			await db.delete(calendarEvents).where(eq(calendarEvents.id, local.id));
-		}
+	if (staleIds.length) {
+		await db
+			.delete(calendarEvents)
+			.where(inArray(calendarEvents.id, staleIds));
 	}
 };
 

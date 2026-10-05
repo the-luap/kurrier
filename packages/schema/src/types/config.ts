@@ -30,6 +30,9 @@ export const ZServerConfig = z.object({
 	S3_ACCESS_KEY: z.string("S3_ACCESS_KEY must be present"),
 	S3_SECRET_KEY: z.string("S3_SECRET_KEY must be present"),
 	S3_FORCE_PATH_STYLE: z.string("S3_FORCE_PATH_STYLE must be present"),
+	// Shared secret for the Mailgun/Postmark/SendGrid inbound webhooks. Required
+	// in production (the worker rejects inbound webhooks while it is unset).
+	INBOUND_WEBHOOK_SECRET: z.string().optional(),
 });
 
 /** Safe to expose to the browser */
@@ -87,17 +90,31 @@ export function parseEnv(env: RawEnv): {
 	};
 }
 
+// process.env does not change at runtime, so its parse result is reused.
+// These getters run many times per request (every queue, client and
+// action), and each call used to re-run the full zod validation.
+let _serverCache: ServerConfig | null = null;
+let _publicCache: PublicConfig | null = null;
+
 /** Return only server-side envs */
-export function getServerEnv(
-	env: RawEnv = process.env as unknown as RawEnv,
-): ServerConfig {
-	return parseServerConfig(env);
+export function getServerEnv(env?: RawEnv): ServerConfig {
+	if (env && env !== (process.env as unknown as RawEnv)) {
+		return parseServerConfig(env);
+	}
+	if (!_serverCache) {
+		_serverCache = parseServerConfig(process.env as unknown as RawEnv);
+	}
+	return _serverCache;
 }
 
-export function getPublicEnv(
-	env: RawEnv = process.env as unknown as RawEnv,
-): PublicConfig {
-	return parsePublicConfig(env);
+export function getPublicEnv(env?: RawEnv): PublicConfig {
+	if (env && env !== (process.env as unknown as RawEnv)) {
+		return parsePublicConfig(env);
+	}
+	if (!_publicCache) {
+		_publicCache = parsePublicConfig(process.env as unknown as RawEnv);
+	}
+	return _publicCache;
 }
 
 export function getEnv(env: RawEnv = process.env as unknown as RawEnv) {
