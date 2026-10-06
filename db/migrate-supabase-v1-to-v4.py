@@ -58,6 +58,7 @@ SKIP_GENERIC = {
     "migrations",
     "secrets_meta",
     "user_ai_settings",
+    "workspace_identity_members",
 }
 
 
@@ -520,6 +521,42 @@ def set_default_identities(target: psycopg.Connection[Any]) -> None:
         )
 
 
+def assign_identity_owners(target: psycopg.Connection[Any]) -> int:
+    """Keep migrated private identities visible to their original owners.
+
+    Legacy installations predate workspace_identity_members. In v4, an email
+    identity with shared_with_workspace=false is hidden by RLS unless it has an
+    explicit user assignment; matching owner_id alone is not sufficient.
+    """
+    with target.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO workspace_identity_members (workspace_id, identity_id, user_id)
+            SELECT workspace_id, id, owner_id
+            FROM identities
+            ON CONFLICT (workspace_id, identity_id, user_id) DO NOTHING
+            """
+        )
+        cur.execute(
+            """
+            SELECT count(*)
+            FROM identities i
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM workspace_identity_members wim
+                WHERE wim.workspace_id = i.workspace_id
+                  AND wim.identity_id = i.id
+                  AND wim.user_id = i.owner_id
+            )
+            """
+        )
+        missing = cur.fetchone()[0]
+        if missing:
+            raise RuntimeError(f"identity owner assignments missing after migration: {missing}")
+        cur.execute("SELECT count(*) FROM workspace_identity_members")
+        return cur.fetchone()[0]
+
+
 def validate_foreign_keys(target: psycopg.Connection[Any]) -> None:
     with target.cursor(row_factory=dict_row) as cur:
         cur.execute(
@@ -610,6 +647,7 @@ def main() -> int:
         ai_count = copy_ai_settings(source, target, workspaces, key)
         signature_count = migrate_signatures(source, target, workspaces)
         set_default_identities(target)
+        identity_assignment_count = assign_identity_owners(target)
 
         target.execute("SET LOCAL session_replication_role = origin")
         validate_foreign_keys(target)
@@ -620,6 +658,7 @@ def main() -> int:
     print(f"secrets={secret_count}")
     print(f"ai_settings={ai_count}")
     print(f"signatures={signature_count}")
+    print(f"identity_assignments={identity_assignment_count}")
     for table, count in sorted(copied.items()):
         print(f"{table}={count}")
     return 0
