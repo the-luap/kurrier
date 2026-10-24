@@ -1,4 +1,4 @@
-FROM node:24.20.0-alpine AS build
+FROM node:24.22.1-alpine AS build
 WORKDIR /repo
 RUN corepack enable && corepack prepare pnpm@10.18.3 --activate
 
@@ -20,7 +20,7 @@ RUN for d in .output/server/node_modules/nodemailer .output/server/node_modules/
       rm -rf "$d" && cp -RL node_modules/nodemailer "$d"; \
     done
 
-FROM node:24.20.0-alpine
+FROM node:24.22.1-alpine
 WORKDIR /app
 
 RUN apk add --no-cache postgresql-client bash

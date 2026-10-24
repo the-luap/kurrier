@@ -1,7 +1,7 @@
 # -----------------------------
 # Build stage
 # -----------------------------
-FROM node:22-alpine AS build
+FROM node:22.23.4-alpine AS build
 WORKDIR /repo
 RUN corepack enable && corepack prepare pnpm@10.18.3 --activate
 
@@ -74,13 +74,13 @@ ENV S3_FORCE_PATH_STYLE=$S3_FORCE_PATH_STYLE
 ENV WEB_URL=$WEB_URL
 # ---------------------------------------------
 
-RUN pnpm run build
+RUN NODE_OPTIONS=--max-old-space-size=4096 pnpm run build
 
 
 # -----------------------------
 # Runtime stage (standalone)
 # -----------------------------
-FROM node:22-alpine
+FROM node:22.23.4-alpine
 WORKDIR /app
 
 RUN apk add --no-cache postgresql-client bash

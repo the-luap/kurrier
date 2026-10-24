@@ -1,5 +1,5 @@
 # --- build ---
-FROM node:22-alpine AS build
+FROM node:22.23.4-alpine AS build
 WORKDIR /app
 
 # (optional, but helps some native deps on alpine)
@@ -14,7 +14,7 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN pnpm install --no-frozen-lockfile && pnpm run build
 
 # --- runtime ---
-FROM node:22-alpine AS runtime
+FROM node:22.23.4-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
